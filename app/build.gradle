@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.fantasy.autoexplore'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.fantasy.autoexplore"
+        minSdk 26
+        targetSdk 34
+        versionCode 38
+        versionName "0.38"
+        // ⚠ abiFilters 别写在 defaultConfig：它对 buildType 是「取并集」挡不掉，
+        //   且 Chaquopy 只认 defaultConfig/flavor 级（buildType 级直接报错）⇒ 走 flavor 维度（见下）
+    }
+
+    // ABI 按 flavor 拆（2026-09-29）：x86_64 全套（Python + onnxruntime ≈47MB）只为 MuMu 调试存在，
+    // 发版只打 arm64。构建：发版 assembleArm64Release / MuMu 调试 assembleFullDebug
+    flavorDimensions "abi"
+    productFlavors {
+        arm64 {
+            dimension "abi"
+            ndk { abiFilters 'arm64-v8a' }
+        }
+        full {
+            dimension "abi"
+            ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        // abiFilters 一律在 flavor 里声明（arm64 / full），buildType 只管签名与混淆
+        release {
+            minifyEnabled false
+            // 沿用 debug 签名：与已安装的 debug 包同签名，真机可直接覆盖升级
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    androidResources {
+        noCompress 'onnx'
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        // ⭐ 运行时 Python 版本必须与构建机 Python 的 major.minor 一致
+        // ⚠ 为什么是 3.10 而不是 3.11：Chaquopy 官方源（chaquo.com/pypi-13.1）
+        //   **opencv-python 只提供到 cp310**（4.5.1.48 / android_24），没有 cp311/cp312 轮子；
+        //   numpy 有 cp311，但缺 opencv ⇒ 整个决策层（spots/marks/badge 都用 cv2）会装不上。
+        //   ⇒ 降 Python 到 3.10 是唯一能同时拿到 numpy + cv2 的组合。
+        //   构建机 Python 3.10.11 用 NuGet 包解压（免安装、免管理员）：
+        //     https://www.nuget.org/api/v2/package/python/3.10.11
+        //     → D:/android-build/python310/（然后 python -m ensurepip --upgrade）
+        version = "3.10"
+        buildPython("D:/android-build/python310/python.exe")
+        pip {
+            // ⚠ 版本必须显式钉住：Chaquopy 源里 numpy 有 1.23.3 / 1.26.2 两个 cp310 轮子，
+            //   不钉会取到旧版；opencv 4.5.1.48 是按 numpy 1.x 编译的，别升到 numpy 2.x
+            install "numpy==1.26.2"
+            install "opencv-python==4.5.1.48"
+        }
+    }
+}
+
+dependencies {
+    // 端侧 OCR 推理（RapidOCR 的 det/rec onnx 模型直接吃）
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.17.0'
+}

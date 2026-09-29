@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MGAS</string>
+    <string name="acc_label">MGAS（点击/滑动）</string>
+    <string name="acc_desc">用于自动探索：由本应用发送点击与滑动。不会读取或上传任何页面内容。</string>
+</resources>

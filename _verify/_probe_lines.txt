@@ -1,0 +1,16 @@
+== 第 3 张图 ==   进图前体力 1377
+{'enter': 'clicked', 'at': (903, 1617)}
+{'enter': 'in_map', 'stamina': 1353}
+{'fog_wait': 'pre_identify', 'secs': 2.0}
+{'shot': 'saved', 'rnd': 0, 'file': 'r_014224_0.png'}
+{'solver': 'ok', 'cost': 9, 'steps': 2, 'steps_raw': 2, 'targets': 1, 'secs': 0.06}
+{'battle': 'started', 'at': (539,734)}
+{'battle': 'closed', 'at': (577,1440), 'win': True}
+{'round': 0, 'stamina': 1353, 'marks': {'3,1': ['boss']}, 'board': {'1,1': ['102', '海边游客', 0.935, 0.665]}}
+board：35 格真识别（草地/营地/宝箱/海螺）
+本图结束：done（耗时 62 秒）  ==== 全部结束，共 95 秒
+体力不够进图，停止
+没体力了，进背包用 结实补给
+每 10 张图：装备一键升级
+{'pre': 'not_in_map', 'attempt': 0, 'act': 'none', 'closed_x': 0, 'state': 'menu'}
+关闭 探索 开始冒险 进入地图 一键派遣 探索配队 探索产出 派遣 领取

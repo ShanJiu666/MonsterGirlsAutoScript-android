@@ -1,0 +1,23 @@
+# Gradle 构建产物
+.gradle/
+build/
+app/build/
+
+# 本机 SDK 路径（各机器不同）
+local.properties
+
+# APK / AAB 构建产物（发版包放 releases/ 或本地归档，不进 git）
+*.apk
+*.aab
+
+# 运行日志
+*.log
+
+# IDE
+.idea/
+*.iml
+captures/
+.cxx/
+
+# Python
+__pycache__/

@@ -1,0 +1,399 @@
+package com.fantasy.autoexplore;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.util.Log;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.FloatBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import ai.onnxruntime.OnnxTensor;
+import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtSession;
+
+/**
+ * 端侧 OCR：ONNX Runtime + RapidOCR 的 PP-OCRv4 det/rec 模型。
+ *
+ * ⭐ 与 PC 端 mapbot 的 RapidOCR **逐参数同口径**（照抄 rapidocr_onnxruntime 1.4.4）：
+ *   Det: limit_side_len=736 / limit_type=min、mean=std=0.5、scale=1/255、
+ *        thresh=0.3、box_thresh=0.5、unclip_ratio=1.6、use_dilation=true、score_mode=fast
+ *   Rec: rec_img_shape=[3,48,320]、max_wh_ratio=max(320/48, w/h)、/255 → -0.5 → /0.5、
+ *        CTC 解码（blank=0、去连续重复、置信度取所选字符 softmax 均值）
+ *   另外沿用 PC 的 OCR_SCALE=0.75：参考帧 1080×1920 → 810×1440 再进 det（PC 一致）。
+ *
+ * 输出坐标一律换算回 **1080×1920 参考系**，与 PC 端 items 可直接对拍。
+ */
+public class OcrEngine {
+
+    private static final String TAG = "OcrEngine";
+
+    public static final float OCR_SCALE = 0.75f;
+    public static final int SCALED_W = Math.round(RefMapper.REF_W * OCR_SCALE);   // 810
+    public static final int SCALED_H = Math.round(RefMapper.REF_H * OCR_SCALE);   // 1440
+
+    private static final int LIMIT_SIDE = 736;
+    private static final float DET_MEAN = 0.5f;
+    private static final float DET_STD = 0.5f;
+    private static final float DET_THRESH = 0.3f;
+    private static final float BOX_THRESH = 0.5f;
+    private static final float UNCLIP_RATIO = 1.6f;
+    private static final int MIN_SIZE = 3;
+    private static final int REC_H = 48;
+    private static final int REC_MAX_W = 320;
+    private static final int BLANK = 0;
+
+    private OrtEnvironment env;
+    private OrtSession detSession;
+    private OrtSession recSession;
+    private String detInput;
+    private String recInput;
+    private List<String> chars;
+    private boolean ready;
+
+    // 埋点
+    public volatile long tDet = 0, tRec = 0, tPre = 0;
+    public volatile int nDetBoxes = 0;
+
+    public boolean isReady() {
+        return ready;
+    }
+
+    public void init(Context ctx) {
+        try {
+            long t0 = System.currentTimeMillis();
+            env = OrtEnvironment.getEnvironment();
+            OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
+            opts.setIntraOpNumThreads(4);
+
+            byte[] detBytes = readAsset(ctx, "ch_PP-OCRv4_det_infer.onnx");
+            byte[] recBytes = readAsset(ctx, "ch_PP-OCRv4_rec_infer.onnx");
+            detSession = env.createSession(detBytes, opts);
+            recSession = env.createSession(recBytes, opts);
+            detInput = detSession.getInputNames().iterator().next();
+            recInput = recSession.getInputNames().iterator().next();
+
+            chars = loadChars(readAssetText(ctx, "ppocr_keys.txt"));
+            ready = true;
+            AppLog.i("OCR 引擎就绪：" + chars.size() + " 类，加载耗时 "
+                    + (System.currentTimeMillis() - t0) + "ms");
+        } catch (Throwable t) {
+            ready = false;
+            AppLog.i("⚠ OCR 引擎初始化失败：" + t);
+            Log.e(TAG, "init failed", t);
+        }
+    }
+
+    /** 字典：metadata 的 6623 个字 + 头部 blank + 尾部空格 = 6625（与模型输出类数一致） */
+    private static List<String> loadChars(String text) {
+        List<String> list = new ArrayList<>();
+        list.add("blank");
+        for (String line : text.split("\n", -1)) {
+            String s = line.replace("\r", "");
+            if (s.isEmpty()) {
+                continue;
+            }
+            list.add(s);
+        }
+        list.add(" ");
+        return list;
+    }
+
+    /** 主入口：喂 1080×1920 参考帧，拿参考系坐标的识别结果 */
+    public List<OcrItem> recognize(Bitmap refBmp, float minConf) {
+        List<OcrItem> out = new ArrayList<>();
+        if (!ready || refBmp == null) {
+            return out;
+        }
+        long tAll = System.currentTimeMillis();
+        try {
+            long p0 = System.currentTimeMillis();
+            // ① 参考帧 → 0.75 倍（=810×1440，与 PC 一致）
+            Bitmap scaled = Bitmap.createScaledBitmap(refBmp, SCALED_W, SCALED_H, true);
+            int[] scaledPx = new int[SCALED_W * SCALED_H];
+            scaled.getPixels(scaledPx, 0, SCALED_W, 0, 0, SCALED_W, SCALED_H);
+
+            // ② det 预处理：limit_type=min ⇒ min(810,1440)=810 > 736 ⇒ ratio=1，
+            //    再按 /32 对齐 ⇒ resize_w=round(810/32)*32=800、resize_h=1440
+            int detW = Math.round(Math.round(SCALED_W / 32f)) * 32;
+            int detH = Math.round(Math.round(SCALED_H / 32f)) * 32;
+            Bitmap detBmp = Bitmap.createScaledBitmap(scaled, detW, detH, true);
+            int[] detPx = new int[detW * detH];
+            detBmp.getPixels(detPx, 0, detW, 0, 0, detW, detH);
+
+            float[] chw = new float[3 * detH * detW];
+            int plane = detH * detW;
+            for (int i = 0; i < detPx.length; i++) {
+                int p = detPx[i];
+                float r = ((p >> 16) & 0xff) / 255f;
+                float g = ((p >> 8) & 0xff) / 255f;
+                float b = (p & 0xff) / 255f;
+                chw[i] = (r - DET_MEAN) / DET_STD;
+                chw[plane + i] = (g - DET_MEAN) / DET_STD;
+                chw[2 * plane + i] = (b - DET_MEAN) / DET_STD;
+            }
+            tPre += System.currentTimeMillis() - p0;
+
+            // ③ det 推理
+            long d0 = System.currentTimeMillis();
+            float[] prob;
+            try (OnnxTensor in = OnnxTensor.createTensor(env, FloatBuffer.wrap(chw),
+                    new long[]{1, 3, detH, detW});
+                 OrtSession.Result res = detSession.run(Collections.singletonMap(detInput, in))) {
+                OnnxTensor ot = (OnnxTensor) res.get(0);
+                FloatBuffer fb = ot.getFloatBuffer();
+                prob = new float[fb.remaining()];
+                fb.get(prob);
+            }
+            tDet += System.currentTimeMillis() - d0;
+
+            // ④ DB 后处理 → det 输入尺寸下的框
+            List<int[]> boxes = dbPostProcess(prob, detH, detW);
+            nDetBoxes = boxes.size();
+
+            // ⑤ 逐框裁剪（在 810×1440 帧上）+ rec
+            long r0 = System.currentTimeMillis();
+            float sx = SCALED_W / (float) detW;      // 800 → 810
+            float sy = SCALED_H / (float) detH;      // 1440 → 1440
+            for (int[] b : boxes) {
+                int x0 = clamp(Math.round(b[0] * sx), 0, SCALED_W - 1);
+                int y0 = clamp(Math.round(b[1] * sy), 0, SCALED_H - 1);
+                int x1 = clamp(Math.round(b[2] * sx), 1, SCALED_W);
+                int y1 = clamp(Math.round(b[3] * sy), 1, SCALED_H);
+                if (x1 - x0 < 2 || y1 - y0 < 2) {
+                    continue;
+                }
+                // ⚠ 不能用 Bitmap.createBitmap(int[],…,x,y,w,h,…) —— 那个 9 参重载不是公开 API
+                //   （编译期报「参数列表长度不同」）⇒ 自己按行拷贝出子图
+                int cw = x1 - x0, ch = y1 - y0;
+                int[] cropPx = new int[cw * ch];
+                for (int yy = 0; yy < ch; yy++) {
+                    System.arraycopy(scaledPx, (y0 + yy) * SCALED_W + x0, cropPx, yy * cw, cw);
+                }
+                Bitmap crop = Bitmap.createBitmap(cropPx, cw, ch, Bitmap.Config.ARGB_8888);
+                String[] rr = recOne(crop);
+                if (rr == null) {
+                    continue;
+                }
+                String text = rr[0];
+                float conf = Float.parseFloat(rr[1]);
+                if (text.trim().isEmpty() || conf < minConf) {
+                    continue;
+                }
+                // ⑥ 坐标：810×1440 → 1080×1920 参考系
+                int rx0 = Math.round(x0 / OCR_SCALE);
+                int ry0 = Math.round(y0 / OCR_SCALE);
+                int rx1 = Math.round(x1 / OCR_SCALE);
+                int ry1 = Math.round(y1 / OCR_SCALE);
+                out.add(new OcrItem(text, (rx0 + rx1) / 2, (ry0 + ry1) / 2,
+                        rx0, ry0, rx1, ry1, conf));
+            }
+            tRec += System.currentTimeMillis() - r0;
+            out.sort((a, b) -> a.cy != b.cy ? Integer.compare(a.cy, b.cy)
+                    : Integer.compare(a.cx, b.cx));
+            AppLog.i("OCR " + out.size() + " 条 / " + boxes.size() + " 框，"
+                    + (System.currentTimeMillis() - tAll) + "ms"
+                    + "（det " + tDet + "｜rec " + tRec + "｜预处理 " + tPre + "）");
+        } catch (Throwable t) {
+            AppLog.i("⚠ OCR 异常：" + t);
+            Log.e(TAG, "recognize failed", t);
+        }
+        return out;
+    }
+
+    // ---------------- DB 后处理（照抄 rapidocr DBPostProcess） ----------------
+
+    private List<int[]> dbPostProcess(float[] prob, int h, int w) {
+        boolean[] mask = new boolean[h * w];
+        for (int i = 0; i < h * w; i++) {
+            mask[i] = prob[i] > DET_THRESH;
+        }
+        // cv2.dilate 2×2（anchor 默认中心）: dst(y,x)=max(src(y,x),src(y,x+1),src(y+1,x),src(y+1,x+1))
+        boolean[] dil = new boolean[h * w];
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                boolean v = mask[y * w + x];
+                if (!v && x + 1 < w) {
+                    v = mask[y * w + x + 1];
+                }
+                if (!v && y + 1 < h) {
+                    v = mask[(y + 1) * w + x];
+                }
+                if (!v && x + 1 < w && y + 1 < h) {
+                    v = mask[(y + 1) * w + x + 1];
+                }
+                dil[y * w + x] = v;
+            }
+        }
+        // 连通域（8 邻域，等价 findContours 的外轮廓）
+        boolean[] seen = new boolean[h * w];
+        int[] stack = new int[h * w];
+        List<int[]> boxes = new ArrayList<>();
+        for (int start = 0; start < h * w; start++) {
+            if (!dil[start] || seen[start]) {
+                continue;
+            }
+            int sp = 0;
+            stack[sp++] = start;
+            seen[start] = true;
+            int minX = w, maxX = -1, minY = h, maxY = -1;
+            while (sp > 0) {
+                int id = stack[--sp];
+                int y = id / w, x = id % w;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+                            continue;
+                        }
+                        int nid = ny * w + nx;
+                        if (dil[nid] && !seen[nid]) {
+                            seen[nid] = true;
+                            stack[sp++] = nid;
+                        }
+                    }
+                }
+            }
+            int bw = maxX - minX + 1, bh = maxY - minY + 1;
+            if (Math.min(bw, bh) < MIN_SIZE) {
+                continue;
+            }
+            // box_score_fast：框内 prob 均值
+            float sum = 0;
+            int n = 0;
+            for (int y = minY; y <= maxY; y++) {
+                for (int x = minX; x <= maxX; x++) {
+                    sum += prob[y * w + x];
+                    n++;
+                }
+            }
+            float score = n > 0 ? sum / n : 0f;
+            if (score < BOX_THRESH) {
+                continue;
+            }
+            // unclip：distance = area * ratio / length（矩形解析式）
+            float area = (float) bw * bh;
+            float perim = 2f * (bw + bh);
+            float d = perim > 0 ? area * UNCLIP_RATIO / perim : 0f;
+            float ux0 = minX - d, uy0 = minY - d, ux1 = maxX + d, uy1 = maxY + d;
+            float uw = ux1 - ux0, uh = uy1 - uy0;
+            if (Math.min(uw, uh) < MIN_SIZE + 2) {
+                continue;
+            }
+            boxes.add(new int[]{
+                    clamp(Math.round(ux0), 0, w), clamp(Math.round(uy0), 0, h),
+                    clamp(Math.round(ux1), 0, w), clamp(Math.round(uy1), 0, h)});
+        }
+        return boxes;
+    }
+
+    // ---------------- rec 单框识别 ----------------
+
+    private String[] recOne(Bitmap crop) {
+        try {
+            int w = crop.getWidth(), h = crop.getHeight();
+            float ratio = w / (float) h;
+            float maxWhRatio = Math.max(REC_MAX_W / (float) REC_H, ratio);
+            int imgW = (int) (REC_H * maxWhRatio);
+            int resizedW = (int) Math.ceil(REC_H * ratio);
+            if (resizedW > imgW) {
+                resizedW = imgW;
+            }
+            Bitmap rs = Bitmap.createScaledBitmap(crop, resizedW, REC_H, true);
+            int[] px = new int[resizedW * REC_H];
+            rs.getPixels(px, 0, resizedW, 0, 0, resizedW, REC_H);
+
+            float[] chw = new float[3 * REC_H * imgW];
+            int plane = REC_H * imgW;
+            for (int y = 0; y < REC_H; y++) {
+                for (int x = 0; x < resizedW; x++) {
+                    int p = px[y * resizedW + x];
+                    float r = ((p >> 16) & 0xff) / 255f;
+                    float g = ((p >> 8) & 0xff) / 255f;
+                    float b = (p & 0xff) / 255f;
+                    int idx = y * imgW + x;
+                    chw[idx] = (r - 0.5f) / 0.5f;
+                    chw[plane + idx] = (g - 0.5f) / 0.5f;
+                    chw[2 * plane + idx] = (b - 0.5f) / 0.5f;
+                }
+            }
+            float[] logits;
+            int steps;
+            int classes;
+            try (OnnxTensor in = OnnxTensor.createTensor(env, FloatBuffer.wrap(chw),
+                    new long[]{1, 3, REC_H, imgW});
+                 OrtSession.Result res = recSession.run(Collections.singletonMap(recInput, in))) {
+                OnnxTensor ot = (OnnxTensor) res.get(0);
+                long[] shape = ot.getInfo().getShape();
+                steps = (int) shape[1];
+                classes = (int) shape[2];
+                FloatBuffer fb = ot.getFloatBuffer();
+                logits = new float[steps * classes];
+                fb.get(logits);
+            }
+            // CTC 解码：argmax → 去连续重复 → 去 blank → 置信度取所选字符概率均值
+            StringBuilder sb = new StringBuilder();
+            float confSum = 0;
+            int confN = 0;
+            int prev = -1;
+            for (int t = 0; t < steps; t++) {
+                int best = 0;
+                float bestP = -1;
+                int base = t * classes;
+                for (int c = 0; c < classes; c++) {
+                    float v = logits[base + c];
+                    if (v > bestP) {
+                        bestP = v;
+                        best = c;
+                    }
+                }
+                if (best != BLANK && best != prev) {
+                    if (best < chars.size()) {
+                        sb.append(chars.get(best));
+                        confSum += bestP;
+                        confN++;
+                    }
+                }
+                prev = best;
+            }
+            float conf = confN > 0 ? confSum / confN : 0f;
+            return new String[]{sb.toString(), Float.toString(conf)};
+        } catch (Throwable t) {
+            Log.w(TAG, "rec 单框失败: " + t);
+            return null;
+        }
+    }
+
+    // ---------------- 工具 ----------------
+
+    private static int clamp(int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    private static byte[] readAsset(Context ctx, String name) throws Exception {
+        try (InputStream is = ctx.getAssets().open(name);
+             ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = is.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        }
+    }
+
+    private static String readAssetText(Context ctx, String name) throws Exception {
+        return new String(readAsset(ctx, name), "UTF-8");
+    }
+}

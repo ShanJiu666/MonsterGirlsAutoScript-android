@@ -1,0 +1,456 @@
+{
+ "code": "S00003",
+ "n": 35,
+ "secs": 1.46,
+ "cells": [
+  {
+   "r": 1,
+   "c": 1,
+   "sid": "S00003_211",
+   "name": "巨大沙堡",
+   "score": 0.887,
+   "revealed": false,
+   "ratio": 0.716,
+   "anchor": [
+    1,
+    1
+   ]
+  },
+  {
+   "r": 1,
+   "c": 2,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    1,
+    2
+   ]
+  },
+  {
+   "r": 1,
+   "c": 3,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    1,
+    3
+   ]
+  },
+  {
+   "r": 1,
+   "c": 4,
+   "sid": "S00003_111",
+   "name": "海边杂物",
+   "score": 0.934,
+   "revealed": false,
+   "ratio": 0.705,
+   "anchor": [
+    1,
+    4
+   ]
+  },
+  {
+   "r": 1,
+   "c": 5,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.913,
+   "revealed": true,
+   "ratio": 0.994,
+   "anchor": [
+    1,
+    5
+   ]
+  },
+  {
+   "r": 1,
+   "c": 6,
+   "sid": "S00003_000",
+   "name": "营地",
+   "score": 0.951,
+   "revealed": true,
+   "ratio": 0.999,
+   "anchor": [
+    1,
+    6
+   ]
+  },
+  {
+   "r": 1,
+   "c": 7,
+   "sid": "S00003_002",
+   "name": "海螺",
+   "score": 0.782,
+   "revealed": true,
+   "ratio": 0.986,
+   "anchor": null
+  },
+  {
+   "r": 2,
+   "c": 1,
+   "sid": "S00003_211",
+   "name": "巨大沙堡",
+   "score": 0.887,
+   "revealed": false,
+   "ratio": 0.702,
+   "anchor": [
+    1,
+    1
+   ]
+  },
+  {
+   "r": 2,
+   "c": 2,
+   "sid": "S00003_211",
+   "name": "巨大沙堡",
+   "score": 0.887,
+   "revealed": false,
+   "ratio": 0.714,
+   "anchor": [
+    1,
+    1
+   ]
+  },
+  {
+   "r": 2,
+   "c": 3,
+   "sid": "S00003_211",
+   "name": "巨大沙堡",
+   "score": 0.887,
+   "revealed": false,
+   "ratio": 0.703,
+   "anchor": [
+    1,
+    1
+   ]
+  },
+  {
+   "r": 2,
+   "c": 4,
+   "sid": "S00003_111",
+   "name": "海边杂物",
+   "score": 0.934,
+   "revealed": false,
+   "ratio": 0.657,
+   "anchor": [
+    1,
+    4
+   ]
+  },
+  {
+   "r": 2,
+   "c": 5,
+   "sid": "S00003_111",
+   "name": "海边杂物",
+   "score": 0.934,
+   "revealed": false,
+   "ratio": 0.684,
+   "anchor": [
+    1,
+    4
+   ]
+  },
+  {
+   "r": 2,
+   "c": 6,
+   "sid": "S00003_103",
+   "name": "游乐设施",
+   "score": 0.964,
+   "revealed": true,
+   "ratio": 0.992,
+   "anchor": [
+    2,
+    6
+   ]
+  },
+  {
+   "r": 2,
+   "c": 7,
+   "sid": "S00003_103",
+   "name": "游乐设施",
+   "score": 0.964,
+   "revealed": true,
+   "ratio": 0.976,
+   "anchor": [
+    2,
+    6
+   ]
+  },
+  {
+   "r": 3,
+   "c": 1,
+   "sid": "S00003_104",
+   "name": "海边杂物",
+   "score": 0.946,
+   "revealed": false,
+   "ratio": 0.678,
+   "anchor": [
+    3,
+    1
+   ]
+  },
+  {
+   "r": 3,
+   "c": 2,
+   "sid": "S00003_104",
+   "name": "海边杂物",
+   "score": 0.946,
+   "revealed": false,
+   "ratio": 0.578,
+   "anchor": [
+    3,
+    1
+   ]
+  },
+  {
+   "r": 3,
+   "c": 3,
+   "sid": "S00003_104",
+   "name": "海边杂物",
+   "score": 0.946,
+   "revealed": false,
+   "ratio": 0.709,
+   "anchor": [
+    3,
+    1
+   ]
+  },
+  {
+   "r": 3,
+   "c": 4,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    3,
+    4
+   ]
+  },
+  {
+   "r": 3,
+   "c": 5,
+   "sid": "S00003_004",
+   "name": "岩石",
+   "score": 0.865,
+   "revealed": false,
+   "ratio": 0.654,
+   "anchor": [
+    3,
+    5
+   ]
+  },
+  {
+   "r": 3,
+   "c": 6,
+   "sid": "S00003_003",
+   "name": "宝箱",
+   "score": 0.969,
+   "revealed": false,
+   "ratio": 0.652,
+   "anchor": [
+    3,
+    6
+   ]
+  },
+  {
+   "r": 3,
+   "c": 7,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    3,
+    7
+   ]
+  },
+  {
+   "r": 4,
+   "c": 1,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": true,
+   "ratio": 0.756,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 4,
+   "c": 2,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.74,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 4,
+   "c": 3,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.626,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 4,
+   "c": 4,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    4,
+    4
+   ]
+  },
+  {
+   "r": 4,
+   "c": 5,
+   "sid": "S00003_203",
+   "name": "游乐设施",
+   "score": 0.867,
+   "revealed": false,
+   "ratio": 0.701,
+   "anchor": [
+    4,
+    5
+   ]
+  },
+  {
+   "r": 4,
+   "c": 6,
+   "sid": "S00003_203",
+   "name": "游乐设施",
+   "score": 0.867,
+   "revealed": false,
+   "ratio": 0.692,
+   "anchor": [
+    4,
+    5
+   ]
+  },
+  {
+   "r": 4,
+   "c": 7,
+   "sid": "S00003_001",
+   "name": "草地",
+   "score": 0.91,
+   "revealed": false,
+   "ratio": 0.65,
+   "anchor": [
+    4,
+    7
+   ]
+  },
+  {
+   "r": 5,
+   "c": 1,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.668,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 5,
+   "c": 2,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.631,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 5,
+   "c": 3,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.581,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 5,
+   "c": 4,
+   "sid": "S00003_311",
+   "name": "游乐设施",
+   "score": 0.944,
+   "revealed": false,
+   "ratio": 0.73,
+   "anchor": [
+    4,
+    1
+   ]
+  },
+  {
+   "r": 5,
+   "c": 5,
+   "sid": "S00003_203",
+   "name": "游乐设施",
+   "score": 0.867,
+   "revealed": false,
+   "ratio": 0.654,
+   "anchor": [
+    4,
+    5
+   ]
+  },
+  {
+   "r": 5,
+   "c": 6,
+   "sid": "S00003_203",
+   "name": "游乐设施",
+   "score": 0.867,
+   "revealed": false,
+   "ratio": 0.572,
+   "anchor": [
+    4,
+    5
+   ]
+  },
+  {
+   "r": 5,
+   "c": 7,
+   "sid": "S00003_002",
+   "name": "海螺",
+   "score": 0.777,
+   "revealed": false,
+   "ratio": 0.649,
+   "anchor": null
+  }
+ ]
+}

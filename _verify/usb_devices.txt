@@ -1,0 +1,21 @@
+﻿USB_COUNT=20
+OK | USB | USB 根集线器(USB 3.0)
+OK | HIDClass | USB 输入设备
+OK | USB | USB Composite Device
+OK | Net | MERCURY Wireless USB Adapter
+OK | USB | LIGHTSPEED Receiver
+OK | HIDClass | USB 输入设备
+OK | USB | USB 根集线器(USB 3.0)
+OK | USB | USB Composite Device
+Error | WPD | MTP USB 设备
+OK | HIDClass | USB 输入设备
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK |  | LIGHTSPEED Receiver
+OK | USBDevice | ADB Interface
+OK | HIDClass | USB 输入设备
+OK | HIDClass | USB 输入设备

@@ -1,0 +1,4 @@
+--------- beginning of main
+09-29 14:40:19.438 19359 19359 I AutoExplore: 14:40:19 启动完成：首次用先点 ① 授权截图 / ② 无障碍设置（各一次），然后「▶ 开始探索」
+09-29 14:40:19.438 19359 19359 I AutoExplore: 14:40:19 屏幕 1280x2588（参考系 1080x1920）
+09-29 14:40:21.709 19359  8631 I AutoExplore: 14:40:21 Chaquopy Python 已启动：3.10.19 (main, Nov 20 2025, 17:54:06) [Clang 18.0.4 (https://android.googlesource.com/toolchain/llvm-project d8003a456

@@ -1,0 +1,12 @@
+== 第 3 张图 ==   进图前体力 1377
+{'enter': 'clicked', 'at': (903, 1617)}
+{'enter': 'in_map', 'stamina': 1353}
+{'fog_wait': 'pre_identify', 'secs': 2.0}
+{'shot': 'saved', 'rnd': 0, 'file': 'r_014224_0.png'}
+{'solver': 'ok', 'cost': 9, 'steps': 2, 'targets': 1, 'secs': 0.06}
+{'battle': 'started', 'at': (539,734)}
+{'battle': 'closed', 'at': (577,1440), 'win': True}
+       · 发现 3 块紫/橙探索地块（6 个成员格 1,1/2,1）⇒ 去探索+派遣（空闲槽 1 个）
+       · 已派遣一支探索队（上方还剩 2 个空闲槽）
+       · 三个探索槽已满，关掉派遣面板（不派遣 ✓）
+关闭 探索 开始冒险 进入地图 一键派遣 探索配队 探索产出 派遣 领取

@@ -1,0 +1,4945 @@
+# -*- coding: utf-8 -*-
+"""explore_loop.py (2026-09-25 lean rewrite)
+
+Verified rules only:
+  * fight ONLY boss / 4-marked blocks; skip plain fights
+  * reveal-first (unlock path), never poke locked marked cells first
+  * marked cells are never blacklisted; blocked -> clear-path mode
+  * result panel: click 关闭 only when OCR really saw it
+  * recommend fight + win -> dice (max 3), stop when thumbs-up loot appears
+  * all marked blocks done -> leave the map
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 【Android 适配补丁 · 由 android_autoexplore/tools/port_loop.py 注入，勿手改】
+# Chaquopy 里 __file__ 指向 APK 内只读资源，模板/数据表在 filesDir/mapbot_pack
+import os as _os
+
+_MAPBOT_ROOT = _os.environ.get('MAPBOT_ROOT') or _os.path.dirname(_os.path.abspath(__file__))
+_MAPBOT_ANDROID = _os.environ.get('MAPBOT_ANDROID') == '1'
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+import re
+import sys
+import time
+import json
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cv2
+import numpy as np
+import marks as marks_mod
+import spots as spots_mod
+import buypanels
+import layout as layout_mod
+import targets_cfg as tcfg_mod          # ⭐ 目标方块白名单（用户 2026-09-28 要求 ✓）
+from mapbot import Bot, RUNS, ADB, DEV, CREATE_NO_WINDOW
+
+WIN = os.path.join(RUNS, 'loop')
+os.makedirs(WIN, exist_ok=True)
+LOG_PATH = os.path.join(WIN, 'loop_log.json')
+SUMMARY_PATH = os.path.join(RUNS, 'last_summary.json')
+# ⭐ 多开模式（2026-09-25 用户要求）：每个实例用 `--tag acc2` 区分 ⇒ 截图/日志/统计各自独立
+#   （截图进 `runs/acc2/`、日志 `runs/acc2/loop/loop_log.json`、统计 `runs/acc2/last_summary.json`），
+#   两台模拟器同时跑不会互相覆盖：`--device 127.0.0.1:16416 --tag acc2`
+# ⭐ 2026-09-25：控制台实时进度（用户要「桌面快捷方式，打开就能用」）
+#   `--quiet` 关掉；结束时那份全量 json 日志照旧打印（--no-dump 关）
+VERBOSE = True
+DUMP_AT_END = True
+# 进图前体力下限：低于它就收工（用户 2026-09-25：**连刷模式 <50 就停**；单张模式仍用 25）
+MIN_STAMINA = 25
+STOP_AT_5AM = True      # ⭐ 凌晨自动停止（用户 2026-09-26；停每张图之间，正在打的会打完）
+STOP_HM = (4, 58)       # ⭐ 停止时刻 = 04:58（用户 2026-09-26：「4.58停吧，打完最后一张图」）
+STOP_TIME = None        # 本次运行的停止时刻（datetime）
+_LOOP_LOCK = None          # 本进程占的设备锁 (device, tag)
+EXPLORE_DISPATCH = True   # 探索/派遣功能（紫橙地块→探索→派遣 ✓）
+# ⭐ 探索槽总数（用户 2026-09-26：一共能装 3 个）⇒ 用来反推空闲数（见 one_round 里的互相校验）
+EXPLORE_SLOTS_TOTAL = 3
+AUTO_SUPPLY = False     # 没体力自动用「结实补给」（--auto-supply / GUI 按钮）
+SUPPLY_USED = 0         # 本次已用个数（**只做统计**，不设上限 —— 用户 2026-09-25 要求）
+OPT = False             # 体力最省模式（--opt）
+INSTANCE_TAG = ''       # 多开实例名（空 = 单开，用共享目录）
+INSTANCE_DEV = DEV      # 该实例绑定的模拟器 adb 设备号
+_BOT = None             # 当前 Bot（统计要读它的耗时埋点）
+
+
+def say(msg):
+    if VERBOSE:
+        try:
+            print(msg, flush=True)
+        except Exception:       # noqa: BLE001
+            pass
+
+
+# ⭐ 本次运行统计（用户 2026-09-25 要求：结束时要报「刷了几张图/平均耗时/打了几个 boss 关/
+#   拿到几件大拇指装备/买完几个旅行商人/几个黄金宝库」）
+STATS = {'clovers': 0, 
+    'maps': 0,            # 刷完的图数
+    'shots': 0,           # ⭐ 采图模式（--collect-only）存下的首帧数
+    'map_secs': [],       # 每张图耗时
+    'boss_fights': 0,     # 首领关战斗场次
+    'boss_wins': 0,       # 首领关胜利
+    'recommend_fights': 0,
+    'recommend_wins': 0,
+    'dice_got': 0,        # 摇色子拿到「大拇指装备」的次数
+    'merchants': 0,       # 买完的旅行商人
+    'vaults': 0,          # 买完的黄金宝库
+    'battles': 0,         # 全部战斗场次
+    'battle_wins': 0,
+    'stopped': '',
+    'current_map': 0,     # 正在跑的这张图（1 基）；被停止时用来说明跑到哪了
+    'current_secs': 0,    # 这张图已耗时
+    'stamina_entries': [],  # 每次「进图时」读到的体力（用户口径：两次进图相减 = 消耗）
+    'running': True,
+    'classify': 0.0,        # ⭐ 棋盘分类累计耗时（埋点用）
+    'classify_n': 0,        # 分类调用次数
+}
+
+
+def device_lock_path(device):
+    try:
+        port = int(str(device).split(':')[-1])
+    except Exception:       # noqa: BLE001
+        port = 0
+    return os.path.join(RUNS, '.loop_%d.lock' % port)
+
+
+def red_lock_path(device):
+    """红装锁文件（用户 2026-09-25：「下次遇到红装要立刻停止，不准退出图」）
+
+    发现红装 ⇒ 立刻停 + **绝不退图** + 写这个锁；**锁在就拒绝启动任何新运行**，
+    直到你处理完红装、在窗口上点「红装已处理·解锁」（或手动删掉这个文件）。
+    """
+    try:
+        port = int(str(device).split(':')[-1])
+    except Exception:       # noqa: BLE001
+        port = 0
+    return os.path.join(RUNS, 'red_equip_%d.lock.json' % port)
+
+
+def red_locked(device):
+    """-> 锁内容 dict 或 None"""
+    p = red_lock_path(device)
+    if not os.path.exists(p):
+        return None
+    try:
+        import json
+        with open(p, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:       # noqa: BLE001
+        return {'bad': True}
+
+
+def _read_lock_pid(p):
+    """读设备锁里的 PID —— 兼容三种形态：JSON / 纯文本 PID / 空（已释放）
+
+    ⭐ 2026-09-28：16384 的锁原来写纯文本 PID，而 16416（采集链路）的锁是 JSON
+    （`{"pid":…,"released":…}`）—— **两种格式并存**读方要猜 ✗。统一按"先试 JSON
+    再退回 int"解析，新旧锁都能读；写侧一律写 JSON（见 acquire_device_lock）。
+    """
+    try:
+        raw = (open(p, encoding='utf-8').read() or '').strip()
+    except Exception:       # noqa: BLE001
+        return 0
+    if not raw:
+        return 0
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return int(obj.get('pid') or 0)
+    except Exception:       # noqa: BLE001
+        pass
+    try:
+        return int(raw)
+    except Exception:       # noqa: BLE001
+        return 0
+
+
+def acquire_device_lock(device):
+    # 【Android】不需要设备锁（进程即实例）⇒ 返回哨兵，调用方只判 None
+    if _MAPBOT_ANDROID:
+        return 'android'
+    """同一台模拟器**同时只允许一个循环**在跑（2026-09-25 教训：我在用户跑着的时候又起了一个，
+    两边抢着点，互相打架）。已被占用就返回 None，调用方应直接退出。
+
+    ⭐ 2026-09-28：写侧升级为 JSON（pid/device/started_at，便于事后判断谁是僵尸锁）；
+    读到"PID 已不存在"的陈旧锁时**自动接管**并打一行提示（原来是静默覆写）。
+    """
+    p = device_lock_path(device)
+    if os.path.exists(p):
+        pid = _read_lock_pid(p)
+        alive = False
+        if pid:
+            try:
+                import subprocess as _sp
+                out = _sp.run(['tasklist', '/FI', 'PID eq %d' % pid, '/FO', 'CSV'],
+                              capture_output=True, text=True, errors='replace',
+                              timeout=10,
+                              creationflags=CREATE_NO_WINDOW).stdout
+                # ⚠ 用带引号的精确匹配（CSV 里 PID 一定是 "1234" 形态）——
+                #   原来的 `str(pid) in out` 是子串匹配，可能被别的列撞上 ✗
+                alive = ('"%d"' % pid) in out
+            except Exception:   # noqa: BLE001
+                alive = False
+        if alive:
+            # ⭐⭐⭐ 2026-09-28 修「**自我冲突**」真机 bug（22:02/22:03 两次 100% 复现）：
+            #   main() 里两套锁机制**串行打架** —— 先 `guard_duplicates()` →
+            #   `loopguard.acquire()` 把**本进程 PID** 写进 `.loop_<port>.lock`；
+            #   紧接着本函数读**同一个文件** ⇒ 看到一个"活着的 PID" ⇒ 误判
+            #   "已有另一个循环在跑" ⇒ 拒绝启动（其实那就是自己 ✗✗）。
+            #   症状：GUI 点开始即报「已经有另一个自动探索在跑」、退出码 0、循环
+            #   从未真正开跑（loop_log 不推进）。
+            #   判据：**锁主 == 自己 ⇒ 不是别人，直接放行**（锁保持 loopguard 写的内容）。
+            if pid == os.getpid():
+                return p
+            return None
+        try:
+            say('   ⚠ 发现陈旧设备锁（PID %s 已不存在，多半是上次崩溃没走 finally）'
+                '⇒ 自动接管 ✓' % (pid or '?'))
+        except Exception:       # noqa: BLE001
+            pass
+    try:
+        os.makedirs(RUNS, exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'pid': os.getpid(), 'device': device,
+                                'started_at': time.strftime('%Y-%m-%d %H:%M:%S')},
+                               ensure_ascii=False))
+    except Exception:           # noqa: BLE001
+        pass
+    return p
+
+
+def release_device_lock(p):
+    """释放设备锁（⭐ 2026-09-28：**截断代替删除**）
+
+    沙箱 `sitecustomize.py` 给 `os.remove` 挂了「每**次工具调用**计数，满 50 就
+    `raise SystemExit(1)`」的守卫。长流水线每轮都要 release 一次 ⇒ 跑到第 11 轮
+    就把采集进程打死（实测 `runs/_pipeline.log`）✗
+    截断后文件仍在、内容为空 ⇒ `acquire_device_lock` 会当成没有锁直接覆写 ✓ 语义不变。
+    """
+    try:
+        if p:
+            open(p, 'w', encoding='utf-8').close()
+    except Exception:           # noqa: BLE001
+        pass
+
+
+def stamina_line():
+    """体力消耗（用户口径：两次进图的体力相减；**并按游戏 30 秒回 1 点做补偿**）
+
+    单图消耗 = (进图体力_i − 进图体力_{i+1}) + (两次进图间隔秒数 / 30)
+    —— 间隔期间游戏会自动回体力，不补回来的话会把「回复的」当成「没花的」，低估消耗。
+    每段夹在 ≥0（中途吃药/大额补充时不冲抵别的段）。
+    """
+    ent = list(STATS.get('stamina_entries') or [])
+    if len(ent) >= 2:
+        total = 0.0
+        parts = []
+        for i in range(len(ent) - 1):
+            s0, t0 = ent[i]
+            s1, t1 = ent[i + 1]
+            dt = max(0.0, t1 - t0)
+            regen = dt / 30.0                     # 30 秒回 1 点
+            spent = max(0.0, (s0 - s1) + regen)
+            total += spent
+            parts.append('%d→%d(-%d +回%.0f)' % (s0, s1, max(0, s0 - s1), regen))
+        how = ('进图体力 %s 点；已按 30 秒/点补回间隔期间的回复'
+               % '，'.join('%d' % s for s, _t in ent))
+        return (total, how, parts)
+    if len(ent) == 1:
+        return (None, '只进了一张图，没有第二次进图可相减（进图时 %d）' % ent[0][0], [])
+    return (None, '没读到体力', [])
+
+
+def summary_text():
+    s = STATS
+    avg = (sum(s['map_secs']) / len(s['map_secs'])) if s['map_secs'] else 0
+    spent, how, parts = stamina_line()
+    # ⭐ 2026-09-27 用户要求：只显示「总消耗」+「平均每图」两条 ✓（去掉逐图明细/说明 ✗）
+    _maps = max(1, int(s['maps']))
+    _spent_txt = ('%.0f 点' % spent) if spent is not None else '—'
+    _avg_txt = ('%.1f 点/张' % (spent / _maps)) if spent is not None else '—'
+    lines = ['',
+             '════════ 本次统计 ════════',
+             '  消耗体力   ：%s' % _spent_txt,
+             '  平均每图   ：%s' % _avg_txt,
+             ]
+    lines += [
+             '  刷完地图   ：%d 张' % s['maps'],
+             ]
+    if s.get('shots'):
+        # ⭐ 采图模式（--collect-only）：只存首帧、不推图 ⇒ 单独报一行 ✓
+        lines += [
+             '  采集首帧   ：%d 张（只进图截图退图；每张 25 体力）' % s['shots'],
+             ]
+    lines += [
+             '  平均耗时   ：%.0f 秒/张（合计 %.0f 秒）' % (avg, sum(s['map_secs'])),
+             '  首领关     ：%d 场（胜 %d）' % (s['boss_fights'], s['boss_wins']),
+             '  全部战斗   ：%d 场（胜 %d）' % (s['battles'], s['battle_wins']),
+             '  大拇指装备 ：%d 件（推荐战 %d 场 / 胜 %d；摇色子拿到 %d）'
+             % (s['dice_got'], s['recommend_fights'], s['recommend_wins'], s['dice_got']),
+             '  幸运草地块 ：%d 个' % s.get('clovers', 0),
+             '  旅行商人   ：买完 %d 个' % s['merchants'],
+             '  黄金宝库   ：买完 %d 个' % s['vaults'],
+             ]
+    if not s['running'] and s['current_map'] and s['current_secs']:
+        lines.append('  ⚠ 第 %d 张图跑到 %.0f 秒时被停止（这张未计入）'
+                     % (s['current_map'], s['current_secs']))
+    if s['stopped']:
+        lines.append('  结束原因   ：%s' % s['stopped'])
+    lines.append('══════════════════════════')
+    try:
+        t = getattr(_BOT, 't', None)
+        if t:
+            total = sum(t.get(k, 0.0) for k in ('snap', 'ocr', 'wait')) + s.get('classify', 0.0)
+            lines.append('  ⏱ 耗时分布：截图 %.1fs(%s)｜OCR %.1fs/%d次｜棋盘识别 %.1fs（%d次）'
+                         '｜点击等待 %.1fs(%d次)'
+                         % (t.get('snap', 0), '极速' if getattr(_BOT, 'fast_ok', False) else 'adb',
+                            t.get('ocr', 0), t.get('ocr_n', 0), s.get('classify', 0.0),
+                            s.get('classify_n', 0), t.get('wait', 0), t.get('wait_n', 0)))
+            lines.append('               （以上合计 %.0f 秒；其余为游戏动画/面板本身的响应时间）' % total)
+            by = t.get('ocr_by') or {}
+            if by:
+                detail = '｜'.join('%s %.1fs/%d次' % (k, v[0], v[1])
+                                   for k, v in sorted(by.items(), key=lambda kv: -kv[1][0]))
+                lines.append('              OCR 分账：%s' % detail)
+    except Exception:       # noqa: BLE001
+        pass
+    return '\n'.join(lines)
+
+
+def dump_summary():
+    try:
+        import json
+        os.makedirs(os.path.dirname(SUMMARY_PATH), exist_ok=True)
+        with open(SUMMARY_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'stats': STATS, 'text': summary_text(), 'tag': INSTANCE_TAG,
+                       'device': INSTANCE_DEV}, f, ensure_ascii=False, indent=1)
+    except Exception:       # noqa: BLE001
+        pass
+
+# ⭐ 2026-09-25 重标定：屏幕格距 144.0、棋盘左上 (36, 1002)（见 spots.GRID / fit_art.py）
+GRID = spots_mod.GRID
+# ⭐ 分辨率自适应：连接设备后由 apply_layout() 按实际屏幕刷新 ✓
+# ⭐ 分辨率自适应总开关（False = 完全按 1080×1920 常量跑 ⇒ 等于改 720p 之前 ✓）
+LEARN_TILES = False        # 边跑边学空地判据（默认关 ✓ 判据不稳会帮倒忙 ✗）
+# ⭐ 2026-09-27 用户口径：**只存「刚进图那一张」**（最干净 ✓ 后面轮次图标会盖住地块美术 ✗）
+#   · SAVE_FIRST（默认开）⇒ 每张图只存 **进图首帧** `runs/r_<HHMMSS>_0.png`（≈0.7MB/图）
+#   · SAVE_ROUNDS（默认关，**没挂窗口按钮**）⇒ 逐轮全存。只作深度调试的后门
+#     （`set MAPBOT_SAVE_ROUNDS=1`），平时别开 —— 会堆一堆图，且核对用不上 ✗
+SAVE_ROUNDS = bool(os.environ.get('MAPBOT_SAVE_ROUNDS'))
+SAVE_FIRST = os.environ.get('MAPBOT_SAVE_FIRST', '1') != '0'
+# ⭐⭐ 2026-09-27 用户要求：「开一个新脚本抓另一个模拟器 —— 只进图截图退图，拿图片快一些」
+#   `--collect-only`（采图模式）：**进图 → 存首帧 → 退图**，不揭格 / 不打怪 / 不买 /
+#   不补点 / 不背包升星 ⇒ 一张图 ≈ 30~40 秒换 1 张首帧（正常推图 ≈ 4 分钟才 1 张）
+#   ⚠ 成本不变：**进图瞬间扣 25 体力**（实测 2282→2257、2180→2155，两次都是恰好 25），
+#      退图**不退**体力 ⇒ 这是「用体力换图片」，不会白嫖 ✓
+COLLECT_ONLY = False
+SKIP_SPAWN_CLICK = False   # 执行序列里是否跳过出生点（默认关 ✓ 开了揭示起不来 ✗）
+OPT_SOLVER = True     # ⭐ 每轮用精确解算器规划点序（最省体力 ✓ fail-open ✓）
+ADAPTIVE_LAYOUT = False
+_GRID_CALIBRATED = {'done': False}   # 棋盘自检只跑一次 ✓
+LAYOUT = layout_mod.DEFAULT        # 默认 = 参考分辨率 1080×1920 ✓
+FIGHT_Y = 735
+DISPATCH_BTN = (891, 1507)   # 「一键派遣」/「开始探索」（同一位置，两步 ✓）
+EXPLORE_BTN = (275, 736)     # 地块面板左边「探索」✓
+# ⭐ 面板掉落的高价值配色（源码 AreaBlockPanel.highValueColorCode ✓）
+#   顺序 = [C 绿, B 蓝, A 紫, S 橙, SS 红]；我们要的是**紫以上** ⇒ 取后三个 ✓
+HIGH_VALUE_COLORS = ((0x7d, 0x58, 0xa1), (0xbf, 0x77, 0x43), (0xe5, 0x50, 0x50))
+
+
+def has_high_value_drop(img, tol=26, min_px=60):
+    """面板区域里有没有紫/橙/红（A/S/SS）⇒ 决定值不值得点「探索」✓
+
+    面板一般在中部（y 600~1000），这里整屏扫（更稳 ✓），命中像素数 ≥ min_px 才算 ✓
+    """
+    try:
+        import numpy as _np
+        if img is None:
+            return False
+        h, w = img.shape[:2]
+        band = img[int(h * 0.30):int(h * 0.60), :]
+        b = band[:, :, 0].astype(_np.int16)
+        g = band[:, :, 1].astype(_np.int16)
+        r = band[:, :, 2].astype(_np.int16)
+        for (rr, gg, bb) in HIGH_VALUE_COLORS:
+            m = ((abs(r - rr) <= tol) & (abs(g - gg) <= tol) & (abs(b - bb) <= tol))
+            if int(m.sum()) >= min_px:
+                return True
+        return False
+    except Exception:       # noqa: BLE001
+        return True         # 判不了就别拦（宁可点探索 ✓）
+
+# 逐格分类器缓存（按图号；一局只建一次，约 1~2 秒）
+_BOARDS = {}
+
+
+def apply_layout(w, h):
+    """按实际屏幕尺寸刷新所有坐标常量 ✓（1080×1920 下与旧值完全一致 ✓）
+
+    ⚠ ADAPTIVE_LAYOUT = False ⇒ **直接返回**（不改任何东西 ✓）
+      ⇒ 全部常量保持 1080×1920 原值 ⇒ 行为等于"改 720p 之前" ✓
+    """
+    global LAYOUT, FIGHT_Y, DISPATCH_BTN, EXPLORE_BTN
+    global CLOSE_X_RIGHT, CLOSE_X_LEFT, BACK_BTN, CLOSE_TR_PT, START_ADV
+    global END_ADV, ENTER_MAP, SLOTS_Y, SLOT_XS, GRID
+    if not ADAPTIVE_LAYOUT:
+        return LAYOUT
+
+    # 在连接设备后调用一次即可 ✓ 之后 FIGHT_Y / DISPATCH_BTN / EXPLORE_BTN /
+    # 槽位 y / 骰子区 / X 按钮位置等全部随屏幕缩放 ✓
+    LAYOUT = layout_mod.Layout(w, h)
+    FIGHT_Y = LAYOUT.sy(layout_mod.REF['fight_y'])
+    DISPATCH_BTN = LAYOUT.dispatch_btn
+    EXPLORE_BTN = LAYOUT.explore_btn
+    CLOSE_X_RIGHT = LAYOUT.sx(layout_mod.REF['close_x_right'])
+    CLOSE_X_LEFT = LAYOUT.sx(layout_mod.REF['close_x_left'])
+    BACK_BTN = LAYOUT.pt(*layout_mod.REF['back_btn'])
+    CLOSE_TR_PT = LAYOUT.pt(*layout_mod.REF['close_bag'])
+    START_ADV = LAYOUT.pt(*layout_mod.REF['start_adv'])
+    END_ADV = LAYOUT.pt(*layout_mod.REF['end_adv'])
+    ENTER_MAP = LAYOUT.pt(*layout_mod.REF['enter_map'])
+    SLOTS_Y = LAYOUT.sy(layout_mod.REF['slots_y'])
+    SLOT_XS = [LAYOUT.sx(x) for x in layout_mod.REF['slots_x']]
+    # ⭐ 标记识别也要自适应 ✓：尺度区间与棋盘几何同步缩放 ✓
+    #   （GLYPH_SCALES 写死 3.8~5.2 是 1080×1920 的 ✓ 别的分辨率下标记会变大/变小 ✗）
+    try:
+        import marks as _mk
+        s0, s1 = getattr(_mk, 'GLYPH_SCALES_BASE', None) or (
+            min(_mk.GLYPH_SCALES), max(_mk.GLYPH_SCALES))
+        _mk.GLYPH_SCALES_BASE = (s0, s1)
+        n = max(3, int(round((s1 - s0) / 0.1)) + 1)
+        _mk.GLYPH_SCALES = [round((s0 + (s1 - s0) * i / (n - 1)) * LAYOUT.k, 3)
+                            for i in range(n)]
+        _mk.GRID = {'x0': LAYOUT.sx(layout_mod.REF['grid_x0']),
+                    'y0': LAYOUT.sy(layout_mod.REF['grid_y0']),
+                    'cx': LAYOUT.s(layout_mod.REF['grid_cx']),
+                    'cy': LAYOUT.s(layout_mod.REF['grid_cy'])}
+    except Exception:       # noqa: BLE001
+        pass
+
+    # ⭐ 奖励行"大拇指装备"识别也要自适应 ✓（badge 的尺度/搜索框随分辨率缩 ✓）
+    try:
+        import badge as _bg
+        _bg.SCALE_K = LAYOUT.k
+    except Exception:       # noqa: BLE001
+        pass
+
+    # 棋盘几何也同步给 spots ✓（分类器按新格距工作 ✓）
+    try:
+        import spots as _sp
+        g = LAYOUT.grid
+        # ⭐ 必须**原地更新**（explore_loop.GRID 是 spots.GRID 的别名 ✓ 重新赋值它看不到 ✗）
+        _sp.GRID.update({'x0': g['x0'], 'y0': g['y0'], 'cx': g['cx'], 'cy': g['cy'],
+                         'pitch': g['cx'], 'cols': g.get('cols', 7),
+                         'rows': g.get('rows', 5)})
+        # 再把本模块的别名重新指一次（防御 ✓）
+        globals()['GRID'] = _sp.GRID
+        # ⭐ 三份 GRID 必须一致 ✓（marks 是独立的一份 ✗）
+        try:
+            import marks as _mk3
+            _mk3.GRID = {'x0': g['x0'], 'y0': g['y0'], 'cx': g['cx'], 'cy': g['cy']}
+        except Exception:       # noqa: BLE001
+            pass
+        _sp.SCALE = g['cx'] / _sp.DESIGN_PITCH if hasattr(_sp, 'DESIGN_PITCH') else _sp.SCALE
+    except Exception:       # noqa: BLE001
+        pass
+    return LAYOUT
+
+
+def auto_calibrate_grid(b, img, mapname=None, code=None, log=None):
+    """⭐ 分辨率自适应：自动检测棋盘几何并用**分类分数**标定 ✓
+
+    · 只在一张图开始时调用一次 ✓
+    · 只有新几何的识别均分**高于**当前几何才采纳 ✓（绝不退化 ✗）
+    """
+    try:
+        import grid_detect as GD
+    except Exception as e:      # noqa: BLE001
+        say('   ⚠ 棋盘自检模块不可用：%r' % (e,))
+        return None
+    code = code or spots_mod.code_of(mapname or '夏日海滩')
+    hint = dict(LAYOUT.grid)
+    try:
+        # 当前几何的基线分
+        cur = spots_mod.Board(code, grid=hint).state(img)
+        base = sorted((v.get('score') or 0) for v in (cur or {}).values())
+        base = sum(base[-10:]) / max(1, len(base[-10:]))
+
+        det = GD.calibrate(img, code, hint=hint)
+        if not det:
+            say('   ⚠ 棋盘自检失败 ⇒ 用缩放几何（x0=%d y0=%d 格距=%.1f）✓'
+                % (hint['x0'], hint['y0'], hint['cx']))
+            return None
+        say('   · 棋盘自检：x0=%d y0=%d 格距=%.1f/%.1f 识别均分 %.3f（当前几何 %.3f）'
+            % (det['x0'], det['y0'], det['cx'], det['cy'], det['score'], base))
+        if det.get('score') is None:
+            # 被一致性闸拒绝（偏差过大 / 无法评分 ✓）⇒ 保持缩放几何 ✓
+            say('   · 自检未通过一致性检查 ⇒ 保持缩放几何 ✓（x0=%d y0=%d 格距=%.1f）'
+                % (hint['x0'], hint['y0'], hint['cx']))
+            return None
+        if det.get('src') == 'rejected_shift':
+            say('   · 自检结果与当前几何偏差过大（>半格）⇒ 保持缩放几何 ✓（防点击偏移 ✗）')
+            return None
+        # ⭐ 提升不明显也不换（避免噪声把几何带偏 ✗ 用户 2026-09-27）
+        if det['score'] is None or det['score'] < base + 0.10:
+            say('   · 自检提升不明显（%.3f vs %.3f）⇒ 保持缩放几何 ✓'
+                % (det['score'] or 0, base))
+            return None
+        # 采纳 ✓
+        _newg = {'x0': det['x0'], 'y0': det['y0'],
+                 'cx': det['cx'], 'cy': det['cy'],
+                 'pitch': det['cx'],
+                 'cols': spots_mod.GRID.get('cols', 7),
+                 'rows': spots_mod.GRID.get('rows', 5)}
+        spots_mod.GRID.update(_newg)
+        globals()['GRID'] = spots_mod.GRID
+        # ⭐⭐ 2026-09-27 关键修复：marks 的 GRID 是**另一份** ✗
+        #   不同步 ⇒ 标记按旧格心找、点击按新格心点 ⇒ 标记错位到别的格子 ✗✗
+        try:
+            import marks as _mk2
+            _mk2.GRID = dict(_newg)
+        except Exception:       # noqa: BLE001
+            pass
+        try:
+            _BOARDS.clear()          # 让分类器按新几何重建 ✓
+        except Exception:            # noqa: BLE001
+            pass
+        say('   · ✓ 已采纳自检几何（x0=%d y0=%d 格距=%.1f）' % (det['x0'], det['y0'], det['cx']))
+        if log is not None:
+            log.append({'grid_calibrate': {'x0': det['x0'], 'y0': det['y0'],
+                                           'cx': det['cx'], 'cy': det['cy'],
+                                           'score': det['score'], 'base': round(base, 4)}})
+        return det
+    except Exception as e:      # noqa: BLE001
+        say('   ⚠ 棋盘自检异常 ⇒ 继续用缩放几何：%r' % (e,))
+        return None
+
+
+def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True):
+    """⭐ 2026-09-28 抽公共：给模型（MapSim.from_observation）用的「观测合并」
+    （solver_order / eff_order **共用这一份**，防止两处漂移 —— 参照 _fix_blank_cost_1
+    只改 mapsolve 漏 mapsim 的教训 ✓）
+
+    · `c['st']`（分类器格）∪ `st['marks']`（标记扫描）—— 标记优先 ✓
+    · 有标记但分类器没给出的格补进去（认不出 ⇒ mark='battle' 兜底 ✓）
+    · mark_revealed：
+        True（solver 默认，保持原行为）—— 标记格当"可点"喂给 mapsolve
+        （mapsolve 需要目标可达才求解；真机点不动由 nochange 兜底 ✓）
+        False（**eff 必须用**）—— 雾中标记格保持"可见但不可点"：
+        2026-09-28 离线验证抓到：True 时 EffPolicy 推演盘一步把雾中 boss/商人
+        "消耗掉" ⇒ targets 丢方向、真机执行全是 fogged noop ⇒ 空转 ✗✗
+    """
+    _mk_all = st.get('marks') or {}
+    _cells_merged = {}
+    for _k, _v in (c.get('st') or {}).items():
+        _vv = dict(_v)
+        _mlist = list((_mk_all.get(_k) or {}).get('marks') or [])
+        # ⭐⭐ 2026-09-27 用户口径：「我认不出来的那几个就是战斗格」✓
+        if _mlist:
+            _vv['marks'] = _mlist
+        # ⭐⭐⭐ 2026-09-28 二次修正（用户真机报「被宝箱隔断的草地被当连通」）：
+        #   此处曾有 `score>=0.8 ⇒ revealed=True` —— **错误，已撤回**。
+        #   分类器能"看穿雾"：雾格也拿 score 0.91（ratio 0.65）⇒ 该规则把**雾格**
+        #   翻成"已揭示草地" ⇒ plain_group 穿雾假连通 ⇒ 规划认为能连锁 ✗。
+        #   正确语义：**ratio 是"揭示状态"的唯一可靠信号**
+        #   （雾 ratio≈0.65 vs 已揭示 ~1.0，干净间隔）；score 只说明"底下是什么"。
+        #   首帧暗罩（全盘 ratio 被进图动画压到 0.65）的正确修法 =
+        #   **进图后等暗罩散去再识别**（见 enter_map 的 _wait_fog_clear ✓）。
+        _cells_merged[_k] = _vv
+    # ⭐⭐ 2026-09-27：**有标记但分类器没给出**的格子必须补进模型 ✓
+    #   （实测 boss 格 (1,6) 六轮 board 全是 None ✗ 但标记看得到 ✓）
+    for _k, _m in _mk_all.items():
+        if _k in _cells_merged:
+            continue
+        _ml = list(_m.get('marks') or [])
+        if not _ml:
+            continue
+        _cells_merged[_k] = {'sid': None, 'name': None, 'marks': _ml,
+                             'revealed': mark_revealed,
+                             'ratio': None, 'score': None, '_from_mark': True}
+        if 'battle' not in _cells_merged[_k]['marks']:
+            _cells_merged[_k]['marks'].append('battle')   # 认不出 ⇒ 当战斗格 ✓
+        if log is not None:
+            log.append({tag: 'mark_cell_added', 'cell': '%d,%d' % _k,
+                        'marks': _ml})
+    return _cells_merged
+
+
+def eff_order(st, c, log=None, max_steps=20):
+    """⭐⭐ 2026-09-28：EffPolicy（片感知 + 一步前瞻）在线点序 —— solver 失败的兜底 ✓
+
+    用与 solver_order **同一份**观测合并口径（_cells_for_model → from_observation）建盘，
+    再让 EffPolicy 推演整条点序（strategy.EffPolicy.plan ✓）。特点：
+      · 毫秒级（solver 是秒~分钟级）⇒ 调用方可**每轮用最新观测重算**（在线策略 ✓）
+      · 部分观测天然支持：雾格 board=-1 不进候选（visible() 只给已揭示格 ✓）
+      · 2000 张独立验证 11.021 vs 旧启发式 11.675（省 5.61%，地图生成算法.md §16）
+    任何异常返回 [] ⇒ 调用方退回旧启发式 ✓（fail-open ✓）
+    """
+    try:
+        import mapsim as _ms
+        from strategy import EffPolicy as _Eff
+        _cells_merged = _cells_for_model(st, c, log=log, tag='eff',
+                                         mark_revealed=False)
+        if not _cells_merged:
+            return []
+        sim = _ms.MapSim.from_observation(_cells_merged, spots_mod.spot_rows())
+        # ⭐ stop_when_no_target=False：观测盘上目标可能还在雾里（targets 空 ≠ 图清完）
+        #   ⇒ 没目标也继续开路（2026-09-28 离线验证抓到的坑，见 strategy.plan 注释 ✓）
+        plan = _Eff().plan(sim, max_click=max_steps, stop_when_no_target=False)
+        if log is not None:
+            log.append({'eff': 'ok', 'steps': len(plan),
+                        'order': ['%d,%d' % p for p in plan]})
+        return plan
+    except Exception as e:      # noqa: BLE001
+        if log is not None:
+            log.append({'eff': 'error', 'e': repr(e)[:100]})
+        return []
+
+
+def solver_order(st, c, log=None, max_steps=6):
+    """⭐ 用精确解算器算"当前信息下的最省体力点序" ✓
+
+    返回 [(cell_row, cell_col), …]（按最优顺序 ✓ 取前 max_steps 步）
+    任何异常/无解都返回 [] ⇒ 调用方退回启发式 ✓（fail-open ✓）
+    """
+    if not OPT_SOLVER:
+        return []
+    try:
+        import mapsim as _ms
+        import mapsolve as _mv
+        _t0 = time.time()
+        # ⭐⭐ 2026-09-27 根因修复（用户报「不点 1 体空白格、反去打更贵的战斗格」）：
+        #   原样只传 `c['st']`（**地块分类** ✓）⇒ 模型看不到**标记** ⇒ targets 为空
+        #   ⇒ 求解器不知道"点这个空白格能解锁两个标记格" ⇒ 点序变成乱走 ✗✗
+        #   2026-09-28：合并逻辑抽成 _cells_for_model（eff_order 共用 ✓）
+        _cells_merged = _cells_for_model(st, c, log=log, tag='solver')
+        # ⚠ 2026-09-27 试过"摘掉出生点不点它" ✗ —— 实测**模型直接无解**：
+        #     含出生点 ⇒ cost=11 / 4 步 ✓ ；摘掉 ⇒ cost=None / 0 步 ✗
+        #   原因：开局其它空地块多为雾格（点不动 ✓）⇒ 出生点是唯一能启动"连锁揭示"的格 ✓
+        #   ⇒ 保留出生点 ✓（它那一步不是多余的 ✓）；如需从"执行序列"里剔除，见下方开关 ✓
+        sim = _ms.MapSim.from_observation(_cells_merged, spots_mod.spot_rows())
+        prob = _mv.Problem(sim)
+        # ⭐ 2026-09-28 加 max_secs=8（用户报「进图要等很久」）：复杂盘 60k 状态枚举
+        #   可达 30~60s，失败后下轮还重试 ⇒ 进图几分钟不点格 ✗。8 秒算不出就
+        #   fail-open ⇒（今日新链）EffPolicy 毫秒级接管 ✓
+        _rep = {}
+        cost, plan = _mv.solve(prob, max_states=60000, max_secs=8, report=_rep)
+        if not plan:
+            if log is not None:
+                log.append({'solver': 'no_plan', 'cost': cost,
+                            'reason': _rep.get('reason'),
+                            'expanded': _rep.get('expanded'),
+                            'secs': round(time.time() - _t0, 2)})
+            return []
+        # block idx → 可点的 cell（取该块已揭示的第一个格 ✓）
+        out = []
+        for bi, _cost in plan[:max_steps]:
+            cells = [cc for cc, b2 in enumerate(sim.board) if b2 == bi]
+            pick = None
+            for cc in cells:
+                r, c2 = _ms.rc_of(cc)
+                if (r, c2) in (c.get('st') or {}):
+                    pick = (r, c2)
+                    break
+            if pick is None and cells:
+                pick = _ms.rc_of(cells[0])
+            if pick is not None and pick not in out:
+                out.append(pick)
+        try:
+            _nt = len(sim.targets())
+        except Exception:       # noqa: BLE001
+            _nt = -1
+        # ⭐ 2026-09-27：**输出里隐去出生点**（执行仍保留 ✓ 否则揭示起不来 ✗）
+        _sp_px2 = st.get('spawn') or st.get('camp')
+        _sp_rc2 = None
+        if _sp_px2:
+            try:
+                _sp_rc2 = cell_of(_sp_px2[0], _sp_px2[1])
+            except Exception:       # noqa: BLE001
+                _sp_rc2 = None
+        # ⭐ 2026-09-27 用户报「规划给我看的是错的，执行的是对的」⇒ **显示完整** ✓
+        #   （之前隐去出生点 ⇒ 显示缺第一步 ⇒ 看起来像错的 ✗）
+        _disp = list(out)
+        _hidden = []
+        # ⭐ 2026-09-27 用户要求：**步数统计也要减掉出生点那一步** ✓
+        #   （显示里已隐去出生点 ✓ 步数还含它就不一致 ✗ "3 步"却只列 2 个 ✗）
+        _steps_disp = len(_disp)
+        if log is not None:
+            _rec = {'solver': 'ok', 'cost': cost, 'steps': _steps_disp,
+                    'steps_raw': len(plan), 'targets': _nt,
+                    'order': ['%d,%d' % p for p in _disp],
+                    'secs': round(time.time() - _t0, 2)}
+            if _hidden:
+                _rec['spawn_hidden'] = ['%d,%d' % p for p in _hidden]
+            log.append(_rec)
+        say('       · 精确规划：最省体力 %s，%d 步；先执行 %s'
+            % (cost, _steps_disp, ['%d,%d' % p for p in _disp]
+               or ['（只点出生点，已隐去）']))
+        return out
+    except Exception as e:      # noqa: BLE001
+        if log is not None:
+            log.append({'solver': 'error', 'e': repr(e)[:100]})
+        return []
+
+
+def board_for(mapname=None, code=None):
+    """取该图的地块分类器（mapname/code 二选一；失败返回 None）"""
+    code = code or spots_mod.code_of(mapname or '夏日海滩')
+    if not code:
+        return None
+    if code not in _BOARDS:
+        try:
+            _BOARDS[code] = spots_mod.Board(code)
+        except Exception as e:      # noqa: BLE001
+            print('[warn] 地块分类器构建失败 %s: %r' % (code, e))
+            _BOARDS[code] = None
+    return _BOARDS[code]
+
+
+def board_state(img, mapname=None, code=None):
+    """整盘状态 -> {(r,c): {...}}；失败返回 {}（调用方退回旧的启发式）"""
+    bd = board_for(mapname, code)
+    if bd is None:
+        return {}
+    _t0 = time.time()
+    try:
+        st = bd.state(img)
+        if not st:
+            # ⭐ 兜底：空结果 ⇒ 用更低门槛再试一次（小分辨率/雾格多时 ✓）
+            st = bd.state(img, thr=max(0.10, 0.80 * (float(bd.px) / 144.0) * 0.6))
+            if st:
+                say('   · 分类兜底：低门槛重试拿到 %d 格 ✓' % len(st))
+        STATS['classify'] = STATS.get('classify', 0.0) + (time.time() - _t0)
+        STATS['classify_n'] = STATS.get('classify_n', 0) + 1
+        return st
+    except Exception as e:          # noqa: BLE001
+        print('[warn] 地块分类失败: %r' % (e,))
+        return {}
+
+L = {
+ 'kick': ('其他设备', '退出游戏', '重新登录'),
+ 'low': ('能量不足', '体力不足'),
+ 'fight': '战斗事件', 'fbtn': '战斗', 'expl': '探索产出', 'ebtn': '探索',
+ # ⭐ 敌方预览面板（2026-09-25：用户报卡在「偶遇强敌」）——底部是「邀请挑战」+「开始战斗」
+ 'strong': ('偶遇强敌', '遭遇强敌'), 'sbtn': '开始战斗',
+ 'claim': ('领取', '继续'), 'ok': '确定', 'cancel': '取消',
+ 'end': '结束冒险', 'menu': ('快速扫荡', '进入地图'), 'enter': '进入地图',
+ 'win': '战斗胜利', 'lose': '战斗失败', 'close': '关闭',
+ 'hud': ('背包', '神石', '预言'),
+ 'desc': ('【正面】', '【负面】'),
+ 'dice': ('幸运草', '骰', '摇'),
+ 'special': ('旅行商人', '金属宝箱怪', '机巧宝箱怪', '黄金宝库', '勇者之墓',
+             '传承祭坛', '限时礼包', '献祭宝箱怪', '预言石碑'),
+ 'buy': ('购买', '解锁', '开启'),
+ 'buyout': ('旅行商人', '金属宝箱怪', '机巧宝箱怪', '黄金宝库'),
+ # 用户 09-25：特殊地块**只点这两个**，其余（勇者之墓/传承祭坛/限时礼包/献祭宝箱怪/
+ # 预言石碑/金属宝箱怪/机巧宝箱怪）一律无视
+ 'act_on': ('旅行商人', '黄金宝库'),
+ # ⭐「发现莱姆！」弹窗（用户 2026-09-25）：揭格/退图前补点都可能弹，**点「返回」关掉**
+ #   实测版面：标题「发现莱姆！」(529,771)、莱姆名 (541,1025)、**返回按钮 (539,1309)**
+ 'lime': ('莱姆', '发现莱姆'),
+ # ⭐「获得新装备！」弹窗（用户 2026-09-26 报卡住）：**同模板版面**
+ #   实测（1080×1920，OCR conf）：标题「获得新装备！」(531,992)、装备描述 (528,1101)、
+ #   **「返回」(540,1252) conf=1.00**
+ #   ⚠ 触发场景（用户口径）：① 打完大拇指(recommend)地块 ② 退图前补点（发现莱姆点那下）
+ #   ⚠ 不关掉它 ⇒ 整盘被遮 ⇒ board_hidden: all_dark ⇒ 认不到任何地块 ⇒ finish: timeout ✗
+ 'newequip': ('获得新装备', '获得装备', '新装备'),
+ # ⭐「预言石板」占卜面板（用户 2026-09-26）：点出后就关掉，并**拉黑这格不再点** ✓
+ #   ⚠ 别写成单独的 '预言' —— `L['hud']` 里也有「预言」（主界面入口），会误伤 ✓
+ 'prophecy': ('预言石板', '预言石碑', '占卜'),
+}
+
+# ⭐⭐ 万能关闭点（用户 2026-09-26 实测口径：「点击中间最下面就可以关闭几乎所有弹窗，
+#   而且还会在地图界面」）—— 就是底部导航中间那格 (541,1890)（平时是「开始冒险」）✓
+#   有了它就不必给每个弹窗单独写关闭逻辑（预言石板/莱姆/各种未知面板都吃这一下）
+#
+# ⚠⚠ 定位（用户 2026-09-26 最新口径）：「**万能点位可以用来应对异常情况，防止任务过早中断**」
+#   ⇒ 它是**异常兜底**，不是常规动作 ✗（别每轮都点一下）
+#   ✅ 安全性（用户 2026-09-26 补充实测）：「**那边点了非常安全，不会有变化**」
+#     我 2026-09-26 也复测过：在**选图界面**（那格文字正是「开始冒险」）点它，
+#     前后两张 OCR 完全一致（只有体力自然 +1、倒计时正常走）⇒ 无副作用 ✓
+#     （底部导航 公会/角色/开始冒险/斗技场/图鉴 在所有界面常驻，但点中间那格不会开图）
+#   ⇒ 所以可以放心用作兜底；但仍**必须**保留「先认面板类型」：
+#     战斗界面（有战斗胜利/失败/回放战斗）**只能点「关闭」(577,1439)** ✗不能点开始冒险
+#     有底部「关闭」按钮的（结算/奖励面板）⇒ 点那个关闭 ✓
+#     其余未知面板 ⇒ 点万能位 (541,1890) ✓
+#   使用场景：① 整盘读成暗格（面板盖住棋盘）；② 退图 90 秒快超时的最后一救；
+#            ③ 连续两轮一个可识别元素都认不到；④ 已认出面板类型（预言石板等）
+UNIVERSAL_CLOSE = (541, 1890)
+
+
+def universal_close(b, log, items=None, probe=None, where='', at=None):
+    """关当前弹窗 —— **先认面板类型再决定点哪** ✓（也是任务"异常兜底"，用户 2026-09-26 口径）
+
+    ⚠⚠ 用户 2026-09-26 明确：「**战斗界面还是得点关闭，不能点开始冒险**」✗
+      ⇒ 判断顺序：
+        ① 认到底部「关闭」按钮（战斗结算/胜利界面都是它）⇒ 点它 ✓
+        ② 认到是战斗面板（战斗胜利/失败/回放战斗）但没量到「关闭」⇒ 按实测坐标
+           **(577,1439)** 点关闭 ✓（**绝不点 (541,1890)** ✗）
+        ③ 其它弹窗 ⇒ 点「中间最下面」万能位 (541,1890) ✓（用户实测：几乎所有弹窗都能关，
+           而且关完还在图里）
+      ✅ 安全性：用户 2026-09-26 补充「**那边点了非常安全，不会有变化**」⇒ 即使当前没弹窗，
+        点它也无副作用（不切图/不走掉）⇒ 可放心当兜底用，但**别当常规动作每轮点** ✗
+      关完还要**验证**（probe）⇒ 没关掉就走老兜底（找 X / 关闭符 / 硬脱困），不占死闭环。
+
+    probe = 弹窗的识别文字（用来自查真的关掉了）
+    at    = 点出这个弹窗的格子坐标（记下来给调用方拉黑 ⇒ 以后不再点它）
+    """
+    items = list(items or [])
+    cl = bottom_close(items)
+    # ⚠ 战斗面板判据必须严格（见 is_battle_panel 的注释：地图上「首领战斗胜利」会让
+    #   宽松判据误判 ⇒ 点在棋盘格上 = 乱点 ✗）
+    is_battle = is_battle_panel(items)
+    if cl:
+        _tap(b, cl['cx'], cl['cy'], wait=1.8)
+        rec = {'panel_close': 'bottom_close', 'where': where, 'at': (cl['cx'], cl['cy'])}
+    elif is_battle:
+        b.tap(int(LAYOUT.sx(577)), int(LAYOUT.sy(1439)), wait=1.8)
+        rec = {'panel_close': 'battle_close_fixed', 'where': where,
+               'at': (577, 1439), 'note': '战斗界面点关闭，不点开始冒险'}
+    else:
+        b.tap(int(LAYOUT.sx(UNIVERSAL_CLOSE[0])), int(LAYOUT.sy(UNIVERSAL_CLOSE[1])),
+              wait=1.6)
+        rec = {'universal_close': where, 'at': list(UNIVERSAL_CLOSE)}
+    if at:
+        rec['cell'] = tuple(at) if isinstance(at, (list, tuple)) else at
+    gone = True
+    if probe:
+        gone = panel_gone(b, probe)
+        rec['still'] = (not gone)
+    if not gone:
+        # 万能位没关掉 ⇒ 老路子：找 X / 找关闭符 / 硬脱困 ✓（一样要验证）
+        n = close_x_panels(b, b.img())
+        x = find_x(ocr_ch(b, tag='uni'))
+        if x:
+            _tap(b, x['cx'], x['cy'], wait=1.3)
+            n += 1
+        if not n:
+            force_unstick(b, log, 'universal_close', ctx={'tapped': at})
+        rec['fallback'] = n
+    log.append(rec)
+    return True
+
+
+def block_cell(log, st, cell, why):
+    """把某格**拉黑**（本图不再点）——用户 2026-09-26：点出预言石板的那格不要再点 ✓"""
+    if not cell:
+        return
+    try:
+        c = (int(cell[0]), int(cell[1]))
+    except (TypeError, ValueError, IndexError):
+        return
+    if isinstance(st, dict):
+        st.setdefault('done', set()).add(c)
+    log.append({'cell_blocked': why, 'at': list(c)})
+
+
+def _bottom_ok(items, lo=900, hi=1650):
+    """弹窗下半屏的「返回 / 确定 / 确认」按钮（取最靠下那条）"""
+    best = None
+    for t in items or []:
+        s = (t.get('text') or '').strip().replace(' ', '')
+        if s in ('返回', '确定', '确认') and LAYOUT.sy(lo) < t['cy'] < LAYOUT.sy(hi):
+            if best is None or t['cy'] > best['cy']:
+                best = t
+    return best
+
+
+def lime_back(items):
+    """「发现莱姆！」弹窗的返回按钮（按文本找，实测 (539,1309)）"""
+    if not fb(items, *L['lime']):
+        return None
+    return _bottom_ok(items, 900, 1600)
+
+
+def newequip_back(items):
+    """「获得新装备！」弹窗的返回按钮（实测 (540,1252)，2026-09-26 补）"""
+    if not fb(items, *L['newequip']):
+        return None
+    return _bottom_ok(items, 900, 1650)
+
+
+def close_newequip(b, items, log, where, at=None, verify=True):
+    """⭐「获得新装备！」弹窗 → 点底部「返回」关掉；关不掉就强制脱困 ✓
+
+    返回 True 表示「这个弹窗我处理了」（调用方据此 continue / return 'handled'）。
+    ⚠ 按钮坐标**按文字找**，不写死：点序分支只 OCR 了 y130~1080，标题在 y≈992 能认到，
+      但按钮在 y≈1252 不见得在同一条带里 ⇒ 补一次**底部窄带 OCR** 精确取按钮（罕见才走）。
+    """
+    if not fb(items, *L['newequip']):
+        return False
+    nb = _bottom_ok(items)
+    if nb is None:
+        it = ocr_ch(b, band=(LAYOUT.sy(1050), LAYOUT.sy(1650)), tag='newequip')
+        nb = _bottom_ok(it)
+    if nb is None:                       # 兜底：实测位置（1080×1920）
+        nb = {'cx': int(LAYOUT.sx(540)), 'cy': int(LAYOUT.sy(1252))}
+    _tap(b, int(nb['cx']), int(nb['cy']), wait=1.6)
+    rec = {'newequip_back': where, 'at': (int(nb['cx']), int(nb['cy']))}
+    if at:
+        rec['tap'] = tuple(at) if isinstance(at, (list, tuple)) else at
+    key = 'newequip_%s' % where
+    if verify and not panel_gone(b, L['newequip'][0]):
+        # 关不掉 ⇒ 别让循环对着面板继续点 ✗（老毛病：不验证就 return handled = 死循环）
+        _PANEL_STUCK[key] = _PANEL_STUCK.get(key, 0) + 1
+        force_unstick(b, log, 'newequip_%s' % where, ctx={'tapped': at})
+        rec['still'] = True
+        rec['n'] = _PANEL_STUCK[key]
+    else:
+        _PANEL_STUCK[key] = 0
+    log.append(rec)
+    return True
+
+
+def flush(log):
+    try:
+        import json
+        with open(LOG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(log, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    # ⭐ 统计**边跑边落盘**：这样即使被「停止」（taskkill /F 杀进程）也能拿到最新总结
+    dump_summary()
+
+
+# ⭐⭐ 2026-09-27 用户要求：每连刷 N 张图，去背包→装备→**一键升级**
+BAG_EVERY = 10          # 每几张图升级一次（0 = 关闭 ✓）
+BAG_STEPS = (
+    # (说明,           候选文字（命中任一即点 ✓）,        点完等几秒, 必须命中?)
+    ('打开背包',       ('背包', '道具'),                    2.2, True),
+    ('进装备页',       ('装备', '装备栏', '装 备'),          2.2, False),
+    ('一键升级',       ('一键升级', '一键升阶', '一键强化'),   2.6, True),
+    ('确认',           ('确定', '确认', '是'),               2.6, False),
+    ('返回',           ('返回', '关闭'),                    2.2, False),
+)
+
+
+def bag_upgrade(b, log, tag='bag'):
+    """⭐ 每 N 张图去背包「装备」页做一键升级（用户 2026-09-27 要求 ✓）
+
+    流程**复用 use_supply 那套**（用户：「和之前一样」✓）：
+        公会 → 背包 → **装备页签** → 一键升级 →（确定）→ 关背包回地图界面
+    ✅ 页签与按钮**优先按 OCR 文字找** ✓（不写死坐标 ✓）；找不到才用兜底坐标 ✓
+    ✅ **必须站在选图界面**才动手（和 use_supply 同款安全闸 ✓ 免得在地图里误点棋盘 ✗）
+    """
+    try:
+        b.snap(tag + '0')
+        items = b.ocr(tag=tag)
+        txt = [i['text'] for i in items]
+        in_map_now = any('结束冒险' in t for t in txt)
+        on_select = any(any(k in t for k in ('进入地图', '快速扫荡', '开始冒险', '星界秘境'))
+                        for t in txt)
+        if in_map_now or not on_select:
+            log.append({'bag': 'skip_not_on_select', 'in_map': bool(in_map_now),
+                        'on_select': bool(on_select), 'texts': txt[:14]})
+            say('   ⚙ 背包升级：现在不在选图界面 ⇒ 跳过（免得误点地图格 ✗）')
+            return False
+        say('   ⚙ 背包一键升级：开始（复用补给的流程 ✓）')
+
+        # ① 公会（看不到 邮件/商店/招募 就先去公会 ✓）
+        if not any(('邮件' in t) or ('商店' in t) or ('招募' in t) for t in txt):
+            b.tap(GUILD_BTN[0], GUILD_BTN[1], wait=1.6)
+            log.append({'bag': 'open_guild', 'at': GUILD_BTN})
+        # ② 背包
+        b.tap(BAG_BTN[0], BAG_BTN[1], wait=1.8)
+        log.append({'bag': 'open_bag', 'at': BAG_BTN})
+        b.snap(tag + '1')
+        items = b.ocr(tag=tag)
+        if not any('背包' in (i['text'] or '') for i in items):
+            log.append({'bag': 'bag_not_open',
+                        'texts': [i['text'] for i in items][:20]})
+            say('   ⚙ 背包没打开（文字已记日志）✗')
+            _close_bag(b, items, log)
+            return False
+        # ③ **装备页签**（先 OCR 找「装备」✓ 找不到用兜底坐标 ✓）
+        tab = None
+        for i in items:
+            t = (i['text'] or '').replace(' ', '')
+            if t in ('装备', '装 备') and i.get('cy', 999) < 400:
+                tab = i
+                break
+        at = (tab['cx'], tab['cy']) if tab else EQUIP_TAB
+        b.tap(at[0], at[1], wait=1.6)
+        log.append({'bag': 'equip_tab', 'at': at, 'by': 'ocr' if tab else 'fallback'})
+        say('      · 装备页 → 点 (%d,%d) %s' % (at[0], at[1], '（OCR 找到 ✓）' if tab else '（兜底坐标 ✓）'))
+        # ④ 一键升级（OCR 找 ✓）
+        b.snap(tag + '2')
+        items = b.ocr(tag=tag)
+        up = None
+        for i in items:
+            t = (i['text'] or '').replace(' ', '')
+            # ⭐ 2026-09-27 用户确认：这个按钮叫「一键升星」✓（实测 (925,1705) ✓）
+            if any(k in t for k in ('一键升星', '键升星', '一键升级', '一键升阶',
+                                    '一键强化')) and len(t) <= 8:
+                up = i
+                break
+        if not up:
+            # ⭐ 2026-09-27：OCR 没找到就**用实测兜底坐标**点一下 ✓（实测 (925,1705) ✓）
+            log.append({'bag': 'upgrade_fallback_btn', 'at': UPGRADE_BTN,
+                        'texts': [i['text'] for i in items][:26]})
+            say('   ⚙ OCR 没找到按钮 ⇒ 用兜底坐标 %s 点一下 ✓' % (UPGRADE_BTN,))
+            b.tap(UPGRADE_BTN[0], UPGRADE_BTN[1], wait=2.6)
+            up = {'cx': UPGRADE_BTN[0], 'cy': UPGRADE_BTN[1], 'text': '(兜底)'}
+        else:
+            b.tap(up['cx'], up['cy'], wait=2.6)
+        log.append({'bag': 'upgrade_tap', 'text': up.get('text'), 'at': (up['cx'], up['cy'])})
+        say('      · 一键升级 → 点了「%s」(%d,%d) ✓' % (up.get('text'), up['cx'], up['cy']))
+        # ⑤ 确认弹框：**点按钮行里最右的那个**（= 消耗金币升星 ✓ 用户口径 ✓）
+        #   实测：弹框按钮行 y≈1112 ✓ 左边是「取消」(x≈334 ✓)
+        #         右边那个按钮上**只有金币数**（如「8000」✗ 没有"确定"字样 ✗）
+        #   ⇒ 判据必须**与文字无关** ✓ 只按位置取最右 ✓（旧判据会误选「取消」✗✗）
+        b.snap(tag + '3')
+        items = b.ocr(tag=tag)
+        row = [i for i in items
+               if 1020 <= i.get('cy', 0) <= 1220 and (i.get('text') or '').strip()]
+        cf = max(row, key=lambda z: z['cx']) if row else None
+        if cf:
+            b.tap(cf['cx'], cf['cy'], wait=2.8)
+            log.append({'bag': 'confirm_rightmost', 'text': cf.get('text'),
+                        'at': (cf['cx'], cf['cy']),
+                        'row': [(i['cx'], i['cy'], i['text']) for i in sorted(row, key=lambda z: z['cx'])]})
+            say('      · 确认弹框 → 点最右「%s」(%d,%d) ✓（左边那个是取消 ✗ 不点 ✓）'
+                % (cf.get('text'), cf['cx'], cf['cy']))
+        else:
+            b.tap(803, 1112, wait=2.8)      # 实测坐标（消耗金币升星 ✓）
+            log.append({'bag': 'confirm_fallback', 'at': (803, 1112),
+                        'texts': [i['text'] for i in items][:20]})
+            say('      · 确认弹框 → 没读到按钮行 ⇒ 兜底点实测坐标 (803,1112) ✓')
+        # ⑥ 回选图界面 ✓
+        #   ⚠ 实测（2026-09-27）：
+        #     ① `_close_bag`（返回/关闭/X）**关不掉背包** ✗
+        #     ② 升星后会弹「恭喜获得 / 升星奖励」框 ⇒ **挡住底部导航** ✗
+        #   ⇒ 循环最多 5 次：先关弹框（返回/关闭/确定）✓ 再点底部「开始冒险」✓
+        #     直到 OCR 认到「进入地图/星界秘境」为止 ✓
+        done = False
+        for _k in range(5):
+            items2 = b.ocr(tag=tag + '_back%d' % _k)
+            txt2 = [(i.get('text') or '') for i in items2]
+            if any(any(k in t for k in ('进入地图', '快速扫荡', '星界秘境')) for t in txt2):
+                done = True
+                log.append({'bag': 'back_ok', 'round': _k})
+                break
+            # 先关弹框 ✓
+            pop = None
+            for i in items2:
+                t = (i.get('text') or '').replace(' ', '')
+                if t in ('返回', '关闭', '确定', '确认') and i.get('cy', 0) > 1200:
+                    pop = i
+                    break
+            if pop:
+                b.tap(pop['cx'], pop['cy'], wait=1.8)
+                log.append({'bag': 'close_popup', 'text': pop.get('text'),
+                            'at': (pop['cx'], pop['cy']), 'round': _k})
+                say('      · 关弹框「%s」✓' % pop.get('text'))
+                continue
+            # 再点底部导航「开始冒险」✓
+            nav = None
+            for i in items2:
+                t = (i.get('text') or '').replace(' ', '')
+                if t in ('开始冒险', '进入地图') and i.get('cy', 0) > 1700:
+                    nav = i
+                    break
+            at2 = (nav['cx'], nav['cy']) if nav else (539, 1889)
+            b.tap(at2[0], at2[1], wait=2.2)
+            log.append({'bag': 'back_tap', 'at': at2,
+                        'by': 'ocr' if nav else 'fallback', 'round': _k})
+        log.append({'bag': 'back_done', 'ok': bool(done)})
+        if not done:
+            say('   ⚠ 收尾可能没回到选图界面（已尽力 ✓ 日志有记录 ✓）')
+            try:
+                _close_bag(b, b.ocr(tag=tag), log)
+            except Exception:       # noqa: BLE001
+                pass
+        STATS['bag_upgrades'] = STATS.get('bag_upgrades', 0) + 1
+        log.append({'bag': 'done', 'ok': True})
+        say('   ⚙ 背包一键升级：完成 ✓')
+        return True
+    except Exception as e:      # noqa: BLE001
+        log.append({'bag': 'error', 'e': repr(e)[:120]})
+        say('   ⚠ 背包升级异常：%r' % (e,))
+        try:
+            _close_bag(b, b.ocr(tag=tag), log)
+        except Exception:       # noqa: BLE001
+            pass
+        return False
+
+
+
+def fb(items, *labels):
+    for lb in labels:
+        for it in items:
+            if lb in it['text']:
+                return it
+    return None
+
+
+def exb(items, *labels):
+    for lb in labels:
+        for it in items:
+            if it['text'].strip() == lb:
+                return it
+    return None
+
+
+def bottom_close(items, min_cy=None):
+    # ⭐ 2026-09-27 修：min_cy 原来写死 1100 ✗ ⇒ 720p 下关闭键(y=960)被排除 ⇒ 卡在结算界面 ✗
+    if min_cy is None:
+        min_cy = LAYOUT.sy(1100)
+    best = None
+    for it in items:
+        if L['close'] in it['text'] and it['cy'] >= min_cy:
+            if best is None or it['cy'] > best['cy']:
+                best = it
+    return best
+
+
+def is_battle_panel(items):
+    """是不是**战斗结算/胜利/失败**面板（战斗界面 ⇒ 必须点「关闭」，不能点开始冒险 ✗）
+
+    ⚠⚠ 2026-09-26 实测踩坑（我引入的 bug）：原来判据是
+      `fb(items, L['win'], L['lose'], L['close'], '回放战斗')` —— 而**地图界面左上角的
+      挑战目标里有一行「首领战斗胜利」**，子串包含「战斗胜利」⇒ 在**干净地图**上被误判成
+      战斗面板 ⇒ `universal_close` 去点 (577,1439) ✗ —— 那其实是**棋盘格 (4,4)** ⇒
+      等于每两轮在棋盘上乱点一次！（铁证：`runs/m0_r003.png` 是干净地图 + 结束冒险，
+      日志却记 `panel_close: battle_close_fixed`）
+
+    现在的判据（都要求"确实像结算面板"）：
+      ① 底部「关闭」(y≥1100) 认到         ⇒ 是结算/奖励面板 ✓
+      ② 认到「回放战斗」                   ⇒ 结算面板独有 ✓
+      ③ 有**恰好等于**「战斗胜利/战斗失败」的标题 ✓（`首领战斗胜利` 是 6 字长句 ⇒ 不算 ✗）
+    """
+    if bottom_close(items):
+        return True
+    if fb(items, '回放战斗'):
+        return True
+    for it in items:
+        if (it.get('text') or '').strip() in ('战斗胜利', '战斗失败'):
+            return True
+    return False
+
+
+def stamina(items):
+    """读体力：HUD 左上角那个 `x/2500`（实测坐标 ≈ (338,94)）
+
+    ⚠ 2026-09-25 修：原来取"第一个 x/y 文字"——在背包/图鉴里会取到别的计数器
+      （装备 1634/1634、莱姆 41/50 …）⇒ 数字乱跳（实测出现过 -499 ✗）。
+      现在只在**顶部 HUD 区域**(cy<130) 且 x<560 的条目里找 x/数字 的形式 ✓
+    """
+    cands = []
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '')
+        if '/' not in t:
+            continue
+        a, _, b2 = t.partition('/')
+        if a.isdigit() and b2.isdigit() and it.get('cy', 9999) < 130 and it.get('cx', 9999) < 560:
+            cands.append((it['cy'], it['cx'], int(a)))
+    if cands:
+        cands.sort()
+        return _stam_sanity(cands[0][2])
+    # 退路：老口径（第一个 x/y），但排除背包里那种大分母
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '')
+        if '/' in t:
+            a, _, b2 = t.partition('/')
+            if a.isdigit() and b2.isdigit() and int(b2) >= 100:
+                return _stam_sanity(int(a))
+    return None
+
+
+# ⭐ 2026-09-26 实测：刚打完战斗/关面板那一帧，HUD 上的体力偶发**多认一位**
+#   实测序列 864→1863、835→1834（真值应该是 863 / 834，前面凭空多个 "1"）
+#   ⇒ 后果：① 日志/统计里体力会"回升"，② --min-stamina 收工判断会被高估的假值骗过去
+#   修法：相邻两轮间隔只有几秒（一轮循环 ~3s），体力不可能凭空涨 ≈1000 ⇒ 修正回来
+_LAST_STAM = {'v': None}
+
+
+def _stam_sanity(v):
+    """体力读数合理性校验：把 OCR 多认一位的假值修回来 ✓"""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    prev = _LAST_STAM['v']
+    try:
+        # ⚠ 刚吃过补给 / 没历史值 ⇒ 不校验（补给是真涨 ✓）
+        if prev is not None and not STATS.get('supply_used'):
+            # ⭐ 两个必备特征：① 涨幅约 +1000（只可能是凭空多一位）
+            #                ② 去掉首位后 ≈ 上一轮（一轮循环通常只花 1~8 点 ⇒ 放宽到 12）
+            d = v - prev
+            if 901 <= d <= 1099 and len(str(v)) == len(str(prev)) + 1:
+                alt = v - 1000
+                if abs(alt - prev) <= 12:         # 一轮的花销上限：大格 8 点 + 容错
+                    say('       · 体力读数 %d 疑似 OCR 多认一位（上一轮 %d）⇒ 修正为 %d'
+                        % (v, prev, alt))
+                    v = alt
+    except Exception:           # noqa: BLE001
+        pass
+    _LAST_STAM['v'] = v
+    return v
+
+
+def cell_of(cx, cy):
+    return (int((cy - GRID['y0']) // GRID['cy']) + 1,
+            int((cx - GRID['x0']) // GRID['cx']) + 1)
+
+
+def cell_center(r, c):
+    return (int(GRID['x0'] + (c - 1) * GRID['cx'] + GRID['cx'] / 2),
+            int(GRID['y0'] + (r - 1) * GRID['cy'] + GRID['cy'] / 2))
+
+
+def cells_of(img, mapname=None, code=None):
+    """棋盘逐格状态（2026-09-25 起用地块分类器，不再靠中心色采样）
+
+    -> {'gray': 未揭示格中心, 'light': 已揭示格中心,
+        'plain': 已揭示的空地(草地/海边杂物这类可揭格), 'content': 已揭示的内容格,
+        'buy': 已揭示的旅行商人/黄金宝库, 'st': {(r,c): {...}}, 'unknown': [格]}
+    """
+    out = {'gray': [], 'light': [], 'plain': [], 'content': [], 'buy': [],
+           'buy_hidden': [], 'unknown': []}
+    st = board_state(img, mapname, code)
+    out['st'] = st
+    if not st:
+        # 兜底：老的颜色启发式（分类器不可用时至少还能跑）
+        for r in range(1, 6):
+            for c in range(1, 8):
+                cx, cy = cell_center(r, c)
+                w = img[cy - 35:cy + 35, cx - 45:cx + 45]
+                if w.size == 0:
+                    continue
+                b, g, rr = cv2.split(w)
+                ri, gi, bi = rr.astype(int), g.astype(int), b.astype(int)
+                gray = ((rr >= 125) & (rr <= 175) & (abs(ri - gi) < 16) & (abs(gi - bi) < 16))
+                light = ((rr >= 235) & (g >= 185) & (bi >= 105) & (bi <= 220))
+                if float(gray.mean()) > 0.45:
+                    out['gray'].append((cx, cy))
+                elif float(light.mean()) > 0.35:
+                    out['light'].append((cx, cy))
+        return out
+    for (r, c), v in sorted(st.items()):
+        p = cell_center(r, c)
+        if v['anchor'] != (r, c) and v['anchor'] is not None:
+            continue                     # 多格物件只按锚点算一次
+        # ⚠ 商人/宝库必须**匹配分数够高**才算（2026-09-25 卡死事故）：
+        #   屏幕上若有面板/遮罩盖住棋盘，分类器会把整盘读成"暗格"，并凭 0.6~0.7 的
+        #   弱匹配误报出好几个"未揭示的商人/宝库"；而商人宝库是**永不拉黑**的目标，
+        #   于是循环对着点不动的格子空转（用户报「退出地图时卡住了」）。
+        #   实测：真商人/宝库 0.95+（含变暗时 0.9+），误报 ≤0.7 ⇒ 阈值 0.85。
+        strong = v['score'] >= BUY_SCORE_MIN
+        if not v['revealed']:
+            out['gray'].append(p)
+            # ⭐ 未揭示的商人/宝库**仍然是目标**（用户 2026-09-25：「有黄金宝库你没点就要退」）：
+            #   它此时点不动，要像 boss 一样沿路开路把它解锁出来
+            if strong and v['name'] in spots_mod.BUY_OUT_NAMES:
+                out['buy_hidden'].append(p)
+            continue
+        out['light'].append(p)
+        if strong and v['name'] in spots_mod.BUY_OUT_NAMES:
+            out['buy'].append(p)
+        elif is_plain_spot(v['sid']):
+            out['plain'].append(p)
+        else:
+            out['content'].append(p)
+    return out
+
+
+BUY_SCORE_MIN = 0.85        # 认商人/宝库的最低匹配分（见上面注释）
+
+
+_PLAIN_CACHE = {}
+
+
+def is_plain_spot(sid):
+    """该地块是不是「空地」（Area_Spot: SpecialSpot==0 且 SpotSize==1）——才能点它揭一片"""
+    if sid not in _PLAIN_CACHE:
+        row = spots_mod.spot_rows().get(sid) or {}
+        try:
+            _PLAIN_CACHE[sid] = (int(row.get('SpecialSpot') or 0) == 0 and
+                                 int(row.get('SpotSize') or 1) == 1)
+        except Exception:           # noqa: BLE001
+            _PLAIN_CACHE[sid] = False
+    return _PLAIN_CACHE[sid]
+
+
+def close_x_panels(b, img=None):
+    # ⭐ v0.31 方案 B：真机上弹窗 X 关闭符（dlg≈225）落在 toRef 丢弃的弹性区 ⇒
+    #   归一化帧上根本看不见 ✗ ⇒ C>0 时改用**弹窗帧**（b.img_dlg，Java 重投影）找，
+    #   检测常数（67x67 / x≈493,1024 / y 带 180~300）就是弹窗系标定值，原样可用 ✓
+    #   PC / 9:16 C=0 ⇒ 走原路，行为一字不变。
+    _dlg = dlg_c()
+    _im = None
+    if _dlg:
+        _im = b.img_dlg() if hasattr(b, 'img_dlg') else None
+        if _im is None:              # 弹窗帧拿不到 ⇒ 退回归一化帧（聊胜于无）
+            _dlg = 0.0
+    im = _im if _im is not None else (img if img is not None else b.img())
+    bb, gg, rr = cv2.split(im.astype(int))
+    red = ((rr > 150) & (rr - gg > 70) & (rr - bb > 60))
+    band = np.zeros_like(red)
+    band[180:300, :] = True
+    m = (red & band).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _l, st, ce = cv2.connectedComponentsWithStats(m, 8)
+    xs = []
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        # 真关闭钮恒 67x67 且**只在 x≈493 / x≈1024**（左右两块面板各一个）。
+        # ⚠ 只按尺寸筛会点到居中面板上的 (759,225) —— 那是回放相关按钮，
+        #   点它就会放一遍回放（用户 09-25 连报三次）
+        cx0 = int(ce[i][0])
+        if 1500 < a < 8000 and 55 <= w <= 72 and 55 <= h <= 72 and \
+                min(abs(cx0 - 493), abs(cx0 - 1024)) <= 60:
+            xs.append((cx0, int(ce[i][1])))
+    xs.sort(reverse=True)
+    for (x, y) in xs:
+        if _dlg:
+            b.tap_dlg(x, y, wait=1.6)    # 弹窗帧坐标 = 弹窗系 ⇒ 走弹窗点击通道
+        else:
+            b.tap(x, y, wait=1.6)
+    return len(xs)
+
+
+# ⭐ 2026-09-27：大厅专属 UI（`_probe_lobby_sig.py` 三图对拍得出）
+#   ⚠ **绝对不要**用「底部导航有 角色/斗技场/图鉴/开始冒险」判大厅 ——
+#     实测**大厅 / 选图界面 / 地图界面三者底部都有这套导航**（全局导航栏）✗
+LOBBY_CORNERS = ('攻略', '活动', '首充', '情报')     # 大厅四角入口（另两者都没有）
+LOBBY_BANNER = '免费指定招募'                        # 大厅中部招募横幅
+
+
+def in_lobby(items):
+    """是否在**大厅（主界面）**
+
+    实测三图 OCR 对拍（`_probe_lobby_sig.py`，2026-09-27）：
+
+        特征                              大厅   选图界面  地图界面
+        底部导航(角色/斗技场/图鉴/开始冒险)  ✓      ✓        ✓    ← 不可用 ✗
+        四角入口 攻略/活动/首充/情报        ✓      ✗        ✗    ← 用它 ✓
+        「免费指定招募」横幅                ✓      ✗        ✗    ← 用它 ✓
+        帮助 + NNN% / 当前难度NNN           ✗      ✓        ✓
+        快速扫荡 / 进入地图 (y≈1618)        ✗      ✓        ✗
+        结束冒险(y≈773) + 图名[难度]        ✗      ✗        ✓
+
+    为什么必须能认出大厅：2026-09-27 幻少跑采图时**游戏自己重启**停在大厅，
+    `in_map()` 的格子兜底把大厅背景数成 8+ 格 ⇒ 误判"已在地图里" ⇒ 恢复路径不触发。
+    """
+    if not items:
+        return False
+    txt = [i.get('text') or '' for i in items]
+    if any(LOBBY_BANNER in t for t in txt):
+        return True
+    return sum(1 for h in LOBBY_CORNERS if any(t == h for t in txt)) >= 2
+
+
+# ⭐⭐ 2026-09-29 真机踩坑：MGAS 自己的界面（或应用双开选择框）被格子兜底数成 13 格
+#   （中位分 0.186）⇒ in_map 误判"已在地图" ⇒ 对着自己界面点了一整轮。
+#   ⇒ 所有"我在看什么"的判定**先认自己的 UI 标记**：命中 ≥2 个 ⇒ 一定是自己的界面。
+_SELF_UI_MARKERS = ('开始探索', '停止探索', '红装解锁', '授权截图', '推图日志',
+                    '清空日志', '要使用的应用', 'MGAS')
+
+
+def self_ui_hits(items):
+    """当前帧里有几个 MGAS 自己的 UI 标记（≥2 ⇒ 画面是本应用/系统选择框，不是游戏）"""
+    if not items:
+        return 0
+    hits = 0
+    for it in items:
+        t = (it.get('text') or '').replace(' ', '')
+        if not t:
+            continue
+        for m in _SELF_UI_MARKERS:
+            if m in t:
+                hits += 1
+                break
+    return hits
+
+
+def in_map(b, img, items):
+    """是否已经在探索地图里
+
+    ⚠ 2026-09-25 踩坑：选图界面中间那张**地图预览图**会被地块分类器"认出一堆格子"，
+      于是 `cells_of` 判定通过 → 误判成"已在地图里" → 循环直接走「目标清完退图」，
+      表现成「这两轮进不去地图」。现在：
+        ① 先看图内特征：结束冒险 / HUD 行(背包·神石·预言 y900~1000) / 带 [难度] 的图名
+        ② 一旦看到选图界面的「快速扫荡 / 进入地图」→ **明确判为不在图里**
+        ③ ⭐ 大厅（四角入口/招募横幅）→ **明确判为不在图里**（2026-09-27 游戏重启后停大厅，
+           大厅背景格会被下面的格子兜底数成 8+ ⇒ 误判"已在地图里"⇒ 恢复路径不触发 ✗）
+        ⑤ ⭐⭐ 2026-09-29 真机：**MGAS 自己的界面 / 应用双开选择框** 也会被格子兜底数成 13 格
+           （中位分 0.186）⇒ 误判"已在地图里" ⇒ 对着自己点 47 秒。先认自己的 UI 标记 ✓
+    """
+    if self_ui_hits(items) >= 2:
+        return False
+    if exb(items, L['end']):
+        return True
+    for it in items:
+        if LAYOUT.sy(900) < it['cy'] < LAYOUT.sy(1000) and it['text'].strip() in L['hud']:
+            return True
+    for it in items:
+        if LAYOUT.sy(150) < it['cy'] < LAYOUT.sy(215) and re.match(r'^.+\[\d+\]\s*$', it['text'].strip()):
+            return True                      # 「夏日海滩[100]」这种只在图里出现
+    if fb(items, *L['menu']):
+        return False                         # 选图界面（快速扫荡/进入地图）
+    if in_lobby(items):
+        return False                         # ⭐ 大厅（四角入口 / 免费指定招募横幅）
+    c = cells_of(img, mapname=map_name(items))
+    return len(c['gray']) + len(c['light']) >= 8
+
+
+def map_name(items):
+    """从 HUD 顶部读当前图名（如「夏日海滩[100]」-> 夏日海滩）
+
+    ⚠ 别只按 y 带取：同一带里还有左上角的「首领战斗胜利」横幅（cy≈166），
+      曾经把图名读成「古首领战斗胜利」→ 分类器认不出图号 → 全部退回旧启发式。
+    """
+    if items is None:
+        return None
+    for it in items:
+        m = re.match(r'^(.+?)\s*\[(\d+)\]\s*$', it['text'].strip())
+        if m:
+            return m.group(1).strip()
+    for it in items:
+        t = it['text'].strip()
+        if LAYOUT.sy(160) < it['cy'] < LAYOUT.sy(210) and LAYOUT.sx(360) < it['cx'] < LAYOUT.sx(720) and '战斗' not in t and '胜利' not in t:
+            t = t.split('[')[0].strip()
+            if t and not t.isdigit() and len(t) >= 2:
+                return t
+    return None
+
+
+def find_x(items):
+    """独立关闭符。⚠ 实测面板关闭符**只在 x≈493 / x≈1024 两处**（左右两块面板各一个）；
+    结算面板上 (759,225) 那个「X」夹在中间，是回放相关按钮 —— 点它就会放一遍回放
+    （用户 09-25 连报两次「还在看回放」）。"""
+    for it in items:
+        if it['text'].strip() not in ('X', 'x', '\u00d7', '\u2715', '\u2716'):
+            continue
+        # ⭐ 坐标过布局层（720p 下 493/1024 要跟着缩 ✓）
+        if min(abs(it['cx'] - LAYOUT.sx(493)),
+               abs(it['cx'] - LAYOUT.sx(1024))) <= LAYOUT.sx(60):
+            return it
+    return None
+
+
+# ⭐ 2026-09-26 死循环根因修复（用户在幻少实测：探索槽满 + 紫橙探索格 ⇒ 卡死 45 轮、
+#   体力/回合都不动 ⇒ 最后"退出地图失败"）
+#   根因：`popups()` 里多处是「关一下 X ⇒ 就 return 'handled'」——**没人验证面板真的关掉了**。
+#   一旦没关掉，下一帧还是同一段面板文字、又命中同一分支、又 return 'handled'，
+#   整个闭环被这一句占住 ⇒ 不揭格、不打架、也不 reach 到 finish。
+_PANEL_STUCK = {}
+
+
+def panel_gone(b, probe, tag='unstick', dlg_btn=None):
+    """关面板之后**重新截图验证**它真的没了 ✓（probe = 之前认到的那段面板文字）
+
+    ⭐ v0.32：真机上面板标题（「探索产出/战斗事件」dlg≈443）落在 toRef 丢弃的弹性区
+    ⇒ 归一化帧里永远看不见 ⇒ fb 恒 False ⇒ 会误判"已关" ✗
+    ⇒ 传 dlg_btn（面板按钮文字，如「探索」）时补一道弹窗系验证：按钮还在 ⇒ 面板没关掉
+    """
+    if _OCR_CH['dlg'] and hasattr(b, 'ocr_dlg'):
+        items = ocr_ch(b, tag=tag)      # ⭐ 弹窗模式：标题只在弹窗帧里，查归一化帧会误判"已关"
+    else:
+        b.snap(tag)
+        items = b.ocr(tag=tag)
+    if fb(items, probe):
+        return False
+    if dlg_btn and dlg_c() and _dlg_panel_btn(dlg_items(items), dlg_btn):
+        return False
+    return True
+
+
+def force_unstick(b, log, why, ctx=None):
+    """面板关不掉时的脱困：已知关闭点全试一遍 + 拉黑当前格 ⇒ 让循环能往后走 ✓"""
+    tries = []
+    # ⭐ v0.31 方案 B：这三个都是**面板上的**关闭点（弹窗系标定值）⇒ 走 tap_dlg
+    #   （真机上原 b.tap 会落在面板下方/弹性区，全空点 ✗）
+    for (bx, by, w) in ((539, 1212, 1.6),        # 面板底部「返回」
+                        (LAYOUT.sx(493), LAYOUT.sy(225), 1.2),   # 左 X
+                        (LAYOUT.sx(1024), LAYOUT.sy(225), 1.2)):  # 右 X
+        b.tap_dlg(int(bx), int(by), wait=w)
+        tries.append((int(bx), int(by)))
+    try:
+        tp = (ctx or {}).get('tapped')
+        fl = (ctx or {}).get('flags') or {}
+        if tp:
+            fl.setdefault('done', set()).add((int(tp[0]), int(tp[1])))
+    except Exception:           # noqa: BLE001
+        pass
+    log.append({'unstick': why, 'tried': tries})
+    return tries
+
+
+def find_orange_btn(img, x0=None, x1=None, y0=None, y1=None):
+    # ⭐ 默认范围也要随分辨率缩 ✓
+    x0 = LAYOUT.sx(200) if x0 is None else x0
+    x1 = LAYOUT.sx(900) if x1 is None else x1
+    y0 = LAYOUT.sy(600) if y0 is None else y0
+    y1 = LAYOUT.sy(920) if y1 is None else y1
+    """按颜色找面板底部那颗**橙色艺术字按钮**（「战斗」/「探索」都是这种字），
+    返回最靠下的大色块中心 —— 比固定 y 稳（不同面板版面会挪位置）。
+
+    艺术字实测色 ~ RGB(240,170,90)：R 高、G 中、B 低。
+    """
+    win = img[y0:y1, x0:x1].astype(int)
+    b, g, r = cv2.split(win)
+    m = ((r > 190) & (g > 120) & (g < 215) & (b < 130)).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _l, st, ce = cv2.connectedComponentsWithStats(m, 8)
+    best = None
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if a < 400 or w < 30:
+            continue
+        cy = int(ce[i][1]) + y0
+        if best is None or cy > best[1]:
+            best = (int(ce[i][0]) + x0, cy, int(a))
+    return best
+
+
+def battle_started(items):
+    """是否已进入战斗：看战斗特征，而不是「战斗事件面板消失没」。
+
+    ⚠ 点一格可能同时弹出两块面板（目标格 + 相邻格）：打的那块开打后，
+      另一块面板的「战斗事件」文字还在 -> 只看它消失会把**已经开打的**误判成没打
+      （用户 09-25：「那场明明打完并且赢了」）。
+    """
+    for it in items:
+        t = it['text']
+        if ('回合' in t) or ('加速' in t) or ('自动跳过' in t) or t.startswith('第'):
+            return True
+        if (L['win'] in t) or (L['lose'] in t):
+            return True
+    return False
+
+
+def start_fight(b, log, btn, marks=()):
+    """点「战斗」→ **最多等 5s 看有没有进战斗**（用户 09-25：战斗胜利不会超过 5s，
+    超过就是没进战斗）。没进就原位置再点一次（第一下可能被动画吃掉），再不行算失败。
+    """
+    # ⚠ 2026-09-26 用户报「连点两次战斗 ⇒ 第二下点到状态图标/战斗回放」✗
+    #   ⇒ 只重试"点了完全没反应"的情况 ✓；画面变了但没进战斗**绝不重点** ✗
+    tries = 0
+    for i in range(2):
+        # ⭐ v0.31 方案 B：btn 坐标是**弹窗系**（PC 标定），真机上走 tapRefDialog 换算
+        #   （PC/9:16 C=0 ⇒ 与 b.tap 完全等价）
+        changed = b.tap_dlg(btn['cx'], btn['cy'], wait=1.2)
+        tries += 1
+        if changed is False and i == 0:
+            log.append({'battle': 'tap_no_change_retry', 'try': i})
+            continue                           # 点空了 ⇒ 允许再点一次 ✓
+        for _ in range(2):                     # ⚡ 中段 OCR（快 3 倍）≈ 1s/次
+            items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(980)), tag='tap')
+            if battle_started(items):
+                log.append({'battle': 'started', 'at': (btn['cx'], btn['cy']),
+                            'try': i, 'tries': tries, 'marks': list(marks)})
+                return True
+            time.sleep(0.5)
+        log.append({'battle': 'no_battle_in_5s', 'try': i, 'tries': tries,
+                    'note': '画面变了但没进战斗 ⇒ 不再重点 ✓'})
+        break                                  # ⭐ 不重试 ✗（防点到别的 UI）
+    log.append({'battle': 'not_started', 'at': (btn['cx'], btn['cy']), 'tries': tries})
+    return False
+
+
+def handle_dice(b, log, items, tries=3):
+    """重投命运之骰（源码 `GameApi.Explore.DiceRerollAsync` + `ChangeClover(-1,"重投命运之骰")`）：
+    **每次重投消耗 1 个幸运草**，服务端返回新的掉落；`rerollTime` = 已重投次数（上限 3）。
+    按钮就在**战斗结算面板**上（不是另开界面），文本含「骰 / 重投 / 命运」。
+    摇到出现「带大拇目标记的装备」就停（用户 09-25 口径）。
+
+    ⭐⭐ v0.35 重大修正（20:9 实测铁证，推翻 v0.31 的归类）：
+      **结算面板不是居中弹窗，是归一化（锚底）系！**
+      证据：20:9（720x1600, C=+240）跑图日志 `{'battle':'closed','at':(577,1440)}` ——
+      bottom_close 是从**归一化帧** OCR 量到的「关闭」y=1440，与 PC 标定 (577,1439)
+      只差 1px；若结算面板真是居中弹窗，归一化帧上它应在 1439-240=1199 ✗。
+      （对照组：战斗事件面板的「战斗」钮归一化帧 495 = PC 735 - C ⇒ 那个才是弹窗系 ✓）
+      ⇒ 本函数**一切按归一化系**：条目不再 +C、点击走 b.tap、找标记用归一化帧。
+      v0.31 的 +C + tap_dlg 会把搜索带 [820,1070] 变成归一化 [580,830] ⇒
+      骰子按钮（归一化 ~979）根本不在带里 ⇒ 永远 no_btn / rolls=0 ✗（真机不能摇色子根因）
+    """
+    rolls = 0
+    btn_pos = None
+    items = list(items)      # ⭐ v0.35：结算面板 = 归一化系，绝不再 +C
+    for i in range(tries):
+        # ⭐⭐ v0.35：先处理悬着的「是否继续重掷？」确认弹窗 ——
+        #   20:9 实锤（r209b 跑图）：摇一下后该弹窗盖在结算面板上，OCR 认到
+        #   确定(774,630) / 取消(304,630)。旧闸门 `ok['cy'] > 900` 来自旧 PC 标定
+        #   （注释写 1111 ⇒ 实际差 ≈2C：这是叠在结算面板上的第二层弹窗）⇒
+        #   630 < 900 永不开 ⇒ 确定永远不点、下一轮又去重点骰子（点在弹窗上）✗
+        #   ⇒ 改**纯实测判据**：同时认到「确定+取消」⇒ 点 **cx 更大**的那个
+        #     （确定恒在右、取消恒在左，cx 不随任何锚定/缩放翻转 ✓）
+        _ok = exb(items, L['ok'])
+        _cc = exb(items, L['cancel'])
+        if _ok and _cc:
+            _yes, _no = (_ok, _cc) if _ok['cx'] >= _cc['cx'] else (_cc, _ok)
+            b.tap(_yes['cx'], _yes['cy'], wait=2.5)
+            log.append({'dice': 'reroll_confirm', 'at': (_yes['cx'], _yes['cy']),
+                        'i': i, 'note': '确认弹窗实测坐标（不再用 y>900 旧标定）'})
+            b.wait_stable(1.2, interval=0.06, thr=1.6, need=6)
+            items = b.ocr(min_conf=0.35, tag='dice')
+        # 骰子入口：奖励区最左（cx<230, 820<=cy<=1070）。⚠ 摇过一次后奖励区排版会变，
+        # 该位置可能 OCR 不到 -> **沿用上一次记住的坐标**，否则会只摇一次就退出
+        # （用户 09-25 报「还没刷出大拇指装备就关了」）。
+        btn = None
+        for it in items:
+            if it['cx'] < LAYOUT.sx(230) and LAYOUT.sy(820) <= it['cy'] <= LAYOUT.sy(1070):
+                if btn is None or it['cx'] < btn['cx']:
+                    btn = it
+        if btn is None and i == 0:
+            # ⭐ v0.35：按钮区是**图标+小数字**（PC 实锤：认到的是骰子旁的幸运草数「1」
+            #   @(127,979)），整帧 OCR 常常漏掉小字 ⇒ 补一次**低置信度窄带** OCR 再找。
+            #   窄带取弹窗系 700~1150 ⇒ 归一化帧 band = (700-C, 1150-C)（PC C=0 ⇒ 恒等）。
+            _it2 = b.ocr(min_conf=0.2, band=(700, 1150), tag='dice2')   # 归一化系 ⇒ 窄带就是 700~1150
+            for it in _it2:
+                if it['cx'] < LAYOUT.sx(230) and LAYOUT.sy(820) <= it['cy'] <= LAYOUT.sy(1070):
+                    if btn is None or it['cx'] < btn['cx']:
+                        btn = it
+            if btn is not None:
+                log.append({'dice': 'narrow_hit', 'at': (btn['cx'], btn['cy']),
+                            'n_items': len(_it2)})
+        if btn is not None:
+            btn_pos = (btn['cx'], btn['cy'])
+        if btn_pos is None:
+            # ⭐ v0.35 诊断：别再静默 break —— 把按钮区附近的候选拍进日志，
+            #   下次一看就知道 OCR 到底看到了什么（PC 样本：按钮旁的数字「1」@(127,979)）
+            _cand = [it for it in items
+                     if it['cx'] < LAYOUT.sx(340) and LAYOUT.sy(740) <= it['cy'] <= LAYOUT.sy(1180)]
+            log.append({'dice': 'no_btn', 'rolls': rolls,
+                        'cand': [{'t': (i.get('text') or '')[:10], 'cx': i['cx'], 'cy': i['cy']}
+                                 for i in _cand][:12]})
+            break
+        btn = {'cx': btn_pos[0], 'cy': btn_pos[1]}
+        log.append({'dice': 'panel', 'i': i, 'rolls': rolls,
+                    'items': [{'t': x['text'], 'cx': x['cx'], 'cy': x['cy']}
+                              for x in items if x['cy'] > LAYOUT.sy(400)][:28],
+                    'btn': (btn['cx'], btn['cy']) if btn else None})
+        if btn is None:
+            break
+        b.tap(btn['cx'], btn['cy'], wait=2)      # ⭐ v0.35：归一化系 ⇒ b.tap（tap_dlg 会偏下 C·kx）
+        rolls += 1
+        b.snap('dice_%d' % i, save=True)
+        items = b.ocr(min_conf=0.35, tag='dice')      # ⭐ v0.35：归一化系
+        # ⭐ v0.35：确认弹窗的判定已**前置到循环开头**（上面 reroll_confirm）——
+        #   因为实测它出现在"摇完一下之后的那帧 OCR"里，若只在摇完这里判，
+        #   会漏掉第一次（本次 r209b 实锤：i=0 摇完 → i=1 的 items 里才有确认弹窗）。
+        #   这里只做"弹窗没弹出来"的稳定等待。
+        if not (exb(items, L['ok']) and exb(items, L['cancel'])):
+            b.wait_stable(1.0, interval=0.06, thr=1.6, need=5)   # ⭐ 缩短（原 2.0s）
+        # ⭐ 2026-09-25 标定（用户指认「奖励行 4 格，大拇指在第 3 格」）：
+        #   奖励行的推荐标记 = `mid_ico_tuijian_0001`（**绿色方框 + 右上角小绿拇指**，
+        #   按 ~4.4 倍画在整格上 = 148px），**不是**地图上那个 14x14 徽章。
+        #   实机分：第1格 0.113 / 第2格 0.315 / **第3格 0.745** / 第4格 0.289
+        #   （掩码 SQDIFF 粗筛 + 形状/配色精算后，真标记稳定 0.92，噪声 ≤0.32）。
+        try:
+            import badge as badge_mod
+            # ⭐⭐ v0.37：真机（C>0）上**归一化帧是非等比压缩**（横 ×0.844 / 纵 ×0.7195）
+            #   ⇒ 大拇指图标被压扁 ~15% ⇒ 模板（各向同性 s=4.1~4.9）匹配分数掉到 0.43 ✗
+            #   而**弹窗帧是等比 ×0.8437** ⇒ 图标 148×148 完好、scale 仍 4.4 ✓ ⇒ 必须用弹窗帧。
+            #   但弹窗帧里元素坐标 = 归一化 + C ⇒ 检测框要跟着对位：
+            #     · 结算面板若是 B 类（归一化系，实测「关闭」1440≈PC 1439）⇒ box **+C**
+            #     · 若是 A 类（弹窗系）⇒ box 不变
+            #   ⇒ 两路都跑 + 归一化帧一路，取**分数最高**的那个（阈值 0.70 兜底防噪声）✓
+            _c = int(round(dlg_c()))
+            _routes = []
+            _dimg = None
+            if hasattr(b, 'img_dlg'):
+                try:
+                    _dimg = b.img_dlg()
+                except Exception:       # noqa: BLE001
+                    _dimg = None
+            if _dimg is not None and _c:
+                _routes.append(('dlg+C', badge_mod.find_reward_mark(
+                    _dimg, box=(40, 840 + _c, 1020, 1140 + _c))))
+                _routes.append(('dlg', badge_mod.find_reward_mark(_dimg)))
+            _routes.append(('ref', badge_mod.find_reward_mark(b.img())))
+            hits = []
+            for _t, _h in _routes:
+                if _h and (not hits or _h[0][0] > hits[0][0]):
+                    hits = _h
+            log.append({'dice': 'mark_routes', 'i': i, 'C': _c,
+                        'best': {t: (round(h[0][0], 3) if h else None)
+                                 for t, h in _routes}})
+            top = [(round(h[0], 3), round(h[1], 3), h[2], h[3], h[4]) for h in hits[:4]]
+            if not hits:            # ⭐ 没命中也要记下**最高候选**，便于事后判断是漏检还是真没有
+                _near = []
+                if _dimg is not None and _c:
+                    _near += badge_mod.find_reward_mark(
+                        _dimg, box=(40, 840 + _c, 1020, 1140 + _c),
+                        shape_min=0.0, color_min=0.0, top=2)
+                _near += badge_mod.find_reward_mark(b.img(), shape_min=0.0,
+                                                    color_min=0.0, top=2)
+                top = [('近失', round(x[0], 3), round(x[1], 3), x[2], x[3], x[4])
+                       for x in _near]
+        except Exception as e:
+            hits, top = [], []
+            log.append({'dice': 'match_err', 'e': repr(e)})
+        got = hits
+        log.append({'dice': 'after', 'i': i, 'reward_mark_hits': len(got), 'top': top})
+        if got:
+            log.append({'dice': 'got_recommend', 'i': i,
+                        'at': (got[0][2], got[0][3]), 'shape': round(got[0][0], 3),
+                        'color': round(got[0][1], 3)})
+            STATS['dice_got'] += 1
+            say('       · 摇到大拇指装备，停止重摇（第 %d 次）' % rolls)
+            break
+    # ⭐ v0.35 收尾：最后一摇的「是否继续重掷？」若还开着 ⇒ 点掉（别留给关面板逻辑，
+    #   否则 bottom_close 会对着弹窗点关闭 → 关不掉 → 计 nochange ✗）
+    _ok = exb(items, L['ok'])
+    _cc = exb(items, L['cancel'])
+    if _ok and _cc:
+        _yes = _ok if _ok['cx'] >= _cc['cx'] else _cc
+        b.tap(_yes['cx'], _yes['cy'], wait=2.5)
+        log.append({'dice': 'reroll_confirm_tail', 'at': (_yes['cx'], _yes['cy'])})
+    log.append({'dice': 'done', 'rolls': rolls})
+    return rolls
+
+
+def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
+    """等战斗结算。⚠ 用户 09-25：战斗胜利不会超过 5s —— 超过很久还没结算就是没打起来，
+    别死等（原来 180s，白耗时间）。
+
+    ⚡ 2026-09-25 二次提速（OCR 是最大头，实测全屏 1.4s / 条带 1.0s 一次）：
+    - 战斗过程一直在动 ⇒ 极速截图轮询（0.06s/张）几乎免费，**不做 OCR**
+    - 画面**连续 ~1 秒完全不动**才算「该看一眼了」（`need=15` ≈ 0.9s@0.06）
+      ⚠ 一开始设成 3 帧就被战斗动画的**每次停顿**触发 → 一场战斗 OCR 十几次（实测 22 次/35s）
+    - 再叠加**最小间隔 3 秒**，最多 8 秒兜底一次 ⇒ 一场战斗通常只 OCR 2~4 次
+    """
+    say('       · 战斗中…')
+    t0 = time.time()
+    time.sleep(1.2)          # ⭐ 2.0→1.2：进场黑幕后的首次判定，早点看一眼
+    diced = False
+    result_streak = 0        # ⭐ 结算面板连续命中次数（防单帧误判触发摇色子）
+    back = 0
+    last_ocr = 0.0
+    # ⭐ 用户 2026-09-25：「不是每个战斗都要等待，只有有大拇指的要等待」
+    #   - 带 recommend 标记：要**细等**（等奖励行稳定，才判断得出有没有大拇指）→ wait_stable
+    #   - 普通战斗：不追稳定，每 ~2.5 秒看一眼就够（结算面板一出现就关掉走人）
+    # ⭐ 2026-09-27：只认**本格**标记（exact_marks ✓ 没传才退回 marks ✓）
+    _ex = list(exact_marks) if exact_marks is not None else list(marks or [])
+    if _ex != list(marks or []):
+        log.append({'wait_end': 'exact_only', 'marks': list(marks or []), 'exact': _ex})
+    need_dice = 'recommend' in _ex
+    while time.time() - t0 < timeout:
+        elapsed = time.time() - t0
+        need_ocr = False
+        if b.fast_ok:
+            if need_dice:
+                # ⭐ 用户 2026-09-25：「大拇指战斗等待不要那么长」
+                #   原来是 8 秒上限 + 0.9 秒稳定判定（一场战斗能磨十几秒）⇒ 收紧到
+                #   3 秒上限 + 0.5 秒稳定（need=8@0.06s），最小间隔 3s→1.5s
+                stable = b.wait_stable(3.0, interval=0.06, thr=1.4, need=8, band=(LAYOUT.sy(130), LAYOUT.sy(1700)))
+                need_ocr = bool(stable) or (elapsed - last_ocr >= 5.0)
+                if need_ocr and (elapsed - last_ocr) < 1.5:
+                    need_ocr = False
+            else:
+                # ⚠ 2026-09-25 用户报「普通战斗突然开始摇色子了」⇒ 门槛不能太低：
+                #   降到 0.24 秒后**战斗中途的画面也被 OCR**，被误判成"结算面板"⇒ 误触发摇色子。
+                #   现在：画面停 **0.5 秒**（need=8@0.06s）才看一眼，最小间隔 1.5 秒，2.5 秒兜底。
+                stable = b.wait_stable(2.5, interval=0.06, thr=1.4, need=8, band=(LAYOUT.sy(130), LAYOUT.sy(1700)))
+                need_ocr = bool(stable) or (elapsed - last_ocr >= 2.5)
+                if need_ocr and (elapsed - last_ocr) < 1.5:
+                    need_ocr = False
+        else:
+            time.sleep(1.5)
+            need_ocr = True
+        if not need_ocr:
+            continue
+        last_ocr = elapsed
+        _OCR_CH['dlg'] = False      # ⭐ 战斗界面是**全屏**界面（不是居中弹窗）⇒ 一切回归一化系
+        b.snap('battle_wait')
+        items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+        win = fb(items, L['win'])
+        # ⚠ 摇色子触发必须限定在**真结算面板**上：地图顶部「首领战斗胜利」横幅也含
+        #   「战斗胜利」，只看它会在地图界面误触发
+        on_result = bool(fb(items, *L['desc'])) or bool(bottom_close(items))
+        # ⭐⭐ 摇色子判定（2026-09-25 用户：「判断摇不摇色子直接看这个地块有没有对应标记」✓）
+        #   marks 就是**这一格的标记**（由点它的那一下 + 本回合标记扫描得出）。
+        #   ⚠ 踩过的坑：为了防"普通战斗误摇"加了「连续两帧确认」，但**首帧判成结算面板后
+        #   立刻又走了下面的关面板分支** ⇒ 面板被关掉、永远等不到第 2 帧 ⇒ 真·大拇指战斗
+        #   反而不摇色子（用户本次报的 bug）。正确做法：大拇指战斗在首帧**先别关**，
+        #   隔 0.6 秒复核一次；复核仍是结算面板就去摇色子，否则照常关掉 ✓
+        if win and on_result:
+            result_streak += 1
+        else:
+            result_streak = 0
+        if not diced and 'recommend' in list(marks):
+            if result_streak < 2:
+                time.sleep(0.6)                     # 复核一帧（不关面板，等它稳定）
+                b.snap('battle_wait2')
+                it3 = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+                if fb(it3, L['win']) and (bool(fb(it3, *L['desc'])) or bool(bottom_close(it3))):
+                    result_streak += 1
+                    items = it3
+                else:
+                    result_streak = 0
+            if result_streak >= 2:
+                diced = True
+                handle_dice(b, log, items)
+                items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+        # ⭐ 2026-09-28 提速（P5）：真结算面板上把「自动跳过」勾上（只一次，已勾不点），
+        #   之后的战斗跳过动画直接进结算 —— 战斗动画是单图最大动画开销 ✓
+        if win and on_result and not _AUTO_SKIP['done']:
+            _auto_skip_enable(b, log)
+        cl = bottom_close(items)
+        if cl:
+            time.sleep(0.4)                 # ⭐ 0.8→0.4：结算面板不会自己消失，少等一半
+            items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+            cl = bottom_close(items)
+            if cl:
+                _tap(b, cl['cx'], cl['cy'], wait=1.6)
+                win = bool(fb(items, L['win']))
+                log.append({'battle': 'closed', 'at': (cl['cx'], cl['cy']), 'win': win})
+                mk = list(marks or [])
+                STATS['battles'] += 1
+                STATS['battle_wins'] += 1 if win else 0
+                # ⭐⭐ 2026-09-27 修（用户报「7 张图却报 9 个首领关」）：
+                #   `marks` 里含 **±1 邻域**的标记（紧挨目标的拦路格也算 ✓ 那是"该不该打"的判据 ✓）
+                #   ⇒ 但**统计**只能算"本格真有该标记"的 ✓（7 张图 ⇒ 正好 7 个首领关 ✓）
+                if 'boss' in _ex:
+                    STATS['boss_fights'] += 1
+                    STATS['boss_wins'] += 1 if win else 0
+                if 'recommend' in _ex:
+                    STATS['recommend_fights'] += 1
+                    STATS['recommend_wins'] += 1 if win else 0
+                if _ex != mk:
+                    log.append({'stat': 'exact_marks', 'near': mk, 'exact': _ex})
+                say('       · 战斗结算已关闭（%s）' % ('胜利' if win else '未确认胜利'))
+                return True
+        el = time.time() - t0
+        centered = any(i['text'] in (L['win'], L['lose']) and LAYOUT.sx(200) < i['cx'] < LAYOUT.sx(900) for i in items)
+        if el > 15 and exb(items, L['end']) and cl is None and not centered:
+            back += 1
+            if back >= 2:
+                log.append({'battle': 'back_in_map', 'secs': int(el)})
+                return True
+        else:
+            back = 0
+        time.sleep(0.4)
+    log.append({'battle': 'timeout'})
+    return False
+
+
+_AUTO_SKIP = {'done': False}
+_AUTO_SKIP_BOX = (465, 1559)    # 结算面板「自动跳过」勾选框中心（1080x1920 实测截图标定 ✓）
+# ⚠ 坐标教训：从聊天里「显示尺寸」估的坐标 (258,879) 是错的 —— 截图实际 1080x1920，
+#   显示缩放 ~1.77 倍，第一版采样到了奖励图标上（bright=0.281 是紫色图标的值）。
+#   判据用**框内均值亮度**：已勾选(亮黄) 实测 mean≈197；>140 按已勾；
+#   <100 按未勾（去点一下）；100~140 拿不准 ⇒ 不点只记日志（防误 toggle ✗）
+
+
+def _auto_skip_enable(b, log):
+    """结算面板上的「自动跳过」勾选框：勾上后**之后的战斗跳过动画直接进结算**（P5）
+
+    勾选状态游戏内持久 ⇒ 只处理一次（`_AUTO_SKIP['done']`）：
+    已勾就不点——**绝不能盲点**（会把已勾的又点掉 ✗）。
+    """
+    _AUTO_SKIP['done'] = True
+    try:
+        arr = b.img()
+        if arr is None:
+            return
+        x, y = int(LAYOUT.sx(_AUTO_SKIP_BOX[0])), int(LAYOUT.sy(_AUTO_SKIP_BOX[1]))
+        k = max(4, int(round(10 * LAYOUT.k)))         # 内框半径（参考分辨率下 10px）
+        box = arr[max(0, y - k):y + k, max(0, x - k):x + k]
+        if box.size == 0:
+            return
+        mean_luma = float(box.mean())
+        log.append({'auto_skip': 'probe', 'mean': round(mean_luma, 1)})
+        if mean_luma > 140:
+            say('       · 自动跳过已勾选 ✓')
+            return
+        if mean_luma >= 100:
+            say('       · ⚠ 自动跳过勾选状态拿不准（mean=%.0f），本次不动（已记日志）'
+                % mean_luma)
+            return
+        b.tap(x, y, wait=0.8)
+        log.append({'auto_skip': 'tapped', 'at': (x, y), 'mean': round(mean_luma, 1)})
+        say('       · 勾选「自动跳过」（后续战斗跳过动画，提速 ✓）')
+    except Exception as e:      # noqa: BLE001
+        log.append({'auto_skip': 'error', 'e': repr(e)[:100]})
+
+
+# ⭐⭐ v0.31 方案 B（2026-09-30）：居中弹窗空间 ──────────────────────────────
+# 真机实锤（1280×2772）：boss「战斗」钮归一化帧 y=582，PC 同一按钮 y=791
+#   ⇒ 游戏**弹窗**锚定**设备屏幕中心**，不守棋盘的「顶块锚顶+其余锚底」模型。
+# 弹窗系 = PC 参考系（PC 无缩放 ⇒ PC 标定的面板常数 FIGHT_Y / y 带 650~860 / X(493,225) 原样可用）；
+# 归一化帧里弹窗内容 y = 弹窗系 y − C（纯平移，C = 960 + (shift − H/2)/kx；
+# 真机 1280×2772 ⇒ 209、1080×2400 ⇒ 240、PC / 9:16 ⇒ 0）。
+# 使用纪律：
+#   · 面板按钮的 **y 带筛选** → 用 dlg_items()（+C）后的条目 ✓
+#   · 面板**固定标定点**（FIGHT_Y=735 / (275,736) / X(493,225) / (539,1212)）→ b.tap_dlg() ✓
+#   · OCR **找到的**按钮按归一化坐标 b.tap() 本来就准（两套映射斜率相同），不必改 ✓
+#   · 棋盘 / 底部导航 / 万能位 (541,1890) **不是弹窗系**，绝不换算 ✗
+#   · dlg≈202~509 的内容（面板 X 关闭符）在真机落在 toRef 丢弃的弹性区 ⇒ 归一化帧**看不见**，
+#     要看它必须走弹窗帧（端上 b.img_dlg()，Java grabDlgPng 重投影）
+# ⭐⭐ v0.35 重大修正（20:9 实测，720x1600 C=+240 跑图铁证）——**面板分两类，不能一刀切**：
+#   · A 类「居中弹窗」：战斗事件 / 探索产出 / 偶遇强敌 …
+#       实证：归一化帧「战斗」钮 y=495，PC 标定 735 ⇒ 495 + C(240) = 735 ✓
+#       ⇒ 条目 +C（dlg_items）、点击 tap_dlg、标题/X 在归一化帧不可见（要走弹窗帧）✓
+#   · B 类「归一化（锚底）系」：**战斗结算面板**（胜利/失败/骰子/自动跳过/关闭）
+#       实证：归一化帧「关闭」钮 y=1440 ≈ PC 标定 1439（差 1px ⇒ 完全不随 C 位移）
+#       ⇒ 一切按归一化系：条目**不** +C、点击 b.tap、PC 标定区域原样可用
+#       （v0.31 把结算面板也当成弹窗系 ⇒ handle_dice 搜索带错位 240 ⇒ 真机永远摇不了色子 ✗）
+#   · 判别法（以后每个新面板都要先做这一步）：拿一张 C>0 的真机/20:9 帧，
+#     看面板上某个已 PC 标定的元素在**归一化帧**里量到的 y 与 PC 值差多少：
+#     差 ≈ C ⇒ A 类（弹窗系）；差 ≈ 0 ⇒ B 类（归一化系）。
+_DLGS = {'C': None}
+
+
+def dlg_c():
+    """弹窗系 y 偏移 C（懒加载一次；PC 恒 0）"""
+    if _DLGS['C'] is None:
+        c = 0.0
+        try:
+            if os.environ.get('MAPBOT_ANDROID'):
+                import mapbot as _mb
+                c = float(_mb.dlg_shift())
+        except Exception:       # noqa: BLE001
+            c = 0.0
+        _DLGS['C'] = c
+        if c:
+            say('       · 居中弹窗偏移 C=%+.0fpx（高分辨率屏 ⇒ 弹窗系 = 归一化帧 y+%d）'
+                % (c, c))
+    return _DLGS['C']
+
+
+def dlg_items(items):
+    """归一化帧 OCR 条目 → 弹窗系（cy +C）。C=0 时原样返回（PC/9:16 零开销零行为差）。
+
+    ⚠ 只对弹窗系 y ≳ 509 的内容严格成立（更靠上的内容在真机归一化帧里被丢掉）；
+    面板按钮筛选（650~860 / 820~1070 等）都在安全区 ✓
+    """
+    c = dlg_c()
+    if not c or not items:
+        return items
+    out = []
+    for it in items:
+        d = dict(it)
+        d['cy'] = it['cy'] + c
+        out.append(d)
+    return out
+
+
+def _dlg_panel_btn(ditems, text, y0=650, y1=860):
+    """⭐ 弹窗系里找**独立按钮**（严格相等匹配，防「战斗胜利/回放战斗」这类合并文本误命中）。
+
+    用途：真机上面板**标题**（「战斗事件/探索产出」dlg≈443）和 X 关闭符（dlg≈225）
+    落在 toRef 丢弃的弹性区 ⇒ 归一化帧里看不见 ⇒ 面板检测只能靠**看得见的按钮**
+    （战斗/探索 dlg≈735~791，在归一化帧 526~582 处 ✓）。
+    """
+    for it in ditems:
+        t = (it.get('text') or '').strip()
+        if t == text and LAYOUT.sy(y0) <= it['cy'] <= LAYOUT.sy(y1):
+            return it
+    return None
+
+
+def panel_seen(items, ditems=None):
+    """⭐ v0.33：**现在有没有弹着面板**（特殊地块 / 探索 / 战斗 / 领取 / 结算 / 确定）。
+
+    ⚠⚠ 漏判的后果很严重：主循环靠它 `break` 出点序、交给 `popups()` 处理；判不成
+      ⇒ 它就带着面板继续点后面的格子 ⇒ 点击全落到面板上 ⇒ "点了战斗格却不点战斗" ✗
+    ⚠ 真机高分辨率（C>0）上面板**标题**（战斗事件/探索产出/获得新装备…）落在 toRef 丢弃的
+      弹性区 ⇒ 归一化帧里看不见 ⇒ 只看标题必然漏判 ⇒ 补一条：弹窗系里出现独立的
+      「战斗」/「探索」按钮（dlg 650~860）即判"面板弹着" ✓
+      （PC / 9:16 C=0 ⇒ 与原来完全等价 ✓）
+    """
+    if fb(items, *L['special']) or fb(items, L['fight']) or fb(items, L['expl']) \
+            or fb(items, *L['claim']) or fb(items, *L['desc']):
+        return True
+    if dlg_c():
+        ditems = ditems if ditems is not None else dlg_items(items)
+        if _dlg_panel_btn(ditems, L['fbtn']) or _dlg_panel_btn(ditems, L['ebtn']):
+            return True
+    return False
+
+
+def tap_item(b, it, wait=1.2, in_dlg=False):
+    """⭐ v0.34：点一个 **OCR 找到的**条目 —— 通道必须跟**条目所在坐标系**走。
+
+    数学上 `b.tap(归一化帧 y)` 与 `b.tap_dlg(弹窗系 y)` 落在**同一个设备点**
+    （两套映射斜率相同，弹窗系 = 归一化帧 + C）⇒ 只要条目和通道同源就必然点中 ✓；
+    串味（弹窗系条目走 b.tap）会整体下移 C·k（真机 ≈248 设备px）⇒ 必空 ✗。
+    固定标定点（FIGHT_Y / X(493,225) / 万能位…）**不走这里**——它们本来就有自己的通道。
+    """
+    if it is None:
+        return False
+    x, y = it.get('cx'), it.get('cy')
+    if x is None or y is None:
+        return False
+    return b.tap_dlg(x, y, wait=wait) if in_dlg else b.tap(x, y, wait=wait)
+
+
+# ⭐⭐ v0.34「通道同源」总闸：当前在闭环里流动的 **OCR 条目**是哪个坐标系。
+#   · False（默认）：条目来自归一化帧（顶块锚顶 / 其余锚底）⇒ 点走 b.tap
+#   · True        ：条目来自**弹窗帧**（弹窗系 == PC 参考系）⇒ 点必须走 b.tap_dlg
+# 只要「条目坐标系」与「点击通道」同源就必然点中；串味会整体偏 C·kx（真机 ≈248 设备px）⇒ 必空。
+# ⚠ 只管 **OCR 量出来的**条目；硬编码标定常数各有各的通道，不经过这里（保持真机已验证行为）。
+# ⚠ 弹窗帧条目不翻译成归一化系再喂进来 —— 减 C 后会落进 y<300 的**顶块锚顶区**，
+#   那里两段映射不同 ⇒ 同源律失效（X 关闭符 dlg≈225 就是这种情况）⇒ 必须整条链路留在弹窗系。
+_OCR_CH = {'dlg': False}
+
+
+def _tap(b, x, y, wait=1.2):
+    """点一个**当前通道里量出来的**条目坐标（通道见 _OCR_CH）"""
+    return b.tap_dlg(x, y, wait=wait) if _OCR_CH['dlg'] else b.tap(x, y, wait=wait)
+
+
+def ocr_ch(b, tag=None, band=None, min_conf=None):
+    """按**当前通道**取 OCR 条目 —— 弹窗模式下取弹窗帧 ⇒ 看得到面板标题（归一化帧看不见）"""
+    if _OCR_CH['dlg'] and hasattr(b, 'ocr_dlg'):
+        try:
+            return list(b.ocr_dlg(min_conf=min_conf or 0.5, band=band, tag=tag) or [])
+        except Exception:       # noqa: BLE001
+            pass
+    kw = {}
+    if band is not None:
+        kw['band'] = band
+    if min_conf is not None:
+        kw['min_conf'] = min_conf
+    return b.ocr(tag=tag, **kw)
+
+
+def dlg_ocr(b, min_conf=0.5, tag='dlg'):
+    """⭐ v0.34：**弹窗帧** OCR —— 拿得到**面板标题**（归一化帧里看不见的那批）。
+
+    真机上 `toRef` 会丢掉设备弹性区，而所有面板标题都落在那里（战斗事件 dlg≈443、
+    偶遇强敌 dlg≈243、旅行商人/预言石板…）⇒ 归一化帧 OCR 永远认不出面板类型
+    ⇒ 只在"面板确实开着但认不出类型"时补这一手（≈2s；**不是每轮都跑** ✓）。
+    PC / 9:16（C=0）没有这个通道 ⇒ 返回 None（标题本来就可见，无需补）。
+
+    返回：弹窗系条目列表（坐标**即** PC 参考系坐标），失败返回 None。
+    """
+    if not dlg_c() or not hasattr(b, 'ocr_dlg'):
+        return None
+    try:
+        items = list(b.ocr_dlg(min_conf=min_conf, tag=tag) or [])
+    except Exception:       # noqa: BLE001
+        return None
+    return items if items else None
+
+
+def popups(b, items, log, ctx=None):
+    ctx = ctx or {}
+    markers = ctx.get('marks') or {}
+    tapped = ctx.get('tapped')
+    # ⭐ v0.32：弹窗系条目（+C）一次算好；真机上面板标题/X 在弹性区看不见，
+    #   分支入口与按钮全靠它（C=0 时就是 items 本身，PC 零影响）
+    # ⭐ v0.34：`in_dlg` ⇒ 调用方传进来的**就是弹窗帧条目**（已是弹窗系坐标），
+    #   绝不能再 +C（否则按钮 y 带整体再抬 209 ⇒ 全都落空 ✗）
+    ditems = items if (ctx or {}).get('in_dlg') else dlg_items(items)
+    if fb(items, *L['kick']):
+        log.append({'popup': 'kicked'})
+        return 'kicked'
+    # ⭐「发现莱姆！」先处理（揭格/补点后可能弹，不处理会挡住后面的所有判断）
+    lb = lime_back(items)
+    if lb:
+        _tap(b, lb['cx'], lb['cy'], wait=1.8)
+        log.append({'popup': 'lime_back', 'at': (lb['cx'], lb['cy'])})
+        say('       · 发现莱姆！→ 点返回')
+        return 'handled'
+    # ⭐「获得新装备！」（2026-09-26 用户报卡住）：打完大拇指地块 / 补点发现莱姆点都可能弹，
+    #   它盖住整盘 ⇒ 后面的地块分类全是暗格 ⇒ 一路空转到退图超时 ✗
+    if close_newequip(b, items, log, 'popup'):
+        if _PANEL_STUCK.get('newequip_popup', 0) >= 2:
+            # 连着两次都关不掉 ⇒ 别再占着闭环（交给整盘暗格那套兜底处理）
+            log.append({'popup': 'newequip_give_up'})
+            return 'none'
+        say('       · 获得新装备！→ 点返回')
+        return 'handled'
+    # ⭐「预言石板」等占卜面板（用户 2026-09-26）：**点中间最下面**关掉 + **拉黑这格** ✓
+    if fb(items, *L['prophecy']):
+        universal_close(b, log, items=items, probe=L['prophecy'][0], where='prophecy',
+                        at=tapped)
+        block_cell(log, ctx.get('flags'), tapped, 'prophecy')
+        say('       · 预言石板 → 点中间最下面关掉，并拉黑这格（以后不再点）')
+        return 'handled'
+    if fb(items, *L['low']):
+        return 'insufficient'
+    # ⭐⭐ 2026-09-26 修（**这是"没打 boss 就退图"的根因**）：
+    #   原来判据只有 `【正面】/【负面】 and 战斗胜利/失败` —— 但**有些结算面板不显示
+    #   【正面】/【负面】**（实测 runs/m0_r008.png：面板上只有「战斗胜利 / 回放战斗 / 关闭」）
+    #   ⇒ 这里判不成结算面板 ⇒ 一直走到函数尾巴 `return 'none'`
+    #   ⇒ 棋盘被面板盖住 ⇒ `marks` 扫描读不到 boss 标记 ⇒ 误判 `finish: targets_done`
+    #   ⇒ **boss 没打就退图** ✗（用户 2026-09-26 报「第一把没打到 boss 关就退了」）
+    #   ⇒ 改成和 `wait_end()` 里 `on_result` **同一套判据**（那边早就修过了 ✓）：
+    #      ①（【正面】/【负面】 and 胜负）  ② 底部「关闭」  ③ 「回放战斗」
+    _res = bool(fb(items, *L['desc']) and fb(items, L['win'], L['lose'])) \
+        or bool(bottom_close(items)) or bool(fb(items, '回放战斗'))
+    if _res:
+        # 结算面板：把所有按钮文字落盘（含幸运草/摇色子相关），供实现摇色子用
+        log.append({'popup': 'result_panel',
+                    'buttons': [{'t': i['text'], 'cx': i['cx'], 'cy': i['cy']}
+                                for i in items if i['cy'] > LAYOUT.sy(600) and len(i['text']) <= 8],
+                    'texts': [i['text'] for i in items][:30]})
+        cl = bottom_close(items)
+        if cl:
+            _tap(b, cl['cx'], cl['cy'], wait=2.5)
+            log.append({'popup': 'result_closed', 'at': (cl['cx'], cl['cy'])})
+            return 'handled'
+        # ⭐ 确实认到是结算面板却没量到「关闭」⇒ 交给 universal_close（内部按战斗面板
+        #   点实测的关闭坐标 (577,1439)，**不会点开始冒险** ✓）——别再 return 'none' 干耗 ✗
+        universal_close(b, log, items=items, where='result_no_close_btn')
+        log.append({'popup': 'result_closed_fixed'})
+        return 'handled'
+    img = b.img()
+
+    def near():
+        if not tapped:
+            return []
+        r0, c0 = cell_of(tapped[0], tapped[1])
+        # ⭐ 2026-09-25 用户口径：「判断摇不摇色子直接看这个地块有没有对应标记」
+        #   ⇒ **本格精确命中优先**（原来只在 ±1 邻域里挑最近的，本格没扫到标记时会误取邻格的）
+        exact = markers.get((r0, c0))
+        if exact is not None:
+            return list(exact.get('marks') or [])
+        hit, best = [], 99
+        for (r, c), v in markers.items():
+            d = max(abs(r - r0), abs(c - c0))
+            if d <= 1 and d < best:
+                best, hit = d, v['marks']
+        return list(hit)
+
+    # ⭐ 敌方预览面板「偶遇强敌 / 遭遇强敌」（2026-09-25 用户报卡在这里）：
+    #   面板：标题(542,243) + 右上角 X(988,244) + 敌人名 + 底部「邀请挑战」(297,1587)
+    #   用户口径变更（2026-09-25 晚）：**不打，关掉就行**（先前说过"遇到就打"，以本次为准）
+    if fb(items, *L['strong']):
+        mk = near()
+        log.append({'popup': 'strong_panel', 'cell_marks': mk})
+        x = find_x(items)
+        if x:
+            _tap(b, x['cx'], x['cy'], wait=1.5)
+        else:
+            close_x_panels(b, img)
+        log.append({'skip': 'strong_closed', 'tapped': tapped, 'marks': list(mk),
+                    'closed_at': (x['cx'], x['cy']) if x else None})
+        say('       · 偶遇强敌 → 不打，关掉')
+        return 'handled'
+
+    # ⭐⭐ 派遣探索面板（用户 2026-09-26 实测口径）：
+    #   点「探索」后弹出「探索配队」面板 ⇒ 一键派遣(891,1507) ⇒ 按钮变「开始探索」
+    #   ⇒ 再点 (875,1507) ⇒ 上方一个格子被填（出现倒计时 ✓）
+    #   ⚠ 必须在战斗分支之前判（该面板与地块面板一样，别掉进别的分支 ✗）
+    if EXPLORE_DISPATCH and any(fb(items, k) for k in ('探索配队', '一键派遣',
+                                                 '键派遣', '开始探索')):
+        # ⭐ 槽位满了 ⇒ 不能派遣（用户：探索满了还在探索 ✗）⇒ 关掉面板 ✓
+        if int(ctx.get('slots_free', 1) or 0) <= 0:
+            log.append({'dispatch': 'skip_slots_full'})
+            say('       · 三个探索槽已满，关掉派遣面板（不派遣 ✓）')
+            x = find_x(items)
+            if x:
+                _tap(b, x['cx'], x['cy'], wait=1.5)
+            else:
+                back = find_button(items, '返回', '取消', '关闭', maxlen=4)
+                if back:
+                    _tap(b, back['cx'], back['cy'], wait=1.5)
+                else:
+                    b.tap(275, 1507, wait=1.5)      # 左下角通用返回
+            return 'handled'
+        _gone = False
+        for _try in range(2):
+            b.tap(DISPATCH_BTN[0], DISPATCH_BTN[1], wait=2.5)
+            it2 = ocr_ch(b, min_conf=0.2, tag='dispatch')
+            t2 = [i['text'] for i in it2]
+            log.append({'dispatch': 'tap%d' % (_try + 1), 'texts': t2[:8]})
+            if not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x) or
+                       ('探索预计时间' in x) for x in t2):
+                _gone = True
+                break
+        if not _gone:
+            # ⚠ 点了两次面板还在 ⇒ 别再点了 ✗（用户报「一直点探索」就是这个）
+            log.append({'dispatch': 'still_open_close'})
+            say('       · 派遣面板点了两次还在 ⇒ 关掉它，不再重复点 ✓')
+            x = find_x(it2)
+            if x:
+                _tap(b, x['cx'], x['cy'], wait=1.5)
+            else:
+                back = find_button(it2, '返回', '取消', '关闭', maxlen=4)
+                if back:
+                    _tap(b, back['cx'], back['cy'], wait=1.5)
+                else:
+                    b.tap(275, 1507, wait=1.5)
+            return 'handled'
+        n_free = sum(1 for i in it2 if '空闲' in i['text'])
+        say('       · 已派遣一支探索队（上方还剩 %d 个空闲槽）' % n_free)
+        return 'handled'
+
+    # ⭐⭐ 2026-09-26 用户口径：**三个探索格子有空闲时，紫/橙探索地块要点左边「探索」**
+    #   实测面板同时含「探索产出(274,443)」与「战斗事件(806,442)」⇒ 必须先判探索 ✓
+    #   否则会掉进下面的战斗分支、点成右边的「战斗」✗（用户当场抓到 ✗）
+    # ⭐ 判据：**用当前点击位置现算** sid（原来用 st['tapped_sid'] 是上一轮的值 ✗ 导致
+    #   紫橙探索格被当成普通格打了战斗 ✗ —— 用户 2026-09-26 报）
+    _ev_tiles = ctx.get('ev_tiles') or []
+    _tapped_sid = ''
+    try:
+        _tap = ctx.get('tapped')
+        _cst = ctx.get('st') or {}
+        if _tap and _cst:
+            _tc = cell_of(_tap[0], _tap[1])
+            _tapped_sid = str((_cst.get(_tc) or {}).get('sid') or '')
+    except Exception:       # noqa: BLE001
+        _tapped_sid = ''
+    _purple_suffix = set(getattr(spots_mod, 'EXPLORE_SUFFIX', ('221', '321', '331')))
+    _is_purple = ('_' in _tapped_sid) and (_tapped_sid.split('_')[-1] in _purple_suffix)
+    # ⭐ 槽位满了 ⇒ 不走探索 ✓（落到下面的战斗分支 ⇒ 打掉它 ✓ 用户 2026-09-26）
+    _free_now = int(ctx.get('slots_free', 1) or 0)
+    if (EXPLORE_DISPATCH and _is_purple and _free_now > 0
+            and (fb(items, L['expl'])
+                 # ⭐ v0.32：真机上「探索产出」标题（dlg≈443）落弹性区看不见 ⇒
+                 #   用看得见的「探索」按钮（dlg≈735）进分支（仅 C>0 生效）
+                 or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn'])))):
+        # ⭐ v0.31 方案 B：面板按钮 y 带是弹窗系标定 ⇒ 用 +C 后的条目筛、tap_dlg 点
+        act = None
+        for it in ditems:
+            if L['ebtn'] in it['text'] and L['expl'] not in it['text'] and it['cy'] > LAYOUT.sy(620):
+                act = it
+                break
+        if act:
+            b.tap_dlg(act['cx'], act['cy'], wait=3.5)
+            log.append({'explore': 'first_high_value', 'at': (act['cx'], act['cy'])})
+            say('       · 点「探索」(%d,%d) → 事件进格子' % (act['cx'], act['cy']))
+            return 'handled'
+        # 找不到按钮就按实测坐标点左边（275,736 ✓ 弹窗系）
+        b.tap_dlg(275, 736, wait=3.5)
+        log.append({'explore': 'first_fixed_btn', 'at': (275, 736)})
+        say('       · 按固定坐标点「探索」(275,736)')
+        return 'handled'
+
+    # ⭐⭐ v0.32 入口修复（真机 boss 面板点不到战斗的**真正根因**）：
+    #   面板标题「战斗事件」dlg≈443 在真机落在 toRef 丢弃的弹性区 ⇒ 归一化帧看不见
+    #   ⇒ fb(items,'战斗事件') 恒 False ⇒ 战斗分支**从来没进去过**（v0.27~v0.31 全白修）✗
+    #   ⇒ C>0 时用看得见的独立「战斗」按钮（dlg≈735~791）进分支；
+    #     严格相等匹配防「战斗胜利/回放战斗」误命中；PC/9:16 C=0 ⇒ 行为一字不变 ✓
+    _fe_title = fb(items, L['fight'])
+    _fe_btn = (not _fe_title) and bool(dlg_c()) and _dlg_panel_btn(ditems, L['fbtn'])
+    if _fe_title or _fe_btn:
+        mk = near()
+        # ⭐ 2026-09-26 用户口径（原话「满了后就改成战斗」）：
+        #   探索槽**满了**时的紫/橙探索格（ID 后缀 221/321/331）⇒ **直接打掉** ✓
+        #   ⚠ 不补这一条的话，它会掉进下面「不在路上 ⇒ 不打」的分支 ⇒ 面板只是被关掉
+        #     ⇒ 既没探索也没打 ⇒ 还是白点一下 ✗（离线测 slots_free=0 就是 offroad_fight）
+        if _is_purple and _free_now <= 0:
+            mk = list(mk) + ['explore_full_fight']
+            log.append({'popup': 'fight_panel_explore_full',
+                        'slots_free': _free_now, 'tapped_sid': _tapped_sid})
+        log.append({'popup': 'fight_panel', 'cell_marks': mk,
+                    'entry': 'title' if _fe_title else 'dlg_btn'})
+        if not mk:
+            # ⭐ 用户 2026-09-25：**跟「接近 boss」无关的战斗格一律不打**。
+            #   只有落在「出生地 → 待处理标记格」路上的那格才打（它挡着路，打掉才能连锁揭示）；
+            #   其他内容格弹出来的战斗面板直接关掉（旧版只要 marked 非空就打 → 白打乱打）。
+            road = set(ctx.get('road') or [])
+            on_road = bool(tapped and (tapped in road or any(
+                abs(tapped[0] - q[0]) <= GRID['cx'] and abs(tapped[1] - q[1]) <= GRID['cy']
+                for q in road)))
+            # ⭐⭐⭐ 2026-09-28 修「点了 33 却没点到开始战斗」（用户真机报，图二实锤：
+            #   solver plan=['2,7','3,3','3,1'] ⇒ 点 (3,3) 弹 fight_panel ⇒ 被
+            #   offroad_fight 关掉（closed=2）⇒ 格没清、后面点序全乱 ✗）：
+            #   **计划内**的格弹出战斗面板 ⇒ 必打 —— solver/EffPolicy 已做过
+            #   「绕开更贵」的权衡，它挡着计划；旧口径只认启发式 road_all ⇒
+            #   计划内的开路战斗被误判"无关战斗" ✗。plan_road = 本轮计划执行步 ✓
+            _proad = set(ctx.get('plan_road') or [])
+            on_plan = bool(tapped and (tapped in _proad or any(
+                abs(tapped[0] - q[0]) <= GRID['cx'] and abs(tapped[1] - q[1]) <= GRID['cy']
+                for q in _proad)))
+            # ⭐⭐ 2026-09-27 用户口径修正：
+            #   「目标相邻的战斗格子**不是必打的**，只有附加没有空格子能连接目标格子才会被迫打」
+            #   ⇒ 旧口径「紧挨目标 ⇒ 必打」(near_target) 作废 ✗
+            #   ⇒ 新判据：**这条路上还有空地块(1 体)可走 ⇒ 不打** ✓；确实没有 ⇒ 被迫打 ✓
+            # ⭐⭐ 2026-09-27 修（用户报「点了 33 却没打掉这个战斗格」）：
+            #   路是**有序**的（path_to 从出生点往外 ✓）
+            #   ⇒ 只看"**在它之前**"那段路上还有没有空地 ✓
+            #      （旧版只看"整条路上有没有空地" ✗ ⇒ 障碍两侧各有空地时误判成"不用打"✗
+            #        结果点了却关面板 ⇒ 障碍没清掉 ⇒ 后面根本过不去 ✗）
+            _road_seq = list(ctx.get('road') or [])
+            _plain_road = list(ctx.get('plain_road') or [])
+            _plain_left = False
+            if tapped:
+                _idx = None
+                for _i3, _q in enumerate(_road_seq):
+                    if (abs(tapped[0] - _q[0]) <= GRID['cx'] * 1.05
+                            and abs(tapped[1] - _q[1]) <= GRID['cy'] * 1.05):
+                        _idx = _i3
+                        break
+                if _idx is None:
+                    _plain_left = bool(_plain_road)      # 不在路上 ⇒ 保守不动 ✓
+                else:
+                    for _q in _road_seq[:_idx]:           # 只看它**前面**那段 ✓
+                        for _p in _plain_road:
+                            if (abs(_q[0] - _p[0]) <= 1 and abs(_q[1] - _p[1]) <= 1):
+                                _plain_left = True
+                                break
+                        if _plain_left:
+                            break
+            forced_fight = bool((on_road and not _plain_left) or on_plan)
+            if not forced_fight:
+                # ⚠ 2026-09-25 踩坑：残留的战斗面板（比如上一轮/手动留下的）会让循环原地打转
+                #   （日志刷 `skip: offroad_fight` + `tapped: None`）—— 这里必须**确实关掉**
+                n = close_x_panels(b, img)
+                if n == 0:
+                    x = find_x(items)
+                    if x:
+                        _tap(b, x['cx'], x['cy'], wait=1.5)
+                        n = 1
+                if n == 0:
+                    c = exb(items, L['cancel']) or fb(items, '关闭') or exb(items, '返回')
+                    if c:
+                        _tap(b, c['cx'], c['cy'], wait=1.5)
+                        n = 1
+                if n == 0 and tapped is None:
+                    for bx in (493, 1024):          # 只认这两个真关闭符位置
+                        # ⭐ v0.31 方案 B：X 关闭符是**弹窗系**标定坐标 ⇒ tap_dlg
+                        #   （真机上原 b.tap(·,225) 落在弹性区/顶块，点不到 ✗）
+                        b.tap_dlg(bx, 225, wait=1.1)
+                    n = 2
+                log.append({'skip': 'offroad_fight', 'tapped': tapped,
+                            'road': sorted(road)[:4], 'closed': n})
+                return 'handled' if n else 'none'
+        if not mk and ctx.get('clear_fights', 0) >= 3:
+            close_x_panels(b, img)
+            log.append({'skip': 'clear_path_capped',
+                        'clear_fights': ctx.get('clear_fights', 0)})
+            return 'handled'
+        btn = None
+        # ⭐⭐ v0.31 方案 B（真机 boss 面板实锤：战斗钮弹窗系 y=791，归一化帧里只有 582
+        #   ⇒ 原 y 带 650~860 在真机永远落空 ✗）：y 带筛选必须用 **+C 后的弹窗系条目** ✓
+        #   （PC/9:16 C=0 ⇒ dlg_items 原样返回，行为一字不变）
+        for it in ditems:
+            t = it['text'].strip()
+            if L['fbtn'] in t and len(t) <= 4 and LAYOUT.sy(650) <= it['cy'] <= LAYOUT.sy(860) and L['fight'] not in t:
+                btn = it
+                break
+        if btn is None:
+            # 用户 09-25 口径：**只有「首领」标记的地块**才是居中单块面板 -> (541,735)；
+            # 其余（普通格 / 大拇指 / 幸运草 / 红装）都是左右两列面板 -> 标题 x（806 / 275），y 恒 735
+            # ⭐ v0.31：FIGHT_Y / 806 / 标题 cx 都是**弹窗系**坐标 ⇒ start_fight 里 tap_dlg 点 ✓
+            if 'boss' in list(mk):
+                btn = {'cx': 541, 'cy': FIGHT_Y, 'text': 'boss-fixed'}
+            else:
+                anchors = [it for it in ditems if L['fight'] in it['text']]
+                if tapped:
+                    anchors.sort(key=lambda it: abs(it['cx'] - tapped[0]))
+                a = anchors[0] if anchors else fb(ditems, L['fight'])
+                btn = {'cx': a['cx'] if a else 806, 'cy': FIGHT_Y, 'text': 'normal'}
+            log.append({'popup': 'fbtn_pos', 'at': (btn['cx'], btn['cy']),
+                        'marks': list(mk)})
+        if not start_fight(b, log, btn, mk):
+            close_x_panels(b, b.img())
+            if not mk:
+                # ⚠ 普通格点不动 = 这格就是点不动，**绝不开清路模式**
+                #   （旧版把普通格的 not_started 也当「被挡路」，于是跑去打没标记的格 —— 用户 09-25 报）
+                log.append({'battle': 'unmarked_no_start', 'note': '普通格点不动 -> 拉黑这格'})
+                return 'handled'
+            log.append({'battle': 'blocked', 'marks': mk})
+            say('       · 标记格打不开（可能被挡路）: %s' % (mk,))
+            return 'blocked'
+        # ⭐ 统计：幸运草地块 / 大拇指地块各打了几次（用户 2026-09-26 要求）
+        if 'clover' in (mk or []):
+            STATS['clovers'] = STATS.get('clovers', 0) + 1
+        say('       · 开打（标记: %s）' % (mk or ['拦路'],))
+        # ⭐ 本格标记（统计/摇色子用 ✓）：只取刚点那格的标记，不含 ±1 邻域 ✓
+        _exm = None
+        try:
+            if tapped:
+                _rc = cell_of(tapped[0], tapped[1])
+                _mv = markers.get(_rc)
+                _exm = list(_mv.get('marks') or []) if _mv else []
+        except Exception:       # noqa: BLE001
+            _exm = None
+        wait_end(b, log, marks=mk, exact_marks=_exm)
+        # ⚠ 2026-09-27 用户要求：**去掉**"战斗成功后下一轮先试点目标格" ✗
+        #   （原来会 try_targets=True ⇒ 下一轮把目标排最前 ✓ 用户不要这个行为 ✗）
+        return 'battle_clear' if not mk else 'battle'
+
+    # ⭐ v0.32：入口同战斗分支 —— 真机上「探索产出」标题落弹性区看不见，
+    #   C>0 时用看得见的「探索」按钮（dlg≈735）进分支；PC/9:16 行为一字不变 ✓
+    if fb(items, L['expl']) or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn'])):
+        act = None
+        for it in ditems:
+            if L['ebtn'] in it['text'] and L['expl'] not in it['text'] and it['cy'] > LAYOUT.sy(620):
+                act = it
+                break
+        # ⭐ 2026-09-26 用户口径：**面板掉落里有紫/橙/红（A/S/SS）才点探索** ✓
+        #   （三个槽位要装"紫色以上的探索事件" ✓；只有绿/蓝就不值得，关掉换别的格子 ✓）
+        # ⭐ 2026-09-26 用户口径：这些是**固定紫/橙探索**的地块 ⇒ 不用看颜色、直接点探索 ✓
+        _is_target_tile = bool(ctx.get('ev_tiles'))
+        _hv_img = None
+        if _OCR_CH['dlg'] and hasattr(b, 'img_dlg'):
+            try:
+                _hv_img = b.img_dlg()
+            except Exception:       # noqa: BLE001
+                _hv_img = None
+        hv = True if _is_target_tile else has_high_value_drop(_hv_img or img)
+        # ⭐⭐ 2026-09-26 修复（用户在幻少实测卡死）：原来**不检查槽位**，只要 hv 就点探索。
+        #   探索槽已经满了的时候点「探索」游戏没有反应 ⇒ 面板不关 ⇒ 下一帧又认到同一段
+        #   面板文字、又点探索…⇒ 整个闭环卡死（最后表现就是"退出地图失败"）。
+        _free2 = int(ctx.get('slots_free', 1) or 0)
+        entry['explore_panel'] = {'hv': bool(hv), 'btn': bool(act),
+                                  'target_tile': _is_target_tile,
+                                  'slots_free': _free2}
+        # ⭐ 不靠 slots_free 当闸门（OCR 偶尔认不到「空闲」会误判成 0 ✗），
+        #   改成**先点、再验证**：点了「探索」面板还在 ⇒ 就是派不进去（多半槽位满）⇒ 改走战斗
+        if act and hv:
+            b.tap_dlg(act['cx'], act['cy'], wait=3.5)   # ⭐ v0.31：弹窗系按钮 → tap_dlg
+            if panel_gone(b, L['expl'], dlg_btn=L['ebtn']):
+                _PANEL_STUCK['expl'] = 0
+                log.append({'explore': 'claimed_high_value'})
+                return 'handled'
+            n = (_PANEL_STUCK.get('expl') or 0) + 1
+            _PANEL_STUCK['expl'] = n
+            log.append({'explore': 'tap_no_effect', 'n': n, 'slots_free': _free2})
+            if n < 2:
+                return 'handled'          # 再给一次机会（可能只是动画没走完）
+            # ⭐ 用户 09-26 口径：**探索槽满了 ⇒ 紫橙格改当成普通目标打掉**（不再派探索）
+            _mk2 = near()
+            _fbtn = None
+            for it in ditems:               # ⭐ v0.31 方案 B：y 带 = 弹窗系标定 ✓
+                t = it['text'].strip()
+                if (L['fbtn'] in t and len(t) <= 4 and L['fight'] not in t
+                        and LAYOUT.sy(650) <= it['cy'] <= LAYOUT.sy(860)):
+                    _fbtn = it
+                    break
+            if _fbtn is None:
+                _fbtn = {'cx': int(LAYOUT.sx(806)), 'cy': FIGHT_Y, 'text': 'fixed'}
+            log.append({'explore': 'slots_full_fight', 'at': (_fbtn['cx'], _fbtn['cy']),
+                        'marks': list(_mk2)})
+            if start_fight(b, log, _fbtn, _mk2):
+                say('       · 探索槽已满 ⇒ 这一格改开打（标记: %s）' % (_mk2 or ['拦路'],))
+                # ⭐ 2026-09-27：本格标记（不含 ±1 邻域 ✗）⇒ 防"邻格大拇指"白摇色子 ✓
+                _exm2 = None
+                try:
+                    if tapped:
+                        _rc2 = cell_of(tapped[0], tapped[1])
+                        _mv2 = markers.get(_rc2)
+                        _exm2 = list(_mv2.get('marks') or []) if _mv2 else []
+                except Exception:       # noqa: BLE001
+                    _exm2 = None
+                wait_end(b, log, marks=_mk2, exact_marks=_exm2)
+                # ⚠ 2026-09-27 用户要求：不再设 try_targets ✓（战斗后不抢着点目标 ✓）
+                return 'battle_clear' if not _mk2 else 'battle'
+            # 开不起来也不能像以前那样干耗着 ⇒ 强制脱困
+            force_unstick(b, log, 'explore_slots_full', ctx)
+            return 'none'
+        if act and not hv:
+            log.append({'explore': 'skip_low_value'})
+            close_x_panels(b, img)
+            x = find_x(items)
+            if x:
+                _tap(b, x['cx'], x['cy'], wait=1.4)
+            return 'handled'
+        close_x_panels(b, img)
+        return 'handled'
+
+    # ⭐ 特殊地块（旅行商人 / 黄金宝库）必须**排在「领取」之前**判：
+    #   黄金宝库面板的说明文案是「不管你看到多少宝物，每一层都只能**领取**一件哦」，
+    #   先判「领取」会一直去点这句说明文字（点了没反应 → 每轮空转）
+    for t in L['special']:
+        if fb(items, t):
+            if t not in L['act_on']:
+                # 用户 09-25：特殊地块**只点旅行商人和黄金宝库**，其他一律无视
+                close_x_panels(b, img)
+                x = find_x(items)
+                if x:
+                    _tap(b, x['cx'], x['cy'], wait=1.8)
+                # ⭐⭐ 2026-09-26：这里原来**直接 return 'handled'** ⇒ 面板没关掉时闭环被它占死
+                #   （实测图13：连刷 45 次、stamina/round 都不动，最后退出地图失败）
+                #   改：关完**重新截图验证**；还在 ⇒ 计数，第二次就强制脱困 + return 'none'
+                #   （'none' ⇒ 主循环继续往下做决策，不再被这一条卡住）
+                if panel_gone(b, t):
+                    _PANEL_STUCK[t] = 0
+                    log.append({'special_ignored': t, 'closed': True})
+                    return 'handled'
+                n = (_PANEL_STUCK.get(t) or 0) + 1
+                _PANEL_STUCK[t] = n
+                log.append({'special_ignored': t, 'closed': False, 'n': n})
+                if n >= 2:
+                    force_unstick(b, log, 'special:%s' % t, ctx)
+                    _PANEL_STUCK[t] = 0
+                    return 'none'
+                return 'handled'
+            log.append({'special': t, 'texts': [i['text'] for i in items][:24]})
+            # ⭐ 2026-09-25：买完流程独立成 buypanels.py（坐标实测 + 每轮 OCR 定位按钮）
+            #   旅行商人：购买(895,1255)→返回(539,1212) ×4 → X(983,602)
+            #   黄金宝库：购买解锁一层(10000/20000/40000) → 现场认奖励（优先天赋果实/幸运草）
+            #             →「选择奖励」→ 中间「返回」，三层完按钮变「离开」
+            if '黄金宝库' in t:
+                buypanels.vault_flow(b, log)
+                STATS['vaults'] += 1
+                say('       · 黄金宝库买完（第 %d 个）' % STATS['vaults'])
+            else:
+                buypanels.merchant_flow(b, log)
+                STATS['merchants'] += 1
+                say('       · 旅行商人买完（第 %d 个）' % STATS['merchants'])
+            return 'handled'
+
+    it = fb(items, *L['claim'])
+    if it and it['cy'] < LAYOUT.sy(1700) and len(it['text']) <= 4:
+        _tap(b, it['cx'], it['cy'], wait=2)
+        log.append({'popup': 'claim'})
+        return 'handled'
+
+    ok = exb(items, L['ok'])
+    if ok and ok['cy'] > LAYOUT.sy(900) and exb(items, L['cancel']) is None:
+        if fb(items, '购买', '钻石不足'):
+            return 'none'
+        _tap(b, ok['cx'], ok['cy'], wait=2.5)
+        log.append({'popup': 'reward_confirm'})
+        return 'handled'
+
+    x = find_x(items)
+    if x:
+        _tap(b, x['cx'], x['cy'], wait=1.8)
+        log.append({'popup': 'close_x'})
+        return 'handled'
+    return 'none'
+
+
+def save_board_frame(b, log, rnd=0, img=None):
+    """存一张棋盘帧 → `<实例目录>/r_<HHMMSS>_<轮次>.png`
+
+    ⚠ 多开隔离（2026-09-27）：**必须落 `b.runs`**（带 `--tag acc2` 时 = `runs/acc2/`）。
+      以前写死公共 `RUNS` ⇒ 主号与 2 号的首帧会混进同一个 `runs/` ✗（时间戳撞车就互相覆盖）
+    """
+    try:
+        import cv2 as _cv2
+        if img is None:
+            img = b.img()
+        if img is None:
+            log.append({'shot': 'no_img', 'rnd': rnd})
+            return None
+        _dir = getattr(b, 'runs', None) or RUNS
+        os.makedirs(_dir, exist_ok=True)
+        rp = os.path.join(_dir, 'r_%s_%s.png' % (time.strftime('%H%M%S'), rnd))
+        _cv2.imencode('.png', img)[1].tofile(rp)
+        log.append({'shot': 'saved', 'rnd': rnd, 'file': os.path.basename(rp)})
+        say('   ★ 存图：%s' % rp)
+        return rp
+    except Exception as e:      # noqa: BLE001
+        log.append({'shot': 'error', 'rnd': rnd, 'e': repr(e)[:120]})
+        return None
+
+
+def enter_map(b, log, timeout=40):
+    """在选图界面点「进入地图」。
+
+    ⚠ 2026-09-25 用户报「退图后乱点切换到别的图」：进图前先确认**确实在选图界面**
+    （有「快速扫荡/进入地图」这类菜单文字），并且只点识别到的那个按钮；
+    没确认到就等下一轮，绝不盲点（盲点就会点到别的图卡片上）。
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        b.snap('enter')
+        img = b.img()
+        items = b.ocr(tag='round')
+        if in_map(b, img, items):
+            log.append({'enter': 'in_map', 'stamina': stamina(items)})
+            return True
+        if fb(items, *L['kick']):
+            return False
+        # ⭐ 2026-09-27：**大厅**（游戏重启后常见）⇒ 点底部中间「开始冒险」离开，
+        #   再等下一轮验证 ⇒ 不会白等到 40 秒超时 ✗（用户口径：「点中间的开始冒险」✓）
+        if in_lobby(items) and go_lobby_to_menu(b, log, items=items):
+            time.sleep(1.0)
+            continue
+        # 确认在「选图界面」（菜单文字在）再点进入地图；否则等着，绝不盲点
+        on_menu = bool(fb(items, *L['menu'])) or any(
+            ('快速扫荡' in i['text']) or ('进入地图' in i['text']) for i in items)
+        ent = None
+        for it in items:
+            if L['enter'] in it['text'] and it['cy'] > LAYOUT.sy(1400):
+                ent = it
+                break
+        if ent and on_menu:
+            b.tap(ent['cx'], ent['cy'], wait=2.0)
+            log.append({'enter': 'clicked', 'at': (ent['cx'], ent['cy'])})
+            # ⚠ 2026-09-25 用户报「一进图就点一下右下角」：原来点完没立刻认出地图
+            #   **同一秒又点了一次**，第二下正好落在刚加载出来的地图上（看起来像乱点）。
+            #   现在点一下就**等地图加载**（每秒看一次，最多 ~14 秒），期间处理弹窗。
+            for _ in range(9):
+                time.sleep(1.5)
+                b.snap('enter_wait')
+                img2 = b.img()
+                it2 = b.ocr(tag='round')
+                if in_map(b, img2, it2):
+                    log.append({'enter': 'in_map', 'stamina': stamina(it2)})
+                    return True
+                if fb(it2, *L['kick']):
+                    return False
+                act = popups(b, it2, log)
+                if act == 'kicked':
+                    return False
+            continue
+        if not on_menu:
+            log.append({'enter': 'not_menu_yet',
+                        'texts': [i['text'] for i in items if i['cy'] > LAYOUT.sy(900)][:8]})
+        time.sleep(1.5)
+    log.append({'enter': 'timeout'})
+    return False
+
+
+# ---------------------------------------------------------------------------
+# ⭐ 2026-09-27 新增：清体力时**顺手抓真盘**（含 roadMap ✓ / 零额外体力 ✓）
+#
+# 用户问：「我现在用那个自动探索脚本去清体力，能自动拿真盘截图并且分析成数据吗」
+# 答：**能，但要读内存** —— 截图那条路拿不到路网 ✗
+#   · 实测 runs/map_shot_1.png：35 格只有「地块美术」或「灰雾」，**没有任何道路视觉元素**
+#     ⇒ 截图/OCR 只能认已揭示格子的地块身份，拿不到 roadMap / 块号结构 / 迷雾格 ✗
+#   · 读内存：blockList + blockBoard + chestMap + **roadMap** 全字段 ✓（零额外体力 ✓）
+# 所以这里挂一步：进图成功 ⇒ 顺手读一张并入库 ✓
+# ---------------------------------------------------------------------------
+# ⭐ 2026-09-28 22:15 用户授权（「听你的」）⇒ **关闭**主循环里的"顺手抓真盘"：
+#   ① 92 张真盘已采完（§6「数量够了吗」主要项已验证），边际价值低
+#   ② 它挂在推图主循环里 ⇒ 任何一次内存慢读都会拖累推图（22:12 实测卡死 ✗）
+#   ③ 要继续采集走**独立脚本**（体力/耗时可控、不拖推图）：
+#      `collect_maps_mem.py --device <dev> --tag <tag>` / `watch_collect.py` / `grab_lobby_maps.py`
+#   想开回主循环：把这行改回 True 即可（预算保护已就位，最多 25 秒/图 ✓）
+COLLECT_REAL_MAPS = False
+# ⭐⭐⭐ 2026-09-28 顺手抓真盘的**总预算**（秒）：超了就收手，绝不拖住推图。
+#   依据（真机 22:12 实测）：无预算时 live_pick 会在 _sweep 里依次读几十~上百个区
+#   （单区上限 180 秒）⇒ 进图后整条推图线卡死 ✗。命中表/提示建好后本条路径亚秒 ✓
+COLLECT_BUDGET_SECS = 25
+                               #    True = 进图后顺手读内存存真盘（含 roadMap ✓ 零额外体力 ✓）
+                               #    ⚠ 只读 /proc/<pid>/mem，不注入、不点屏、不改游戏状态 ✓
+                               #    历史：09-27 曾按用户指示关成 False（「靠截图+OCR」）
+AUTO_SHOT_DIR = os.path.join(RUNS, 'auto')
+_COLLECT = {'n': 0, 'miss': 0}
+
+
+def _try_collect_map(b, log, tag=''):
+    """读一张真盘（含路网 ✓）存进 `runs/maps_dataset.jsonl` + 截一张图 ✓
+
+    ⚠ 为什么挂在「进图成功」这一刻（而不是退图时）：
+        进图后游戏会把新图写进存档 JSON ⇒ 此刻内存里就是**这张图** ✓
+        失败也不影响清体力 —— 全程 try/except，异常只写日志 ✓
+
+    ⚠ 耗时（2026-09-27 实测）：旧 `live_pick` 未命中要**全扫 405 个区 = 100.5 秒** ✗
+        现走「含针区表」（实测全内存只有 **2 个**区含 `"blockBoard":[` 针）
+        ⇒ **1.10 秒** ✓（91 倍）；表里没有(冷启动)才付一次 ~100 秒并自动建表 ✓
+
+    安全边界：只读内存 + 写 runs/ ⇒ **不点屏幕、不花体力、不改游戏状态** ✓
+        读到上一张图也无所谓（`add_map` 按棋盘指纹去重 ⇒ 只是白读一次 ✓）
+    """
+    if not COLLECT_REAL_MAPS:
+        return
+    try:
+        import mapcollect
+        t0 = time.time()
+        m, why = mapcollect.live_pick(getattr(b, 'dev', None) or INSTANCE_DEV,
+                                      verbose=False,
+                                      budget_secs=COLLECT_BUDGET_SECS,
+                                      mem_timeout=12)
+        dt = time.time() - t0
+        if not m:
+            _COLLECT['miss'] += 1
+            log.append({'collect': 'miss', 'why': why[:120], 'secs': round(dt, 2)})
+            say('   · 顺手抓真盘：没读到（%.1f 秒 · %s）' % (dt, why[:56]))
+            return
+        shot = None
+        try:
+            os.makedirs(AUTO_SHOT_DIR, exist_ok=True)
+            shot = b.snap('auto/%s' % (tag.rstrip('_') or 'map'), save=True)
+        except Exception as _e:         # noqa: BLE001
+            log.append({'collect': 'shot_fail', 'e': repr(_e)[:100]})
+        m['shot'] = shot
+        new = mapcollect.add_map(m, tag='auto')
+        if new:
+            _COLLECT['n'] += 1
+        st = m.get('_stats') or {}
+        log.append({'collect': 'ok', 'area': m.get('areaName'),
+                    'diff': m.get('difficulty'), 'new': bool(new),
+                    'E': st.get('E'), 'K': st.get('K'), 'secs': round(dt, 2)})
+        say('   ★ 顺手存了真盘：%s d%s 边%s/K%s 死胡同%s（%.1f 秒）→ 本轮新增 %d 张%s'
+            % (m.get('areaName'), m.get('difficulty'), st.get('E'), st.get('K'),
+               st.get('dead'), dt, _COLLECT['n'],
+               '' if new else '（重复，库里已有 ✓）'))
+    except Exception as e:              # noqa: BLE001
+        log.append({'collect': 'error', 'e': repr(e)[:140]})
+
+
+def ensure_in_map(b, log, tag=''):
+    for a in range(4):
+        b.snap('%schk%d' % (tag, a))
+        items = b.ocr(tag='round')
+        img = b.img()
+        # ⭐⭐ 2026-09-29 真机：画面是 MGAS 自己的界面/应用双开选择框 ⇒ 别再乱点
+        #   （点下去全是自己的按钮），直接把原因讲清楚让人处理 ✓
+        if self_ui_hits(items) >= 2:
+            log.append({'pre': 'self_ui', 'attempt': a})
+            say('⚠ 画面是 MGAS 自己的界面/应用选择框（游戏没在前台）')
+            say('   ⇒ 请手动切到游戏、到「选图界面」后再点 ▶ 重试')
+            say('   ⇒ （手机上若开了「应用双开」，切游戏会弹选择框 ⇒ 关掉双开即可）')
+            flush(log)
+            return False
+        if in_map(b, img, items):
+            _try_collect_map(b, log, tag)      # ⭐ 顺手抓真盘（失败绝不影响主流程 ✓）
+            return True
+        act = popups(b, items, log)
+        if act == 'kicked':
+            return False
+        n = close_x_panels(b, img)
+        st = 'lobby' if in_lobby(items) else ('menu' if is_map_screen(items) else 'other')
+        log.append({'pre': 'not_in_map', 'attempt': a, 'act': act,
+                    'closed_x': n, 'state': st})
+        flush(log)
+        if act == 'none' and n == 0:
+            # ⭐⭐ 2026-09-27 用户口径：「点中间的开始冒险就能回到选图界面」
+            #   场景：采图中途**游戏自己重启** ⇒ 停在大厅 ⇒ 老逻辑到这就 break，
+            #   接着 enter_map() 在非选图界面里等 40 秒 → 超时 → 整个任务中断 ✗
+            #   现在：认出大厅就点「开始冒险」，回头再验一次 ⇒ 重启自愈 ✓
+            if go_lobby_to_menu(b, log, items=items):
+                continue
+            break
+    st = stamina(b.ocr(tag='round'))
+    if st is not None and st < MIN_STAMINA:
+        # ⭐ 用户 2026-09-25：「加个自动使用结实补给的按钮（没体力就自动去背包里使用一个）」
+        if AUTO_SUPPLY:
+            log.append({'supply': 'try_before_giveup', 'stamina': st,
+                        'min': MIN_STAMINA})
+            for attempt in range(2):
+                if not use_supply(b, log):
+                    break
+                st2 = stamina(b.ocr(band=(0, 140), tag='round'))
+                log.append({'supply': 'after_use', 'attempt': attempt + 1,
+                            'stamina': st2})
+                # ⭐ 标记"刚吃过补给" ⇒ _stam_sanity 不再把这次真实涨幅当 OCR 误读 ✗
+                STATS['supply_used'] = True
+                if st2 is not None and st2 >= MIN_STAMINA:
+                    say('   用了补给，体力 %s ≥ %d，继续刷' % (st2, MIN_STAMINA))
+                    return enter_map(b, log)
+            st = stamina(b.ocr(band=(0, 140), tag='round')) or st
+        if st is not None and st < MIN_STAMINA:
+            log.append({'stop': 'no_stamina', 'stamina': st, 'min': MIN_STAMINA})
+            say('   体力 %d < %d（连刷下限），收工' % (st, MIN_STAMINA))
+            return False
+    return enter_map(b, log)
+
+
+def finish_map(b, log, timeout=90):
+    """结束冒险 → 回选图界面
+
+    ⚠ 2026-09-25：退图时**经常弹确认框**（「还有未拾取的战利品 / 是否结束冒险？」），
+      按钮是 确定(774,1113) / 取消(305,1113) —— 只点靠右的那个，绝不点取消；
+      另外还可能先弹结算面板（底部「关闭」）或奖励领取，都要先处理掉。
+    """
+    t0 = time.time()
+    clicked = 0
+    end_tapped_at = 0.0        # ⭐ 上次点「结束冒险」的时间（防连点 ✗）
+    idle = 0                   # ⭐ 2026-09-26：连续"什么都认不到"的轮数
+    # ⭐⭐ 2026-09-26 用户口径：「万能点位可以用来应对异常情况，防止任务过早中断」✓
+    _rescued = False           # 退图快超时时是否已用万能位救过一次
+    while time.time() - t0 < timeout:
+        # ⭐⭐ 退图快超时 ⇒ 万能位**最后救一次**，并把截止时间**延后 20 秒**再继续跑 ✓
+        #   老逻辑：超时就直接 `finish: timeout` + return False ⇒ **任务在这里中断** ✗
+        #   现在：先让万能位（关得掉几乎所有弹窗，且点它无副作用）救一手，再多给 20 秒 ✓
+        #   ⚠ 依然先认面板类型：战斗界面点「关闭」(577,1439)，绝不点开始冒险 ✓
+        if not _rescued and timeout > 20 and time.time() - t0 > timeout - 6:
+            _rescued = True
+            universal_close(b, log, items=b.ocr(tag='fin_to'), where='finish_timeout')
+            log.append({'universal_fallback': 'finish_timeout'})
+            say('       · 退图快超时 → 万能位兜底关面板（截止时间延后 20 秒）')
+            timeout += 20.0
+            continue
+        b.snap('finish')
+        items = b.ocr(tag='round')
+        if fb(items, *L['menu']):
+            log.append({'finish': 'back_to_menu'})
+            return True
+        # ⭐ 2026-09-27：**大厅**也算"已离开地图"⇒ 直接收工 ✓
+        #   场景：退图途中游戏自己重启 ⇒ 停在大厅 ⇒ 老逻辑所有分支都不命中，
+        #   一路 idle 到第 4 轮就 `universal_close()` 盲点 (541,1890)（就是大厅的「开始冒险」），
+        #   或更糟 —— 90 秒 `finish: timeout` ⇒ 整个任务中断 ✗
+        if in_lobby(items):
+            log.append({'finish': 'lobby'})
+            say('       · 已在大厅（退图途中重启过）⇒ 本轮按退图完成处理 ✓')
+            return True
+        # ①' 「发现莱姆！」→ 点返回
+        lb = lime_back(items)
+        if lb:
+            b.tap(lb['cx'], lb['cy'], wait=1.8)
+            log.append({'finish': 'lime_back', 'at': (lb['cx'], lb['cy'])})
+            continue
+        # ①'' 「获得新装备！」→ 点返回（2026-09-26：盖住棋盘 ⇒ 认不到「结束冒险」⇒ 90 秒超时）
+        if close_newequip(b, items, log, 'finish'):
+            say('       · 获得新装备！→ 点返回')
+            continue
+        # ①''' 「预言石板」→ 点中间最下面（万能位）关掉
+        if fb(items, *L['prophecy']):
+            universal_close(b, log, items=items, probe=L['prophecy'][0], where='finish')
+            say('       · 预言石板 → 点中间最下面关掉')
+            continue
+        # ①'' 「偶遇强敌」→ 不打，点 X 关掉（用户 2026-09-25 报退图流程被它卡住）
+        if fb(items, *L['strong']):
+            x = find_x(items)
+            if x:
+                b.tap(x['cx'], x['cy'], wait=1.5)
+            else:
+                close_x_panels(b, b.img())
+            log.append({'finish': 'strong_closed',
+                        'closed_at': (x['cx'], x['cy']) if x else None})
+            continue
+        # ① 结算/奖励面板：底部「关闭」
+        cl = bottom_close(items)
+        if cl:
+            b.tap(cl['cx'], cl['cy'], wait=1.8)
+            log.append({'finish': 'closed_result'})
+            continue
+        # ② 确认弹窗：确定/确认/是（取最靠右的，避开「取消」）
+        ok = None
+        for it in items:
+            if it['text'].strip() in ('确定', '确认', '是') and it['cy'] > LAYOUT.sy(800):
+                if ok is None or it['cx'] > ok['cx']:
+                    ok = it
+        if ok:
+            b.tap(ok['cx'], ok['cy'], wait=2.5)
+            log.append({'finish': 'confirmed', 'at': (ok['cx'], ok['cy'])})
+            continue
+        # ③ 领取 / 继续
+        cl2 = fb(items, *L['claim'])
+        if cl2 and cl2['cy'] < LAYOUT.sy(1700) and len(cl2['text']) <= 4:
+            b.tap(cl2['cx'], cl2['cy'], wait=2)
+            log.append({'finish': 'claimed'})
+            continue
+        # ④ 结束冒险
+        end = exb(items, L['end'])
+        if end:
+            # ⚠ 2026-09-26 用户报「结束冒险还是会多点一下（可能导致切换地图）」：
+            #   上一版点完只在一个窄带里找确认按钮，找不到就进下一轮 ⇒ 又看到「结束冒险」
+            #   ⇒ 再点一次 ✗；那时弹框/画面可能已经变了 ⇒ 第二下落在**地图卡片**上 ⇒ 切图 ✗
+            #   ⇒ 现在：点过一次后 **8 秒内绝不再点「结束冒险」**，只等确认框或等切到选图界面 ✓
+            if time.time() - end_tapped_at < 8.0:
+                time.sleep(1.0)
+                continue
+            clicked += 1
+            if clicked > 3:
+                n = close_x_panels(b, b.img())
+                if not n:
+                    x = find_x(items)
+                    if x:
+                        b.tap(x['cx'], x['cy'], wait=1.5)
+                clicked = 0
+                log.append({'finish': 'close_panel_retry'})
+                continue
+            b.tap(end['cx'], end['cy'], wait=2.5)
+            end_tapped_at = time.time()
+            log.append({'finish': 'clicked_end', 'at': (end['cx'], end['cy'])})
+            # 等确认框：找「确定/确认」（取最靠右的 = 确定，避开"取消"），
+            # 最多等 ~4 秒，等到就点掉；等不到也不回头乱点 ✓
+            # ⭐ 2026-09-28 提速（P0）：原版每轮 `sleep(0.5)` + **全屏 OCR**（0.8s/次），
+            #   而且循环里不重截帧 ⇒ 8 次基本在对**同一帧**反复 OCR（纯浪费，实测一轮
+            #   退图能烧 6~10 秒）。确认按钮固定在 cy>700、cx>420 ⇒ 改 **band OCR**
+            #   （~0.3s/次）+ `wait_change` 等弹框出现（画面一变立刻看，不再死等）✓
+            # ⭐ 二次修正：3 张实测全是 `end_no_dialog` —— 多数情况**根本不弹确认框**
+            #   （没有未拾取战利品），8 轮白等 ~7s ⇒ 砍到 **3 轮**（~2s）：真弹框
+            #   一般 1~2 轮内出现；万一出现得晚，**外层轮询自己就有「确定/确认」分支**
+            #   （上方 ②）兜底，不会漏 ✓
+            ok2 = None
+            for _wait in range(3):
+                if b.fast_ok:
+                    b.wait_change(0.6, band=(int(LAYOUT.sy(600)), int(LAYOUT.sy(1500))),
+                                  thr=4.0, min_sec=0.15)
+                else:
+                    time.sleep(0.5)
+                it_after = b.ocr(min_conf=0.35,
+                                 band=(int(LAYOUT.sy(680)), int(LAYOUT.sy(1500))), tag='pre')
+                for t in it_after:
+                    s2 = t['text'].strip()
+                    if s2 in ('确定', '确认') and t['cy'] > LAYOUT.sy(700) and t['cx'] > LAYOUT.sx(420):
+                        if ok2 is None or t['cx'] > ok2['cx']:
+                            ok2 = t
+                if ok2:
+                    break
+            if ok2:
+                b.tap(ok2['cx'], ok2['cy'], wait=2.5)
+                log.append({'finish': 'end_confirmed', 'at': (ok2['cx'], ok2['cy'])})
+            else:
+                log.append({'finish': 'end_no_dialog'})
+            continue
+        # ⭐⭐ 2026-09-26（rendslot 实测）：面板盖住棋盘时 OCR **根本看不到「结束冒险」**，
+        #   于是上面每个分支都不命中 ⇒ 一直 sleep 到 90 秒 timeout ⇒ "退图没成功，已停止"
+        #   （诱因常常是退图前那一下"补点"点出了面板）⇒ 认不到东西就先清面板再试
+        idle += 1
+        if idle >= 4:
+            # ⭐⭐ 2026-09-26 用户实测：**「点中间最下面」(541,1890) 能关掉几乎所有弹窗，
+            #   而且关完还在图里** ⇒ 退图阶段第一步就试它 ✓（比"找 X / 找关闭符"稳）
+            #   ⚠ 但**战斗界面必须点「关闭」**（用户明令：不能点开始冒险 ✗）
+            #     ⇒ 交给 universal_close 认面板类型，别在这里硬点 ✓
+            universal_close(b, log, items=items, where='finish_idle')
+            n = close_x_panels(b, b.img())
+            x = find_x(b.ocr(tag='fin_univ'))
+            if x:
+                b.tap(x['cx'], x['cy'], wait=1.5)
+                n += 1
+            if not n and not x:
+                # 连关闭符都认不到 ⇒ 按实测的固定位置试（底部返回 + 左侧 X）
+                # ⭐ v0.31 方案 B：这两个都是**面板上的**关闭点（弹窗系）⇒ tap_dlg ✓
+                b.tap_dlg(int(LAYOUT.sx(539)), int(LAYOUT.sy(1212)), wait=1.5)
+                b.tap_dlg(int(LAYOUT.sx(493)), int(LAYOUT.sy(225)), wait=1.2)
+            log.append({'finish': 'unknown_panel_clear', 'idle': idle,
+                        'closed': n, 'x': bool(x), 'universal': True})
+            idle = 0
+            continue
+        # ⭐ 2026-09-28 提速（P3）：空转轮不再死等 1.2s —— 画面一变（面板关掉/界面
+        #   切换）立刻进入下一轮识别；没变才等满 ✓
+        if b.fast_ok:
+            b.wait_change(1.2, band=(130, 1800), thr=4.0, min_sec=0.2)
+        else:
+            time.sleep(1.2)
+    log.append({'finish': 'timeout'})
+    return False
+
+
+def final_collect(b, log, st):
+    """⭐ 退出地图前的固定动作（用户 2026-09-25）：**只点一下**，点的是**最近点过的那格**
+
+    用户口径原话：「退出前点一下之前点过的位置，**点一下就行**」「**不是各一下，是一共一下**」
+    「**最后点的那一下是点最近点的那次的点位**」。
+    只补点 + 关面板，不再打架、不再买、不再揭新格。
+    """
+    clicks = list(st.get('clicked') or [])
+    pos = clicks[-1] if clicks else st.get('last')
+    if not pos:
+        log.append({'collect': 'none'})
+        return 0
+    # ⚠ 2026-09-25 用户报「退出地图后乱点切换到别的图」：
+    #   补点前**必须确认还在图里**！上一轮可能已经自己退图 / 被顶回选图界面，
+    #   这时再按老坐标补一下 = 在选图界面上乱点（可能选到别的图）。
+    b.snap('collect_pre')
+    it0 = b.ocr(min_conf=0.4, band=(0, 320), tag='pre')
+    if not in_map(b, b.img(), it0):
+        log.append({'collect': 'skip_not_in_map'})
+        say('       · 已经不在图里了 → 跳过退图前补点（避免乱点）')
+        return 0
+    b.tap(pos[0], pos[1], wait=1.8)
+    b.snap('collect')
+    it = b.ocr()
+    # ⭐ 补点后可能弹「发现莱姆！」（用户 2026-09-25）→ 要**点返回**
+    lb = lime_back(it)
+    if lb:
+        b.tap(lb['cx'], lb['cy'], wait=1.6)
+        log.append({'collect': 'lime_back', 'at': (lb['cx'], lb['cy'])})
+        say('       · 发现莱姆！→ 点返回')
+        return 1
+    # ⭐ 也可能弹「获得新装备！」（用户 2026-09-26 报：最后点击最近一次点过的位置那出现）
+    if close_newequip(b, it, log, 'collect', at=pos):
+        say('       · 退图前补点弹出「获得新装备！」→ 点返回')
+        return 1
+    # ⭐ 或者「预言石板」→ 点中间最下面关掉 + 拉黑这格 ✓
+    if fb(it, *L['prophecy']):
+        universal_close(b, log, items=it, probe=L['prophecy'][0], where='collect', at=pos)
+        block_cell(log, st, pos, 'prophecy')
+        say('       · 退图前补点弹出「预言石板」→ 关掉并拉黑这格')
+        return 1
+    # ⭐ 也可能弹「偶遇强敌」（2026-09-25 用户报卡住）→ 不打，点 X 关掉
+    if fb(it, *L['strong']):
+        x = find_x(it)
+        if x:
+            b.tap(x['cx'], x['cy'], wait=1.5)
+        else:
+            close_x_panels(b, b.img())
+        log.append({'collect': 'strong_closed',
+                    'closed_at': (x['cx'], x['cy']) if x else None})
+        say('       · 退图前补点弹出「偶遇强敌」→ 不打，关掉')
+        return 1
+    opened = panel_seen(it) or bool(bottom_close(it))
+    if opened:
+        close_x_panels(b, b.img())
+        cl = bottom_close(it)
+        if cl:
+            b.tap(cl['cx'], cl['cy'], wait=1.6)
+        ok = exb(b.ocr(), L['ok'])
+        if ok and ok['cy'] > LAYOUT.sy(900):
+            b.tap(ok['cx'], ok['cy'], wait=1.5)
+        x = find_x(b.ocr())
+        if x:
+            b.tap(x['cx'], x['cy'], wait=1.2)
+    # ⭐ 2026-09-26（rendslot 实测）：补点点出的面板**关不掉**时，后面 finish_map 会因为
+    #   「结束冒险」被面板遮住而 OCR 不到 ⇒ 空转到 90 秒 timeout ⇒ "退图没成功，已停止"
+    #   ⇒ 这里关完**验证**一次；还在就强制脱困
+    it2 = b.ocr(tag='collect2')
+    still = panel_seen(it2) or bool(bottom_close(it2))
+    log.append({'collect': 'tapped', 'at': pos, 'opened': bool(opened),
+                'still': bool(still)})
+    if still:
+        force_unstick(b, log, 'collect_panel',
+                      ctx={'tapped': pos, 'flags': st if isinstance(st, dict) else {}})
+        say('       · 退图前补点点出了面板且关不掉 ⇒ 已强制脱困')
+    return 1
+
+
+def run_one_map(b, log, max_round=45, prefix='', deadline=900):
+    t0 = time.time()
+    st = {'cold': {}, 'done': set(), 'last': None, 'err': 0, 'stuck': 0,
+          'marks': {}, 'clear': False, 'clear_fights': 0, 'stall': 0, 'sig': None,
+          'blank': 0, 'clicked': [], 'battles': []}
+    for rnd in range(max_round):
+        # ⭐ 立即停止（2026-09-29 用户口径）：**每轮开头先查**，不等这张图打完
+        if stop_checked(log, '轮首 r%d' % rnd):
+            return 'stopped'
+        if time.time() - t0 > deadline:
+            log.append({'finish': 'deadline'})
+            final_collect(b, log, st)
+            return 'deadline'
+        try:
+            why = one_round(b, log, rnd, prefix, st)
+            # ⭐⭐ 2026-09-29 诊断（真机「点了格子不点战斗」空转 15 秒排查）：
+            #   每轮返回值落 log —— 之前 r1~r6 在 logcat 里**完全隐形**（轮首 say 都没有），
+            #   无法判断卡在哪个状态。有这条后：每轮一条 `round_end`，配合轮首 say
+            #   就能定位"每 2.2 秒一次 OCR 却零点击"到底发生在哪一段。
+            log.append({'round_end': rnd, 'why': why,
+                        'secs': round(time.time() - t0, 1)})
+        except Exception as e:
+            import traceback
+            st['err'] += 1
+            log.append({'round': rnd, 'error': repr(e),
+                        'trace': traceback.format_exc().splitlines()[-3:]})
+            flush(log)
+            if st['err'] >= 3:
+                log.append({'finish': 'too_many_errors'})
+                final_collect(b, log, st)
+                return 'errors'
+            time.sleep(2)
+            continue
+        flush(log)
+        if why:
+            # ⚠ 「发现红装立即停止」时**什么都别做**（别补点、别退图），把现场留给人
+            # ⚠ 「用户点了停止」同理：**绝不能补点**（`final_collect` 会再点一遍打过的格
+            #   ⇒ 明明点了停还要多等十几秒，正是用户抱怨的"等打完这张图"✗）
+            if why not in ('kicked', 'red_equip', 'stopped'):
+                final_collect(b, log, st)      # ⭐ 退出前固定补点（只点打过的格）
+            return why
+    final_collect(b, log, st)
+    return 'maxed'
+
+
+def line_cells(a, b):
+    """两格之间按**直线**取格（Bresenham），含两端
+
+    用户 2026-09-25 口径：「拦路 = 出生点到对应标记**那条直线上的格子**，两点之间直线最短」
+    ⇒ 不要用「走廊」判据（`|d1+d2-d|<=2`，会把偏出去的格子也算成拦路）。
+    """
+    (r0, c0), (r1, c1) = a, b
+    dr, dc = abs(r1 - r0), abs(c1 - c0)
+    sr = 1 if r1 >= r0 else -1
+    sc = 1 if c1 >= c0 else -1
+    err = dr - dc
+    r, c = r0, c0
+    out = []
+    for _ in range(dr + dc + 3):
+        out.append((r, c))
+        if (r, c) == (r1, c1):
+            break
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r += sr
+        if e2 < dr:
+            err += dr
+            c += sc
+    return out
+
+
+def optimal_order(c, mk, st, log=None):
+    """⭐ 用「体力最省」的最优解算本回合点序（mapsolve.Dijkstra，毫秒级）
+
+    用户 2026-09-25：「要按消耗体力最少的方案走」。
+    体力公式（源码 82956-82992）：普通格 = SpotSize；战斗格 = SpotSize*2。
+    建盘：把视觉状态（每格 sid/是否已揭示/标记）交给 mapsim.from_observation（相邻同 sid 归一块），
+    再交给 mapsolve.solve 求最省体力的动作序列 → 返回要点的像素坐标列表。
+    失败(异常/无解)返回 None，调用方退回原来的启发式点序 ✓
+    """
+    try:
+        import mapsim as sim_mod
+        import mapsolve as solve_mod
+        cells = {}
+        for (r, cc), v in (c.get('st') or {}).items():
+            _rev = bool(v.get('revealed'))
+            # ⭐ 2026-09-28 撤回 score>=0.8 规则（同 _cells_for_model）：
+            #   雾格也拿高分 ⇒ 假连通 ✗；revealed 只信 ratio。
+            # ⭐⭐ 2026-09-28 二次修正：**不再只留锚点格** ✗
+            #   原来这里 `if v['anchor'] != (r,cc): continue` ⇒ 把成员格（多格块的占格）
+            #   丢掉了 ⇒ ① 两棵相邻椰树会被"相邻同 sid"并成一块（boss 只算一次点击）
+            #      ② 宝箱 (3,1) 挨着椰树成员格 (2,1) 这条解锁关系丢失 ⇒ 规划不点它 ✗
+            #   ⇒ 现在整份 `c['st']`（含 anchor 字段）原样喂给 mapsim，
+            #     由 `MapSim._from_anchors` 按 anchor 归组 ✓（真机占格 ✓）
+            cells[(r, cc)] = {'sid': v.get('sid'), 'name': v.get('name'),
+                              'revealed': _rev, 'anchor': v.get('anchor'),
+                              'marks': list(v.get('marks') or [])}
+        # 标记格：视觉标记扫描的结果也要并进去（分类器输出里没有标记）
+        for (r, cc), mv in (mk or {}).items():
+            # ⚠ 分类器可能没认出这一格（暗格/美术不清）⇒ 用标记扫描的结果**新建**格条目，
+            #   否则这个目标会被整个漏掉（实测 (1,7) 的 boss+recommend 就是这么丢的）
+            if (r, cc) not in cells:
+                cells[(r, cc)] = {'sid': None, 'name': None, 'revealed': False, 'marks': []}
+            got = list(cells[(r, cc)].get('marks') or [])
+            for m in (mv.get('marks') or []):
+                if m not in got:
+                    got.append(m)
+            cells[(r, cc)]['marks'] = got
+        if len(cells) < 8:
+            if log is not None:
+                log.append({'opt_skip': 'too_few_cells', 'n': len(cells)})
+            return None
+        sim = sim_mod.MapSim.from_observation(cells, spots_mod.spot_rows())
+        prob = solve_mod.Problem(sim)
+        if not prob.targets:
+            if log is not None:
+                log.append({'opt_skip': 'no_targets', 'blocks': len(sim.blocks),
+                            'cells': len(cells), 'marks': len(mk or {})})
+            return None
+        cost, acts = solve_mod.solve(prob, max_states=40000)
+        if not acts:
+            if log is not None:
+                log.append({'opt_skip': 'no_solution', 'targets': len(prob.targets),
+                            'cost': cost})
+            return None
+        out = []
+        for bi, w in acts:
+            b = prob.blocks.get(bi)
+            if not b or not b.cells:
+                continue
+            out.append(marks_mod.cell_center(*sim_mod.rc_of(b.cells[0])))
+        if out:
+            say('       · 体力最优解：%d 步、预计 %s 点体力' % (len(acts), cost))
+        return out or None
+    except Exception as e:      # noqa: BLE001
+        import traceback
+        if log is not None:
+            log.append({'opt_err': repr(e),
+                        'trace': traceback.format_exc().splitlines()[-2:]})
+        return None
+
+
+BACK_BTN = (539, 1212)        # 中间「返回」（交接文档实测坐标 ✓）
+CLOSE_TR_PT = (984, 191)      # 背包右上角「关闭」
+START_ADV = (540, 1828)       # 底部中间「开始冒险」**图标**（回地图界面）
+# ⚠ 2026-09-28 修：原来是 (541,1889) —— 那是 OCR 到的**文字**位置，实测**点空** ✗
+#   底部导航栏 = 图标在上(y≈1828)、文字在下(y≈1890)；文字那格点了不导航 ✓
+CLOSE_TR, CLOSE_TR_Y = 984, 191    # 面板右上角关闭按钮（背包/招募/图鉴通用 ✓）
+
+MAP_SCREEN_HINTS = ('开始冒险', '进入地图', '快速扫荡', '结束冒险', '探索度')
+
+
+def is_map_screen(items):
+    """判断是不是「地图/选图界面」（用户要求：用完补给必须回到这里）
+
+    ⚠ 2026-09-27：`MAP_SCREEN_HINTS` 里的「开始冒险」**大厅也有**（全局底部导航），
+      所以必须先用 `in_lobby()` 把大厅排除掉，否则大厅会被当成"已回到地图界面" ✗
+    """
+    if in_lobby(items):
+        return False
+    txt = [i.get('text') or '' for i in (items or [])]
+    return any(any(h in t for h in MAP_SCREEN_HINTS) for t in txt)
+
+
+def go_lobby_to_menu(b, log, items=None, wait=3.0):
+    """大厅 → 点底部中间「开始冒险」→ 离开大厅
+
+    ⭐ 用户 2026-09-27 明示：「点中间的开始冒险就能回到选图界面」
+       （背景：幻少采图第 13 张时**游戏自己重启**，重启后停在大厅，
+         每轮 `{'pre':'not_in_map','act':'none'}` 直到 40 秒超时 ✗）
+
+    ⚠ 实测补充（2026-09-27 22:04 幻少真机）：从大厅点「开始冒险」的落点**有两种**——
+        · 若存在**未完成的图** ⇒ **直接恢复到那张图**（实测落进「夏日海滩[100]」棋盘，
+          体力 1406/2100 不变 ⇒ 确认不是新进图、没扣 25 体力 ✓）
+        · 否则 ⇒ 回选图界面
+       两种落点对调用方都可用：`ensure_in_map` 前者 `in_map()==True` 直接开工，
+       后者交给 `enter_map()` 点「进入地图」✓
+       所以函数名保留 menu，但语义是 **"离开大厅"**，不保证一定到选图界面。
+
+    ⚠ 安全边界不变：**必须先 OCR 真认到「开始冒险」文本**（且 cy 在底部带内）才点；
+      认不到就什么都不做 —— 绝不盲点万能位 (541,1890) ✗
+      （地图/选图界面的底部也有「开始冒险」，所以这里**同时要求 `in_lobby()`**，
+        避免在推图循环里误触它 ✗）
+    """
+    if items is None:
+        items = b.ocr(tag='lobby')
+    if not in_lobby(items):
+        return False
+    adv = None
+    for it in items:
+        if '开始冒险' in (it.get('text') or '') and it['cy'] > LAYOUT.sy(1600):
+            adv = it
+            break
+    if not adv:
+        log.append({'lobby': 'no_start_adv_text'})
+        say('   · 判定在大厅，但没认到「开始冒险」文本 ⇒ 不盲点，停在原地')
+        return False
+    # ⭐⭐ 2026-09-28 修（**"点了开始冒险却不离开大厅"的根因**）：
+    #   底部导航栏是「**图标在上、文字在下**」，直接点 OCR 到的**文字**位置会点空 ✗
+    #   实测（幻少 16416 / 1080×1920，大厅与选图界面**同一套底部栏**）：
+    #     文字 bbox: 开始冒险 cx=540 y0=1869 y1=1910（cy=1890）
+    #     图标中心      y≈1828  ← 点这里才有效 ✓（实测 (540,1828) 一次就离开大厅）
+    #   沿用「角色」tab 的老教训：文字 (304,1889) 无效 / 图标 (284,1827) 有效，dy≈−62 ✓
+    #   ⇒ 按「文字顶边 −41px」点图标，并且**点完必须验证真的离开大厅**，不行再试别的偏移 ✓
+    cands_y = [adv['y0'] - 41, adv['cy'] - 62, adv['y0'] - 25, adv['cy']]
+    for k, ty in enumerate(cands_y):
+        ty = int(ty)
+        b.tap(adv['cx'], ty, wait=wait)
+        log.append({'lobby': 'tap_start_adv', 'at': (adv['cx'], ty), 'try': k})
+        say('   ★ 大厅 → 点「开始冒险」图标 (%d,%d) 离开大厅（未完成的图会直接恢复 ✓）'
+            % (adv['cx'], ty))
+        # ⭐ 2026-09-28：判定改成**最多看 3 次**（每次间隔 1.2 秒）
+        #   因为「大厅→（恢复进图）/（选图界面）」有**场景过渡**，点完 3 秒时 OCR 常还停在大厅 ✗
+        #   老逻辑一次判死 ⇒ 白点剩余 3 次偏移（实测每轮多花 ~30 秒，占单轮 20%）
+        ok_leave = False
+        for _k in range(3):
+            _it2 = b.ocr(tag='lobby2')
+            if not in_lobby(_it2):
+                ok_leave = True
+                break
+            try:
+                if in_map(b, b.img(), _it2):          # 直接恢复进图 ⇒ 也算离开大厅 ✓
+                    log.append({'lobby': 'tap_start_adv_to_map'})
+                    say('   ★ 点「开始冒险」后**直接恢复进图**（存在未完成的图）⇒ 已离开大厅 ✓')
+                    ok_leave = True
+                    break
+            except Exception:           # noqa: BLE001
+                pass
+            time.sleep(1.2)
+        if ok_leave:
+            return True
+        say('     · 这一下没离开大厅，换下一个偏移再试')
+    log.append({'lobby': 'tap_start_adv_failed', 'tried': cands_y})
+    say('   ✗ 四个偏移都点过还是在大厅 ⇒ 交回调用方（不盲点万能位 ✗）')
+    return False
+
+
+try:
+    from mapbot import ADB, CNW
+    ADB = ADB or r'D:\android-build\sdk\platform-tools\adb.exe'
+except Exception:       # noqa: BLE001
+    ADB = r'D:\android-build\sdk\platform-tools\adb.exe'
+    CNW = 0x08000000 if os.name == 'nt' else 0
+
+
+def back_to_map(b, log, tries=5):
+    """一路退回到地图界面（每步都**验证**，退到为止）"""
+    for k in range(tries):
+        b.snap('backmap')
+        items = b.ocr(min_conf=0.2, tag='backmap')
+        if is_map_screen(items):
+            log.append({'back_to_map': 'ok', 'tries': k})
+            return True
+        # ⭐ 2026-09-27：大厅 ⇒ 点底部中间「开始冒险」
+        #   ⚠ 绝不能落到下面的 ③ —— 大厅的 (984,191) 是**右上角齿轮（设置）**，
+        #     点它会弹设置面板，越退越远 ✗
+        if in_lobby(items):
+            if go_lobby_to_menu(b, log, items=items, wait=2.5):
+                continue
+            log.append({'back_to_map': 'lobby_no_btn', 'try': k + 1})
+            return False
+        # ① 返回 / 关闭 / 取消
+        back = find_button(items, '返回', '关闭', '取消', maxlen=4) or \
+            find_in(items, '返回', '关闭')
+        if back:
+            b.tap(back['cx'], back['cy'], wait=1.3)
+            log.append({'back_to_map': 'tap_back', 'try': k + 1,
+                        'text': back['text']})
+            continue
+        # ② 提示弹窗的 确定 / 确认（用完道具后常见；此时只是关提示，不会买东西 ✓）
+        ok = find_button(items, '确定', '确认', maxlen=3)
+        if ok and ok['cy'] > LAYOUT.sy(600):
+            b.tap(ok['cx'], ok['cy'], wait=1.3)
+            log.append({'back_to_map': 'tap_ok', 'try': k + 1,
+                        'at': (ok['cx'], ok['cy'])})
+            continue
+        # ③ ⭐ 右上角关闭按钮（用户提醒：背包右上角就有关闭 ✓；实测 (984,191)）
+        b.tap(CLOSE_TR, CLOSE_TR_Y, wait=1.3)
+        log.append({'back_to_map': 'tap_close_tr', 'try': k + 1,
+                    'at': (CLOSE_TR, CLOSE_TR_Y)})
+        continue
+        # ④ X 按钮（万一是别的图标的 X）
+        x = find_x(items)
+        if x:
+            b.tap(x['cx'], x['cy'], wait=1.3)
+            log.append({'back_to_map': 'tap_x', 'try': k + 1})
+            continue
+        # ④ 安卓返回键（面板类界面最通用的退法 ✓）
+        try:
+            if _MAPBOT_ANDROID:
+                # Android：走无障碍 dispatchGesture 的全局返回（无需 adb/root ✓）
+                getattr(b, 'back')(wait=1.0)
+                log.append({'back_to_map': 'a11y_back', 'try': k + 1})
+            else:
+                import subprocess
+                # ⚠ 设备号取 Bot 自己的（原来误用了模块里不存在的 SERIAL ✗）
+                dev = getattr(b, 'dev', None) or getattr(b, 'serial', None) or ''
+                cmd = [ADB, '-s', dev] if dev else [ADB]
+                subprocess.run(cmd + ['shell', 'input', 'keyevent', '4'],
+                               capture_output=True, timeout=10, creationflags=CNW)
+                time.sleep(1.0)
+                log.append({'back_to_map': 'keyevent_back', 'try': k + 1, 'dev': dev})
+        except Exception as e:      # noqa: BLE001
+            log.append({'back_to_map': 'no_more_fallback', 'try': k + 1, 'err': repr(e)})
+            break
+    b.snap('backmap_end')
+    ok = is_map_screen(b.ocr(min_conf=0.2, tag='backmap'))
+    log.append({'back_to_map': 'give_up', 'ok': bool(ok)})
+    say('       · 回到地图界面: %s' % ('✓' if ok else '✗ 没退干净'))
+    return bool(ok)
+
+
+def find_button(items, *keys, maxlen=4):
+    """找**按钮**（不是说明文字）：文字短(≤maxlen)、不含句号、含关键词
+
+    现场教训：结实补给的说明是"使用后立即获得500点体力。"——含"使用"二字 ✗，
+    之前的 find_in 把它当按钮点了 ⇒ 什么都没发生（体力 316→316）。
+    真按钮「使用」在 (868,1013)，只有 2 个字 ✓
+    """
+    for it in sorted(items or [], key=lambda x: x['cy']):
+        t = (it.get('text') or '').strip()
+        if not t or len(t) > maxlen or t.endswith('。') or t.endswith('，'):
+            continue
+        if any(k in t for k in keys):
+            return it
+    return None
+
+
+def find_in(items, *keys):
+    """在 OCR 结果里找含任一关键词的条目（优先更靠上的那条）"""
+    for it in sorted(items or [], key=lambda x: x['cy']):
+        t = it.get('text') or ''
+        if any(k in t for k in keys):
+            return it
+    return None
+
+
+GUILD_BTN = (95, 1889)        # 主界面左下角「公会」
+BAG_BTN = (969, 1700)         # 公会界面右下角「背包」（在「招募」正下方）
+ITEM_TAB = (926, 261)         # 背包页签「道具」
+UPGRADE_BTN = (925, 1705)     # 装备页右下角「一键升星」（实测 ✓）
+EQUIP_TAB = (760, 261)        # 背包页签「装备」（⭐ 2026-09-27 新增；
+                              #   首次跑会先 OCR 找「装备」✓ 找不到才用这个兜底 ✓）
+SUPPLY_TPL = os.path.join(_MAPBOT_ROOT, 'templates', 'items', 'supply_strong.png')
+SUPPLY_MASK = os.path.join(_MAPBOT_ROOT, 'templates', 'items', 'supply_strong_mask.png')
+SUPPLY_THR = 0.90             # 识图匹配下限（自匹配 1.000，其他格子差得远）
+
+
+def find_supply_icon(b, img=None):
+    """⭐ 靠识图在背包「道具」页里找「结实补给」-> (cx, cy) 或 None
+
+    模板是 2026-09-25 从用户屏幕上裁的 150×150 格子（掩码挖掉右下角数量数字，
+    因为数量会变、不能参与匹配）。位置**不写死**：每个人背包不一样 ✓
+    """
+    import cv2
+    import numpy as np
+    base = os.path.dirname(os.path.abspath(__file__))
+    tp = os.path.join(base, SUPPLY_TPL)
+    mp = os.path.join(base, SUPPLY_MASK)
+    if not (os.path.exists(tp) and os.path.exists(mp)):
+        return None
+    tpl = cv2.imdecode(np.fromfile(tp, dtype=np.uint8), cv2.IMREAD_COLOR)
+    msk = cv2.imdecode(np.fromfile(mp, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        img = b.img()
+    if img is None:
+        return None
+    if img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    y0, y1, x0, x1 = 330, 1500, 60, 1020          # 道具网格区域
+    sub = img[y0:y1, x0:x1].astype(np.float32)
+    m = (msk > 0).astype(np.float32)
+    res = cv2.matchTemplate(sub, tpl.astype(np.float32), cv2.TM_SQDIFF, mask=m)
+    res = np.nan_to_num(res, nan=1e12, posinf=1e12, neginf=1e12)
+    mn, _, loc, _ = cv2.minMaxLoc(res)
+    score = 1.0 - mn / (m.sum() * 255.0 * 255.0)
+    cx = x0 + loc[0] + tpl.shape[1] // 2
+    cy = y0 + loc[1] + tpl.shape[0] // 2
+    return (int(cx), int(cy), round(float(score), 3)) if score >= SUPPLY_THR else None
+
+
+def use_supply(b, log, names=('结实补给',)):
+    """⭐ 使用一个「结实补给」回体力（用户 2026-09-25 给的流程）
+
+        公会(95,1889) → 背包(969,1700) → 道具(926,261) → **识图**找结实补给 → 使用 → 回地图界面
+    位置不写死（每个人背包不一样），靠模板匹配 ✓；OCR 只用来找「使用/确定」这类文字按钮。
+    **不设数量上限**（勾了就按需一直用），只统计用了几个 ✓
+    """
+    # ⭐⭐ 2026-09-28 修：`SUPPLY_USED += 1` 走的是**局部变量**语义 ⇒ UnboundLocalError ✗
+    #   （实测：补给其实**已经吃成功**（体力 14→489）、退图也退对了，
+    #     只在最后统计那一行抛异常 ⇒ 被 except 吞掉 → 返回 False → 上层 `break`，
+    #     全靠"后面再读一次体力发现够了"才没断线 ⇒ **侥幸跑通**，必须修 ✓）
+    global SUPPLY_USED
+    try:
+        b.snap('supply0')
+        items = b.ocr(tag='supply')
+        txt = [i['text'] for i in items]
+        # ⭐⭐ 安全闸（2026-09-26 教训）：**必须站在选图界面**才动手
+        #   在地图里点 (95,1889) 会落在棋盘格子上 ✗（实测和正在跑的循环抢点击）
+        in_map_now = any('结束冒险' in t for t in txt)
+        on_select = any(any(k in t for k in ('进入地图', '快速扫荡', '开始冒险', '星界秘境'))
+                        for t in txt)
+        if in_map_now or not on_select:
+            log.append({'supply': 'skip_not_on_select',
+                        'in_map': bool(in_map_now), 'on_select': bool(on_select),
+                        'texts': txt[:14]})
+            say('       · 现在不在选图界面（%s），不碰补给，避免误点地图格子'
+                % ('地图里' if in_map_now else '未知界面'))
+            return False
+        # ① 不在公会界面（看不到 邮件/商店/招募）→ 先去公会
+        if not any(('邮件' in t) or ('商店' in t) or ('招募' in t) for t in txt):
+            b.tap(GUILD_BTN[0], GUILD_BTN[1], wait=1.6)
+            log.append({'supply': 'open_guild', 'at': GUILD_BTN})
+        # ② 背包
+        b.tap(BAG_BTN[0], BAG_BTN[1], wait=1.8)
+        log.append({'supply': 'open_bag', 'at': BAG_BTN})
+        b.snap('supply1')
+        items = b.ocr(tag='supply')
+        if not any('背包' in i['text'] for i in items):
+            log.append({'supply': 'bag_not_open',
+                        'texts': [i['text'] for i in items][:20]})
+            say('       · 背包没打开（文字已记日志）')
+            _close_bag(b, items, log)
+            return False
+        # ③ 道具页签
+        b.tap(ITEM_TAB[0], ITEM_TAB[1], wait=1.5)
+        log.append({'supply': 'item_tab', 'at': ITEM_TAB})
+        # ④ 识图找结实补给
+        b.snap('supply2')
+        hit = find_supply_icon(b)
+        if not hit:
+            log.append({'supply': 'icon_not_found'})
+            say('       · 识图没找到结实补给 ✗')
+            _close_bag(b, b.ocr(tag='supply'), log)
+            return False
+        cx, cy, score = hit
+        log.append({'supply': 'icon_hit', 'at': (cx, cy), 'score': score})
+        say('       · 识图找到结实补给 (%d,%d) 分数 %.3f' % (cx, cy, score))
+        b.tap(cx, cy, wait=1.4)
+        # ⑤ 使用
+        b.snap('supply3')
+        items = b.ocr(tag='supply')
+        _btn = [i for i in items if (i['text'] or '').strip() in ('使用', '使用道具')
+                and i['cx'] > LAYOUT.sx(700)]
+        use = _btn[0] if _btn else find_button(items, '使用')
+        if use:
+            b.tap(use['cx'], use['cy'], wait=1.6)
+            log.append({'supply': 'use', 'at': (use['cx'], use['cy'])})
+        else:
+            log.append({'supply': 'no_use_btn',
+                        'texts': [i['text'] for i in items][:22]})
+        # ⑥ 确认弹窗
+        for _ in range(2):
+            b.snap('supply4')
+            it2 = b.ocr(tag='supply')
+            ok = find_button(it2, '确定', '确认', '使用', '是')
+            if ok and ok['cy'] > LAYOUT.sy(700):
+                b.tap(ok['cx'], ok['cy'], wait=1.5)
+                log.append({'supply': 'confirm', 'at': (ok['cx'], ok['cy']),
+                            'text': ok['text']})
+            else:
+                break
+        # ⭐⭐ 用完补给的**三步退图**（用户 2026-09-26 口径）：
+        #   ① 「返回」→ ② 右上角关闭背包 → ③ 中间下面「开始冒险」回地图界面
+        #   ⚠ ① 必须点**界面上那个「返回」按钮**（用 OCR 找文字），
+        #     找不到就**跳过**，绝不盲点左上角 ✗（用户明确要求删掉这个动作 ✗）
+        b.snap('supply_ret')
+        it_ret = b.ocr(tag='supply')
+        back = find_button(it_ret, '返回', maxlen=4) or find_in(it_ret, '返回')
+        if back:
+            b.tap(back['cx'], back['cy'], wait=1.3)
+            log.append({'supply_return': 'back_text', 'at': (back['cx'], back['cy']),
+                        'text': back['text']})
+        else:
+            # 交接文档里记的实测坐标：中间「返回」= (539,1212) ✓
+            b.tap(BACK_BTN[0], BACK_BTN[1], wait=1.3)
+            log.append({'supply_return': 'back_coord', 'at': BACK_BTN,
+                        'texts': [i['text'] for i in it_ret][:10]})
+        # ② 右上角「关闭」背包
+        b.tap(CLOSE_TR_PT[0], CLOSE_TR_PT[1], wait=1.3)
+        log.append({'supply_return': 'close_bag', 'at': CLOSE_TR_PT})
+        # ③ 中间下面「开始冒险」→ 回地图界面
+        b.tap(START_ADV[0], START_ADV[1], wait=1.5)
+        log.append({'supply_return': 'start_adv', 'at': START_ADV})
+        back_to_map(b, log)                 # 兜底：确认真的回到地图界面 ✓
+        st = stamina(b.ocr(band=(0, 140), tag='supply'))
+        SUPPLY_USED += 1
+        log.append({'supply': 'done', 'stamina': st, 'used_total': SUPPLY_USED})
+        say('       · 补给流程走完，体力 %s' % st)
+        return True
+    except Exception as e:      # noqa: BLE001
+        import traceback
+        log.append({'supply': 'error', 'err': repr(e),
+                    'trace': traceback.format_exc().splitlines()[-2:]})
+        say('       · 使用补给出错: %r' % e)
+        return False
+
+
+def _close_bag(b, items, log):
+    """退回探索界面（返回/关闭/X 都试）"""
+    back = find_in(items, '返回', '关闭', '取消')
+    if back:
+        b.tap(back['cx'], back['cy'], wait=1.4)
+    else:
+        x = find_x(items)
+        if x:
+            b.tap(x['cx'], x['cy'], wait=1.4)
+        else:
+            b.tap(96, 96, wait=1.2)        # 左上角返回（多数界面通用）
+    log.append({'supply': 'closed_bag'})
+
+
+def board_hidden(c):
+    """棋盘是不是**被面板/遮罩盖住**（⇒ cells_of 的分类结果不可信，标记也扫不到）
+
+    ⭐ 2026-09-26 修（**"第一把没打到 boss 就退了"的根因**）：
+      原来判据只有"全暗"（`light == 0 and gray >= 25`）—— 但**战斗结算面板只盖住棋盘中间**，
+      下面还能认出 3 格 ⇒ `light = 3 > 0` ⇒ **漏判** ✗
+      ⇒ 棋盘被盖 ⇒ `marks` 扫不到 boss 标记 ⇒ 误判 `finish: targets_done` ⇒ 提前退图 ✗
+
+    实测数据（把 runs/ 里的截图离线丢进 `cells_of`，见 `_probe_board_cover.py`）：
+
+    | 帧 | 内容 | gray | light | 亮度比<0.55 的格数 dim |
+    |---|---|---|---|---|
+    | `m0_r003.png` | 干净地图 | 6 | 26 | **0** |
+    | `m0_r006.png` | 干净地图 | 6 | 26 | **0** |
+    | `m0_r008.png` | 结算面板盖住中间 | 32 | 3 | **30** |
+
+    ⇒ 加一条"多数格被压暗"（遮罩会把棋盘压暗 ~35%，`ratio` 掉到 0.25~0.35）；
+      **未揭示格恒 ~0.65**（见 §5/§7），所以 0.55 这个阈值不会误伤普通暗格 ✓
+    """
+    if len(c.get('light') or []) == 0 and len(c.get('gray') or []) >= 25:
+        return True
+    n = 0
+    for v in (c.get('st') or {}).values():
+        if float((v or {}).get('ratio') or 1.0) < 0.55:
+            n += 1
+    return n >= 15
+
+
+def _board_dimmed(c):
+    """⭐ 2026-09-28：进图首帧**暗罩**检测（与 board_hidden 的"面板遮罩"不同物）
+
+    board_hidden() 的 dim 判据是 ratio<0.55（面板遮罩把棋盘压到 0.25~0.35），
+    **判不出暗罩帧** —— 进图动画只把全盘均匀压暗 ~35%，已揭示格 ratio 掉到
+    ~0.65 > 0.55，dim 计数恒 0 ✗。
+
+    暗罩特征 = **全盘无一格 ratio≥0.85**：正常帧必有已揭示格（营地恒已揭示、
+    每图必有营地，营地周边一圈通常也亮），已揭示 ~1.0 vs 暗/雾 ~0.65 是干净
+    间隔（loop_log 实测 0.99~1.03 vs 0.65）。格数下限 20 防"只认出几格"的
+    边角帧误触发。
+    """
+    vals = []
+    for v in ((c or {}).get('st') or {}).values():
+        r = (v or {}).get('ratio')
+        if r is not None:
+            vals.append(float(r))
+    if len(vals) < 20:
+        return False
+    return not any(r >= 0.85 for r in vals)
+
+
+def one_round(b, log, rnd, prefix, st):
+    cold, done = st['cold'], st['done']
+    _t_round = time.time()       # ⭐ 诊断用：本轮起点（点序里每次点击相对它记秒数，见 §37.3）
+    b.snap('%sr%03d' % (prefix, rnd))
+    img = b.img()
+    # ⭐⭐⭐ 2026-09-28 修「进图首帧暗罩」（用户报：①精确规划逐格点草地
+    #   ②被宝箱隔断的草地被规划当成可连锁）：
+    #   进图动画把全盘均匀压暗 ~35% ⇒ 已揭示格 ratio 也掉到 ~0.65 ⇒
+    #   ①旧版把全盘判"未揭示" ⇒ plain 连锁断裂 ⇒ 逐格点 ✗；
+    #   ②中途加的 score≥0.8 硬翻 revealed 又把**真雾格**翻成已揭示
+    #     （分类器能看穿雾，雾格也拿 0.91）⇒ 假连通 ✗。
+    #   正确修法 = **等暗罩散去再存图/识别**：rnd==0 先无条件等 2 秒
+    #   （enter_map 确认 in_map 后动画多半已播完，这 2 秒是兜底）；
+    #   识别后再用 _board_dimmed() 复查兜底（见 cells_of 之后）。
+    #   口径：**ratio 是"揭示状态"的唯一可靠信号**（已揭示 ~1.0 vs 暗/雾
+    #   ~0.65 干净间隔）；score 只说明"底下是什么"——绝不用 score 硬翻。
+    if rnd == 0:
+        # ⭐ 2026-09-28 提速（P2）：原版无条件 sleep(2.0)。暗罩/进图动画多数 <1.5s
+        #   就播完 ⇒ 改成「棋盘区域画面稳定（~0.5s 不动）就提前通过」，上限仍 2 秒；
+        #   后面的 `_board_dimmed()` 复查兜底原样保留，行为不降级 ✓
+        if b.fast_ok:
+            b.wait_stable(2.0, interval=0.08, thr=1.6, need=6, band=(1002, 1722))
+        else:
+            time.sleep(2.0)
+        b.snap('%sr%03d_fog' % (prefix, rnd))
+        img = b.img()
+        log.append({'fog_wait': 'pre_identify', 'secs': 2.0})
+    # ⭐ 2026-09-27：**存图必须放在这里**（拿到 img 就存），不能放到函数尾部 ✗
+    #   尾部在「动作分发」之后，而 `act == 'battle'/'handled'` 会**提前 return**（见下方）
+    #   ⇒ 进图首帧 (rnd==0) 恰好是"点了就开打"的话，尾部那版**根本执行不到** ⇒ 白存 ✓
+    #   （实测：末次连刷第 1 张图的 r0 就是 `开打（标记 boss）`，是 battle ⇒ 提前 return）
+    #   口径（用户 2026-09-27）：**只存「刚进图那一张」**（最干净 ✓ 后面轮次图标盖住美术 ✗）
+    if SAVE_ROUNDS or (SAVE_FIRST and rnd == 0):
+        save_board_frame(b, log, rnd=rnd, img=img)
+    # ⭐ 2026-09-25 第三次提速：回合开头的全屏 OCR（实测 1.2s，13 轮 = 15.8 秒，是最大头）
+    #   其实这一下只需要读 HUD（图名 / 体力 / 踢下线提示）；面板文本在「点完那一下」
+    #   已经用条带 OCR 看过了。所以：**只 OCR 顶部 0~320**，只有疑似盖着面板时才补全屏
+    #   —— 判据是**棋盘亮度**（面板遮罩会把棋盘压暗 ~35%，跟上一轮比即可，不用绝对阈值）
+    # ⚠ 2026-09-25 回退：曾试过「回合开头只 OCR 顶部 HUD（省 1 秒）」，结果**残留面板
+    #   在回合开头被漏看 ⇒ 循环对着盖着面板的屏幕继续点 = 用户报的「乱点」**。
+    #   正确性优先：回合开头一律**全屏 OCR**（0.75 倍缩放已经把它压到 ~1.5 秒）。
+    # ⚠ 2026-09-28 实测否决「跳帧复用 OCR」（P4 试错，已撤）：连续两轮的帧差
+    #   （96×160 灰度均值差）最小都有 **42.7** —— 夏日海滩水面等待机动画让画面
+    #   永远在动，根本不存在"帧没变" ⇒ 复用永远命中不了，纯加噪音。别再加回来。
+    items = b.ocr(tag='round')
+    st['mapname'] = map_name(items) or st.get('mapname')
+    entry = {'round': rnd, 'stamina': stamina(items)}
+    act = popups(b, items, log, ctx={'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 1), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+                                     'tapped': st.get('last'),
+                                     'force_fight': st.get('force_fight'),
+                                     'road': st.get('road') or [],
+                                     'targets': (st.get('targets') or []),
+                                     'clear_fights': st.get('clear_fights', 0)})
+    # ⭐⭐ 2026-09-26 用户口径：「**万能点位可以用来应对异常情况，防止任务过早中断**」
+    #   这里统计"一个可识别元素都没认到"（act=='none'）的**连续轮数**；
+    #   连续 **3** 轮都没认到 ⇒ 多半盖着一个认不出的异常面板 ⇒ 用万能位兜一手 ✓
+    #   ⚠⚠ 门槛不能低（我 2026-09-26 第一版用"连续 2 轮"⇒ 真机上**每两轮误触发一次**）：
+    #     「连续 2 轮无弹窗」在正常跑图时是**常态**（点普通格/迷雾格本来就不弹面板）
+    #     ⇒ 当时 `universal_close` 的 `is_battle` 判据太松，挑到 (577,1439) 去点，
+    #       而**那是棋盘格** ⇒ 乱点 ✗（铁证 m0_r001/003/005 三轮；已由 `is_battle_panel` 修掉 ✓）
+    #   ✅ 现在为什么敢点：`is_battle_panel` 严格之后，**在干净地图上**这个兜底只会点
+    #     万能位 (541,1890)——用户实测「那边点了非常安全，不会有变化」⇒ 无副作用 ✓
+    #   ⚠ 仍明确**不是常规动作**：只要有任何一次可识别的动作（handled/battle/…）就清零 ✓
+    _nn = (st.get('popup_none', 0) + 1) if act == 'none' else 0
+    st['popup_none'] = _nn
+    if _nn >= 3:
+        universal_close(b, log, items=items, where='popup_none')
+        st['popup_none'] = 0
+        log.append(entry)
+        log.append({'universal_fallback': 'popup_none', 'n': _nn})
+        say('  [r%d] 连续 %d 轮认不到任何元素 → 万能位兜底关面板（防任务过早中断）'
+            % (rnd, _nn))
+        return None
+    if act == 'kicked':
+        return 'kicked'
+    if act == 'insufficient':
+        return 'insufficient'
+    if act == 'blocked':
+        st['clear'] = True
+        log.append(entry)
+        return None
+    if act in ('battle', 'battle_clear', 'handled'):
+        st['stuck'] = 0
+        if act in ('battle', 'battle_clear') and st.get('last'):
+            # ⭐ 记下「打过架的格」：退出地图前要回到这几格各点一下（领战利品）
+            if st['last'] not in (st.get('battles') or []):
+                st.setdefault('battles', []).append(st['last'])
+        if act == 'battle_clear':
+            st['clear_fights'] = st.get('clear_fights', 0) + 1
+        if st['last']:
+            done.add(st['last'])
+            c = cell_of(st['last'][0], st['last'][1])
+            if c in (st.get('marks') or {}):
+                st['clear'] = False
+                st['clear_fights'] = 0
+        log.append(entry)
+        return None
+
+    # ⭐ 2026-09-27：存图已**提到函数开头**（拿到 img 就存）—— 见 `one_round` 顶部注释 ✓
+    #   这里不再存（原来放这儿会被 `act == 'battle'/'handled'` 的提前 return 跳过 ✗）
+    c = cells_of(img, mapname=st.get('mapname') or map_name(items))
+    # ⭐⭐⭐ 2026-09-28 暗罩复查（只看 rnd==0）：预等待 2 秒没盖住进图动画时兜底。
+    #   _board_dimmed(c) = 全盘无一格 ratio≥0.85 ⇒ 这帧还是暗罩 ⇒ 等 2 秒重截
+    #   重识别（最多 2 次；用尽则 fail-open 照常往下走，行为同旧版不会更糟）。
+    #   ⚠ 复查只针对"全盘亮格缺失"（暗罩），真·面板遮罩（ratio<0.55）仍由
+    #   board_hidden() 管，两套判据各管各的，别混。
+    for _fi in range(2):
+        if rnd != 0 or not _board_dimmed(c):
+            break
+        time.sleep(2.0)
+        b.snap('%sr%03d_fog%d' % (prefix, rnd, _fi + 1))
+        img = b.img()
+        c = cells_of(img, mapname=st.get('mapname') or map_name(items))
+        log.append({'fog_retry': _fi + 1, 'dimmed': _board_dimmed(c)})
+    # ⭐ 2026-09-26：缓存分类结果 ✓ 供下一轮 popups() 判断"刚点那格是不是紫橙探索格"用 ✓（零额外开销 ✓）
+    try:
+        st['cells'] = c.get('st')
+    except Exception:       # noqa: BLE001
+        st['cells'] = None
+    vis = (len(c['gray']) + len(c['light'])) >= 8
+    # ⚠ 2026-09-25 卡死事故：屏幕上盖着面板/遮罩时，分类器会把整盘读成"暗格"，
+    #   还会凭弱匹配误报出几个"未揭示的商人/宝库"⇒ 那两个是永不拉黑的目标 → 无限空转。
+    #   这里加一道闸：**棋盘被遮住**就认定分类不可信，先关面板；连关 3 轮不行就退出本图。
+    # ⭐⭐ 2026-09-26 修：判据原来只有"全暗"（light==0 且 gray>=25）—— 但**结算面板只盖住
+    #   棋盘中间**，下面还能认出 3 格 ⇒ light=3>0 ⇒ **漏判** ✗ ⇒ marks 扫不到 boss 标记
+    #   ⇒ 误判 `finish: targets_done` ⇒ **没打 boss 就退图**（用户 2026-09-26 报的就是这个）
+    #   ⇒ 改用 `board_hidden()`（多一条"多数格被压暗"）；实测数据见该函数注释 ✓
+    if board_hidden(c):
+        # ⭐ A（2026-09-25 用户要求「暗格误判别浪费一整轮」）：战斗结算/动画过渡那一帧
+        #   也会"整盘暗格" ⇒ 先**快速复查**（0.4 秒后重抓）——过渡帧通常已经过去，
+        #   复查正常就照常继续，不白花一轮（实测每图能少 1~2 轮空转）
+        time.sleep(0.4)
+        b.snap('%sr%03d_b' % (prefix, rnd))
+        img2 = b.img()
+        c2 = cells_of(img2, mapname=st.get('mapname') or map_name(items))
+        if not board_hidden(c2):
+            log.append({'board_blink': 'ok_after_retry'})
+            c, img = c2, img2
+        else:
+            # 整盘暗格 ⇒ 多半盖着面板 ⇒ 这里补一次**全屏 OCR** 再关
+            items = b.ocr(tag='round_full')
+            _hctx = {'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 1), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+                     'tapped': st.get('last'),
+                     'force_fight': st.get('force_fight'),
+                     'road': st.get('road') or [],
+                     'clear_fights': st.get('clear_fights', 0)}
+            act2 = popups(b, items, log, ctx=_hctx)
+            if act2 == 'kicked':
+                return 'kicked'
+            if act2 in ('battle', 'battle_clear', 'handled'):
+                return None
+            # ⭐⭐ v0.34（彻底解决"真机认不出面板类型"）：
+            #   面板确实盖着棋盘（board_hidden 已确认）但 popups 没认出类型 ⇒
+            #   八成是**面板标题落在归一化帧丢弃的弹性区**（战斗事件 dlg≈443 / 偶遇强敌
+            #   dlg≈243 / 旅行商人 / 预言石板…）⇒ 补一次**弹窗帧** OCR（≈2s，
+            #   **仅此一处**、仅真机高分辨率）再判一次 ✓（PC/9:16 直接跳过）
+            if act2 in (None, 'none') and dlg_c():
+                _dp = dlg_ocr(b, tag='round_dlg')
+                if _dp:
+                    _hctx2 = dict(_hctx)
+                    _hctx2['in_dlg'] = True
+                    _OCR_CH['dlg'] = True      # ⭐ _dp 是弹窗系 ⇒ 里面所有条目点击走 tap_dlg
+                    try:
+                        act3 = popups(b, _dp, log, ctx=_hctx2)
+                    finally:
+                        _OCR_CH['dlg'] = False
+                    log.append({'popup': 'dlg_frame_retry', 'n_items': len(_dp),
+                                'act': act3,
+                                'texts': [(i.get('text') or '')[:10] for i in _dp][:26]})
+                    if act3 == 'kicked':
+                        return 'kicked'
+                    if act3 in ('battle', 'battle_clear', 'handled'):
+                        return None
+                    act2 = act3
+            n = close_x_panels(b, img)
+            if not n:
+                x = find_x(items)
+                if x:
+                    b.tap(x['cx'], x['cy'], wait=1.5)
+                    n = 1
+            if n == 0 and not st.get('last'):
+                for bx in (493, 1024):
+                    b.tap(bx, 225, wait=1.1)
+                n = 2
+            st['dark'] = st.get('dark', 0) + 1
+            # ⭐⭐ 2026-09-26 用户口径：「万能点位可以用来应对异常情况，防止任务过早中断」
+            #   「棋盘被盖住」= **面板挡住棋盘**的确凿证据（不是盲点）⇒ 这里点万能位最合适 ✓
+            #   ⚠ 放在判 stuck 之前：老逻辑第 3 次就 `finish: board_not_visible` 中断任务 ✗，
+            #     现在第 2 次先让万能位救一手（用户实测「那边点了非常安全，不会有变化」）✓
+            #   ⚠ universal_close 会先认面板类型：战斗界面改点「关闭」(577,1439)，绝不点开始冒险 ✓
+            if st['dark'] >= 2:
+                universal_close(b, log, items=items, where='board_all_dark')
+                log.append({'universal_fallback': 'board_all_dark', 'n': st['dark']})
+                say('  [r%d] 棋盘被挡 → 万能位兜底关面板（第 %d 次）' % (rnd, st['dark']))
+            say('  [r%d] 棋盘被挡（读成暗格/压暗，面板挡住棋盘？）→ 关面板 %d 个（第 %d 次）'
+                % (rnd, n, st['dark']))
+            log.append(entry)
+            log.append({'board_hidden': 'all_dark', 'closed': n, 'n': st['dark'],
+                        'light': len(c['light']), 'gray': len(c['gray'])})
+            if st['dark'] >= 3:
+                log.append({'finish': 'board_not_visible'})
+                return 'stuck'
+            return None
+    st['dark'] = 0
+    if vis:
+        _new_mk = marks_mod.scan_board(img)
+        # ⭐⭐ 2026-09-26 保险：**别让"被压暗的一帧"把标记吞掉**
+        #   实测 m0_r008：结算面板只盖住棋盘**中间**，那一帧 marks 扫成空
+        #   ⇒ 上一轮的 boss 标记就此丢了 ⇒ 误判 `targets_done` ⇒ **没打 boss 就退图** ✗
+        #   规矩：新扫结果为空 + 上一轮有标记 + 这一帧确实有被压暗的格（可疑）
+        #   ⇒ **保留上一轮的标记**（宁可多找一次，也绝不漏 boss ✓ 用户口径：boss 必打）；
+        #     真打过/不存在的标记会被 nochange 拉黑 + cold 兜住，不会死转 ✓
+        _old_mk = st.get('marks') or {}
+        _dim_now = 0
+        for _v in (c.get('st') or {}).values():
+            if float((_v or {}).get('ratio') or 1.0) < 0.55:
+                _dim_now += 1
+        if (not _new_mk) and _old_mk and _dim_now >= 3:
+            log.append({'marks_kept': 'board_dimmed', 'dim': _dim_now, 'kept': list(_old_mk)})
+            say('  [r%d] 这一帧棋盘被压暗（%d 格）却扫不到标记 → 保留上一轮的标记 ✓'
+                % (rnd, _dim_now))
+        else:
+            st['marks'] = _new_mk
+    mk = st.get('marks') or {}
+    # ⚠ 2026-09-25：面板盖住棋盘时**不采信标记**（游戏用同一个红装图标标敌方 SS 装备，
+    #   面板里的那枚会被误判成地图标记）。判据：该格亮度比 < 0.50（未揭示格恒 ~0.65）。
+    if mk and c.get('st'):
+        bad = []
+        for k in list(mk):
+            v = c['st'].get(k)
+            if v is None:
+                continue
+            if float(v.get('ratio') or 1.0) < 0.55:
+                bad.append(k)
+        for k in bad:
+            log.append({'marks_dropped_panel': '%d,%d' % k,
+                        'ratio': round(float(c['st'][k].get('ratio') or 0), 3),
+                        'marks': mk[k].get('marks')})
+            mk.pop(k, None)
+        if bad:
+            say('       · 丢掉 %d 个疑似「面板里的图标」误判（那几格被面板盖着）' % len(bad))
+        st['marks'] = mk
+    if mk:
+        entry['marks'] = {'%d,%d' % k: v['marks'] for k, v in mk.items()}
+    # 🛑 红装（SS）标记：**只在刚进图那拨扫描时判断**（用户 2026-09-25：「只扫描刚进图那一拨的
+    #   图来确认有没有红装，后面不判断红装」）。
+    #   ⚠ 为什么不能每轮都判：游戏给**敌方装备带 SS** 时用的是同一个 `mid_ico_map_0001` 图标，
+    #   面板（偶遇强敌/结算）盖住棋盘时那枚图标会被当成"地图格上的红装标记"
+    #   （实测两次误判都是 (4,3) 分数 0.901 / 配色 0.846，且该帧"已揭示 0 格、暗格 6 格"
+    #    = 面板盖着棋盘 ⇒ 用户「我游戏里没看到红装啊」）。
+    #   ⭐⭐ 再加一道**根因判据**：这一帧必须**看得见棋盘**（有已揭示格）才允许判红装 ——
+    #   面板/结算盖住棋盘时一律不判，从根上堵死这个误判。
+    red = []
+    if rnd <= 1 and len(c.get('light') or []) > 0:
+        red = sorted(k for k, v in mk.items() if 'redEquip' in (v.get('marks') or []))
+    elif rnd <= 1:
+        log.append({'red_skip': 'board_hidden', 'light': 0})
+    if red:
+        # ⭐ 留证据图（极速截图通道下帧只在内存，默认不落盘 —— 2026-09-25 用户问「红装截图在哪」）
+        shot = None
+        try:
+            shot = b.snap('red_equip_r%02d' % rnd, save=True)
+        except Exception:       # noqa: BLE001
+            pass
+        # ⭐ 上锁：**锁在就拒绝启动新运行**，避免"下一次运行把这局退掉"（用户 2026-09-25 要求）
+        try:
+            import json
+            with open(red_lock_path(b.dev), 'w', encoding='utf-8') as f:
+                json.dump({'device': b.dev, 'map': st.get('mapname'),
+                           'cell': red, 'round': rnd,
+                           'at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                           'shot': os.path.basename(shot or '')},
+                          f, ensure_ascii=False, indent=1)
+        except Exception:       # noqa: BLE001
+            pass
+        log.append(entry)
+        log.append({'stop': 'red_equip_mark',
+                    'cells': ['%d,%d' % k for k in red],
+                    'shot': os.path.basename(shot or '')})
+        say('')
+        say('🛑🛑 发现红装（SS）标记：%s → 立即停止（不点它、不退图，留着你自己打）'
+            % '、'.join('第%d行第%d列' % k for k in red))
+        say('')
+        return 'red_equip'
+    # ⭐ 2026-09-25 起：地块分类器直接给出「已揭示格」的三分类，不再靠中心色采样：
+    #   plain   = 已揭示的空地（草地）→ 可以点它揭一片（连通消除）
+    #   content = 已揭示的内容格（木箱/宝箱/游乐设施/勇者之墓…）→ 点了拿东西/开面板
+    #   buy     = 已揭示的旅行商人 / 黄金宝库 → **最高优先**（用户口径：要买完）
+    #   未揭示格（暗）点不动，只能靠揭格推进
+    # ⭐ 目标集合（用户 2026-09-25 定案，提高效率）：
+    #   = **标记格（首领/大拇指/幸运草/红装） ∪ 旅行商人 ∪ 黄金宝库**
+    #   ⇒ 其他已揭示内容格（木箱/宝箱/海螺/游乐设施/勇者之墓…）**一律不点**；
+    #     也没有「已露出内容格」这个退图条件了 —— 目标清完立刻退图
+    buy = [p for p in c['buy'] if p not in done]
+    buy_hidden = [p for p in c.get('buy_hidden', []) if p not in done]   # 未揭示的商人/宝库
+    # ⚠ 2026-09-25 修（用户报「幻少第一张图明明还有一个未揭示的商人就退了」）：
+    #   未揭示的商人/宝库**点不动**，绝对不能排进点击序列 —— 旧版把它当普通目标去点，
+    #   点一次没反应就 cold+1，4 轮后被「放弃」规则踢掉 → 判成目标清完 → 退图漏掉它。
+    #   现在它只当**开路目标**（沿出生地→它那条直线揭格把它解锁出来）；
+    #   放弃条件改成「连续多轮棋盘毫无变化」（真的一点都推不动了才放弃）。
+    board_sig = (len(c['gray']), len(c['light']))
+    if buy_hidden:
+        if st.get('h_sig') == board_sig:
+            st['h_stall'] = st.get('h_stall', 0) + 1
+        else:
+            st['h_stall'] = 0
+        st['h_sig'] = board_sig
+        if st['h_stall'] >= 8 and st.get('clear_clicks', 0) >= 24:
+            for p in list(buy_hidden):
+                done.add(p)
+                buy_hidden.remove(p)
+                say('       · 未揭示的商人/宝库 (%d,%d)：连着 8 轮棋盘毫无变化且开路预算用尽，'
+                    '放弃它' % p)
+            st['h_stall'] = 0
+    else:
+        st['h_stall'] = 0
+        st['h_sig'] = None
+    nones_extra = [p for p in c['content'] if p not in done]     # 只用于日志/统计 + 开路
+    nones = [p for p in c['plain'] if p not in done]
+    if c.get('st'):
+        # ⭐ 2026-09-26：board 日志加记 **sid 后缀** —— 名字不够用：「游乐设施」有
+        #   202(绿)/311(蓝)/221(紫) 三个同名 ID ✗，复盘"紫橙数量对不对"必须看 ID ✓
+        entry['board'] = {('%d,%d' % k): (str(v.get('sid') or '').split('_')[-1],
+                                          v['name'], v['score'], v['ratio'])
+                          for k, v in sorted(c['st'].items()) if v['anchor'] == k}
+    grays = list(c['gray'])
+    # ⭐ 用户 2026-09-25：「优化掉多余点击，比如说点击出生点」
+    #   出生点(营地) 点了只弹一个没用面板、不消耗、不揭示 ⇒ 直接当"已完成"排除，
+    #   省掉一次点击 + 一次面板判定（约 1.5 秒/图），也少一次 OCR
+    if c.get('st'):
+        for k, v in sorted(c['st'].items()):
+            if v.get('anchor') == k and v.get('name') == '营地':
+                camp_px = marks_mod.cell_center(k[0], k[1])
+                done.add(camp_px)
+                st['spawn'] = camp_px
+                st['camp'] = camp_px
+                break
+    if c['unknown']:
+        entry['unknown_cells'] = len(c['unknown'])
+    # ⭐ 2026-09-27：标记格也按**锚点**去重（多格大块的成员格会各报一次 ✓ 去重后只点一次 ✓）
+    try:
+        _mk_dedup, _by_anchor = [], {}
+        for (r0, c0) in sorted(mk):
+            _v0 = (c['st'].get((r0, c0)) or {}) if c.get('st') else {}
+            _a0 = tuple(_v0.get('anchor') or (r0, c0))
+            _n0 = len(mk[(r0, c0)] or [])
+            if _a0 not in _by_anchor or _n0 > _by_anchor[_a0][1]:
+                _by_anchor[_a0] = ((r0, c0), _n0)
+        _mk_dedup = [v[0] for v in _by_anchor.values()]
+        if len(_mk_dedup) < len(mk):
+            entry['marks_dedup'] = '%d→%d' % (len(mk), len(_mk_dedup))
+        mk = {k: mk[k] for k in _mk_dedup}
+    except Exception:       # noqa: BLE001
+        pass
+    marked = [marks_mod.cell_center(r, cc) for (r, cc) in sorted(mk)]
+    # ⭐⭐ 2026-09-26 用户需求（原话）：
+    #   「如果探索格子有空闲的就要找这种格子点探索来填满；如果探索格子被填满就不需要找」
+    #   这种格子 = 紫/橙探索地块（ID 后缀 221/321/331 ✓ 小助手官方分类 ✓）
+    # ⭐ 判据 = 地块 **ID 后缀** ∈ {221,321,331}（紫/橙探索地块 ✓，小助手官方分类 ✓）
+    #   ⚠ 不能按名字筛 ✗：「游乐设施」有 202(绿)/311(蓝)/221(紫) 多个 ID ✓
+    try:
+        _ap = set(spots_mod.EXPLORE_SUFFIX)
+    except Exception:       # noqa: BLE001
+        _ap = {'221', '321', '331'}
+    if EXPLORE_DISPATCH and _ap and c.get('st'):
+        # ⭐⭐ 空闲探索槽 = 「数『空闲』」与「总槽数 - 占用中」**互相校验**（用户 2026-09-26 提醒）
+        #   ⚠ 只数「空闲」两个汉字**不可靠**：字小/被遮/那一帧没渲染出来 ⇒ 认不到就变 0
+        #     ⇒ 会被误判成"三槽全满" ⇒ 明明有空位也不去派遣 ✗
+        #     实测（综合 16384 选图界面）：只看到 2 个倒计时、`空闲` 数到 0 ✗（真值应是 1）
+        #   ⇒ 优先用「空闲」计数；一个都没认到时退回 `总槽数 3 - 倒计时个数` ✓
+        #     两个都认不到（面板遮住/不在图里）⇒ **保留上一轮旧值**，不瞎写 ✓
+        _free_txt = sum(1 for _i in items if '空闲' in (_i.get('text') or ''))
+        # ⚠⚠ 倒计时刻度**会被 OCR 合并成一条文本**：实测幻少那屏是
+        #   `10:55:5704:04:0802:23:49` **一条**（其实是 3 个槽）⇒ 按"条目数"会数成 1
+        #   ⇒ 反推出"空闲 2 个" ⇒ 又跑去点探索 ✗✗
+        #   ⇒ 必须用正则数 `hh:mm:ss` 的**出现次数**，不是数条目 ✓
+        _busy = 0
+        for _i in items:
+            _t = (_i.get('text') or '')
+            if ':' in _t:
+                _busy += len(re.findall(r'\d{1,2}:\d{2}:\d{2}', _t))
+        if _free_txt > 0:
+            _slots_free = _free_txt
+            _saw_row = True
+        elif _busy > 0:
+            _slots_free = max(0, EXPLORE_SLOTS_TOTAL - _busy)
+            _saw_row = True
+        else:
+            _slots_free = int(st.get('slots_free', 1) or 0)     # 认不到 ⇒ 保留旧值
+            _saw_row = False
+        entry['slots_free'] = _slots_free      # ⭐ 空闲探索槽个数（0 = 已填满 ✓）
+        entry['slots_busy'] = _busy
+        # ⭐⭐ 2026-09-26 修：**必须写回 st** ✱
+        #   原来只写了 entry（落日志用）⇒ `popups()` 里 `ctx['slots_free']` 永远取默认值 1
+        #   ⇒ 「探索槽满了 ⇒ 不点探索（改战斗）」这条闸门**从来没生效过** ✗
+        #   实测（幻少 16416，三槽全满 slots_free=0）：照样连点两次「探索」(274,736)/(541,733)
+        #   ⇒ 派遣面板点了没反应 ⇒ 体力不降、本图 0 战斗 0 装备 ⇒ 白跑一张图（进图 25 白花）
+        if _saw_row:
+            st['slots_free'] = _slots_free
+        # ⭐ 2026-09-26 用户要求：**不管满没满，紫橙格都是目标** ✓
+        #   有空闲 ⇒ 点探索+派遣 ✓；满了 ⇒ 点战斗 ✓（都在 popups 里分流 ✓）
+        if True:
+            # ⭐⭐ 2026-09-26 修正：紫/橙格**按大块去重**，一个大块只给一个点击目标 ✓
+            #   旧逻辑逐格看 sid ⇒ 一个 2×3 的 221 大块会产出 5~6 个目标，
+            #   而点哪一格弹的都是**同一块的面板** ⇒ 重复弹面板 + 白点（用户发现）
+            #   `Board.state()` 已经把成员格归属修正过了（同一大块 ⇒ 同一个 anchor、
+            #   同一个 sid）⇒ 这里只要**按 anchor 归并**、每块挑一个还没点的格 ✓
+            _ev_blocks = {}                 # anchor -> [成员格...]
+            _seen_anchor = set()      # ⭐ 按锚点去重（一个大块只留一个目标 ✓）
+            for _k, _v in sorted(c['st'].items()):
+                _sid = str(_v.get('sid') or '')
+                _suf = _sid.split('_')[-1] if '_' in _sid else ''
+                _anc = tuple(_v.get('anchor') or _k)
+                if _anc in _seen_anchor:
+                    continue             # 同块成员格 ⇒ 跳过 ✓
+                _seen_anchor.add(_anc)
+                if _suf not in _ap:
+                    continue
+                # ⚠ 分数门槛 0.70：分类器对看不清的格子会给低分瞎猜（实测 0.21/0.30 ✗），
+                #   而用户确认的真地块是 0.794 ✓ ⇒ 0.70 干净分开 ✓
+                #   ⭐ 属于大块的格子看 **block_score**：它自己的 top1 可能压根不是这块
+                #     （实测 findA3 的 (1,7) 自己认成空地 0.910，大块分才是 0.794）
+                _sc = float(_v.get('block_score') or _v.get('score') or 0)
+                if _sc < 0.70:
+                    continue
+                _ev_blocks.setdefault(_v.get('anchor') or _k, []).append(_k)
+            _ev_cells = []
+            for _ak, _members in sorted(_ev_blocks.items()):
+                # 优先点锚点；锚点已经点过了就退而选同块里其它没点过的成员 ✓
+                _want = [k for k in [_ak] + _members
+                         if marks_mod.cell_center(*k) not in done]
+                if _want:
+                    _ev_cells.append(_want[0])   # ⭐ 每块只出一个目标
+            # ⭐ 用户口径：**有空闲槽时这些是必须清完的目标** ✓（含雾格 ⇒ 会开路去揭示 ✓）
+            #   没有空闲槽时就不管它们 ✓（上面已经 return/记 full 了）
+            if _ev_cells:
+                _ev_px = [marks_mod.cell_center(r, cc) for (r, cc) in _ev_cells]
+                marked = list(dict.fromkeys(marked + _ev_px))
+                entry['event_tiles'] = ['%d,%d' % k for k in _ev_cells]
+                st['ev_tiles'] = list(entry['event_tiles'])
+                say('       · 发现 %d 块紫/橙探索地块（%d 个成员格 %s）⇒ %s（空闲槽 %d 个）'
+                    % (len(_ev_cells), sum(len(v) for v in _ev_blocks.values()),
+                       '/'.join(sorted(_ap)),
+                       '去探索+派遣' if _slots_free > 0 else '探索槽已满 ⇒ 改战斗',
+                       _slots_free))
+        else:
+            entry['event_slots'] = 'full'
+    marked = [p for p in marked if p not in done]
+    need = [p for p in marked if cold.get(p, 0) >= 1]
+    fresh = [p for p in marked if cold.get(p, 0) == 0]
+    sig = (len(grays), len(nones))
+    st['stall'] = (st.get('stall', 0) + 1 if st['sig'] == sig else 0) if need else 0
+    st['sig'] = sig
+    # 拦路格判定（用户 09-25）：**只要场上还有未处理的标记格**，普通战斗格就可能是
+    # 「去 boss 路上的拦路格」，要打掉（上限由 popups 里的 clear_fights<3 控制）。
+    # ⚠ 旧版要「打标记格失败」才知道被挡路 -> 表现成「遇到拦路格直接关掉不打」。
+    st['force_fight'] = bool(marked) or st.get('clear')
+    if st.get('clear_fights', 0) >= 3:
+        st['force_fight'] = False
+    entry['order'] = {'none': len(nones), 'gray': len(grays), 'marked': len(marked),
+                      'fogged': len(need), 'force': st['force_fight'],
+                      'content(unused)': len(nones_extra), 'buy': len(buy),
+                      'buy_hidden': len(buy_hidden)}
+    if not marked and not buy and not buy_hidden:
+        say('  [r%d] 没有目标了，准备退图' % rnd)
+    else:
+        say('  [r%d] 标记格 %d（含点不动的 %d）| 商人/宝库 %d（未揭示 %d）| 已揭示 %d / 暗格 %d'
+            % (rnd, len(marked), len(need), len(buy), len(buy_hidden),
+               len(nones) + len(nones_extra), len(grays)))
+
+    def dist(p):
+        src = need or marked
+        if not src:
+            return 0
+        return min(abs(p[0] - q[0]) + abs(p[1] - q[1]) for q in src)
+
+    nones = sorted(nones, key=dist)
+    # 退图规则（用户 2026-09-25 定案）：**只有标记格 + 商人/宝库是目标**
+    #   目标都处理完 → 立刻结束冒险；不为「已露出的内容格」多跑一趟、更不乱揭格
+    # ⚠ 2026-09-25 修：`pending_buy` 必须**把「未揭示的商人/宝库」也算进去**
+    #   —— 否则「已识别到但还没解锁」的宝库会被当成"目标清完"直接退图
+    #   （用户报「第三张图未揭示的宝库还有一个没买就退地图了」：日志 r4 显示「未揭示 1」却 done）
+    # ⚠ 2026-09-25 又修（用户报「漏了已经揭示的黄金宝库」）：
+    #   **已揭示的商人/宝库不做 cold 过滤**（和标记格一样永不排除），否则点两次没开面板
+    #   就被踢出 pending_buy → 判成「目标清完」直接退图，宝库白漏。
+    #   未揭示的**不加 cold 过滤**（它压根不该被点，见上面 board_sig 那段）。
+    pending_buy = list(buy) + list(buy_hidden)
+    if vis and rnd >= 2 and not marked and not pending_buy:
+        log.append(entry)
+        log.append({'finish': 'targets_done', 'gray_left': len(grays),
+                    'content_skipped': len(nones_extra)})
+        return 'done'
+    # 点序：**无条件交替** —— 揭一格 → 点一次商人/宝库 → 点一次标记格 → 再揭一格…
+    #   ⭐ 内容格只在「还有未完成目标」时当**开路**用（用户 2026-09-25）：
+    #      boss 那类标记格常常是「未揭示」状态、点不动，必须消耗它旁边的地块才会
+    #      连锁揭示（`RemoveBlock` → `SetBlockVisible`）—— 内容格（宝箱/海螺/游乐设施…）
+    #      点一下就消耗，正好用来开路。**目标一清完立刻退图，不再多点**（提高效率）。
+    marks_any = fresh + need
+    buy_any = pending_buy
+    clearable = [p for p in nones_extra if p not in done and cold.get(p, 0) < 2]
+
+    # 「出生地」= 营地格（用来判断哪些格在「出生地 → 目标」的路上）
+    spawn = st.get('spawn')
+    if not spawn and c.get('st'):
+        for k, v in sorted(c['st'].items()):
+            if v.get('anchor') == k and v.get('name') == '营地':
+                spawn = marks_mod.cell_center(k[0], k[1])
+                st['spawn'] = spawn
+                break
+
+    def path_to(target, limit=6):
+        """出生地 → 目标 **那条直线上的可点格**（用户 2026-09-25 口径）
+
+        判据 = Bresenham 直线取格；只保留「已揭示、能点」的格（点不动的暗格点了也没用）。
+        顺序 = 从出生地那头往目标走（沿路推进）。
+        直线上一格可点的都没有时，退回旧的走廊判据兜底（免得卡死）。
+        """
+        cands = [p for p in list(nones) + list(nones_extra)
+                 if p not in done and cold.get(p, 0) < 2]
+        if not spawn:
+            cands.sort(key=lambda p: abs(p[0] - target[0]) + abs(p[1] - target[1]))
+            return cands[:limit]
+        sc_ = cell_of(spawn[0], spawn[1])
+        tc_ = cell_of(target[0], target[1])
+        line = line_cells(sc_, tc_)
+        road = []
+        for (rr, cc) in line:
+            if (rr, cc) == tc_:
+                continue                    # 目标格本身不是「拦路」
+            pt = marks_mod.cell_center(rr, cc)
+            if pt in cands and pt not in road:
+                road.append(pt)
+        if road:
+            return road[:limit]
+        # 兜底：直线上一格都点不了（都被点过/拉黑）→ 用走廊判据找附近的
+        d_st = abs(spawn[0] - target[0]) + abs(spawn[1] - target[1])
+
+        def key(p):
+            d_t = abs(p[0] - target[0]) + abs(p[1] - target[1])
+            d_s = abs(p[0] - spawn[0]) + abs(p[1] - spawn[1])
+            return (abs((d_s + d_t) - d_st) > 2, d_t)
+        cands.sort(key=key)
+        return cands[:limit]
+
+    order = []
+    road_all = []
+    if OPT:
+        # ⭐ 体力最省模式：整轮点序由 Dijkstra 最优解给出（失败则退回下面的启发式 ✓）
+        opt = optimal_order(c, mk, st, log)
+        if opt:
+            entry['opt_order'] = len(opt)
+            road_all = list(opt)
+            order = list(opt)
+    if not order and (marked or buy_any):
+        # ⭐ 有标记格（或商人/宝库）未处理 -> 先把「出生地→目标」路上的可点格列出来，
+        #   a) 优先沿路开路  b) 只有这些格弹出来的战斗才允许打（用户口径：无关战斗不打）
+        if st.get('clear_clicks', 0) < 24:
+            # 开路目标 = 点不动的标记格 / 所有标记格 / **商人宝库（含已揭示但点不开的）**
+            road_targets = list(need or marked) + list(buy_any) + list(buy_hidden)
+            for t in road_targets:
+                for p in path_to(t):
+                    if p not in road_all:
+                        road_all.append(p)
+        if road_all:
+            entry['road'] = road_all[:6]
+        # ⭐ 点序必须**严格交替**：揭一格/开一格 → 立刻试一次目标（首领/商人宝库）→ 再揭…
+        #   用户 2026-09-25：「为什么连续点了好几次出生点周围的，中间没有去点首领判断能不能直接打？
+        #   不应该是点一下判断一下首领吗」
+        # ⚠ 2026-09-25 再修（用户：「还在点不是那条直线上的格子」）：
+        #   有目标时**只点直线上的格**（`road_all`），别再把全部已揭示格（nones）也排进去；
+        #   只有直线上真的没有可点的格时才退回 nones 兜底（否则会卡死）。
+        # ⚠ 另：**未揭示的商人/宝库不进点击序列**（点不动，只会白耗 cold 被误判成放弃）
+        targets = [p for p in buy_any if p in set(buy)] + marks_any
+        if road_all:
+            reveals = list(road_all)
+        else:
+            reveals = list(nones)
+        for p in reveals[:10]:
+            order.append(p)
+            order.extend(targets)
+        order += reveals[10:] + targets
+        # 直线上一格可点的都没有 → 才用内容格兜底开路（同样只在这时插）
+        if not road_all and st.get('clear_clicks', 0) < 16:
+            for q in clearable[:6]:
+                order.append(q)
+                order.extend(targets)
+    else:
+        order = []
+    # ⭐⭐ 2026-09-27 用户要求：**每张图只在进图后规划一次** ✓（不要每轮都规划 ✗）
+    #   进图第一轮算一整条计划（最多 20 步 ✓）存 st['plan']；之后只消费它 ✓
+    if OPT_SOLVER and c.get('st'):
+        #   ⚠ 2026-09-27 修：原来"算一次失败就永久放弃" ✗
+        #     （第一轮若棋盘被面板盖住 ⇒ solver 返回空 ⇒ 整张图都没计划 ✗）
+        #     ⇒ 改成**没算出计划就下轮再试，最多 3 次** ✓
+        #   ⭐⭐ 2026-09-28：solver 失败一次 ⇒ 本图切 EffPolicy（plan_src='eff'）——
+        #     不再每轮白等 solver 失败（状态爆炸枚举 60k 状态可能几十秒 ✗）；
+        #     EffPolicy 毫秒级 ⇒ 之后每轮在线重算 ✓（2000 张验证 11.02 vs 旧启发式 11.68）
+        if not st.get('plan') and st.get('plan_src') != 'eff' \
+                and st.get('plan_tries', 0) < 3:
+            st['plan_tries'] = st.get('plan_tries', 0) + 1
+            _sol = solver_order(st, c, log=log, max_steps=20)
+            if _sol:
+                st['plan'] = list(_sol)
+                st['plan_src'] = 'solver'
+                _spd = len(_sol)
+                try:
+                    _spx = st.get('spawn') or st.get('camp')
+                    if _spx and cell_of(_spx[0], _spx[1]) in _sol:
+                        _spd -= 1      # 减掉出生点那一步 ✓
+                except Exception:       # noqa: BLE001
+                    pass
+                say('       · 本图计划已定（%d 步 ✓ 之后不再重算）' % _spd)
+            else:
+                st['plan_src'] = 'eff'
+                say('       · 精确规划没算出（第 %d 次）⇒ 本图改用片感知策略（EffPolicy）'
+                    % st['plan_tries'])
+        # ⭐⭐ 2026-09-28：EffPolicy 在线接管 —— 每轮用**最新观测**现算点序（毫秒级 ✓
+        #   不存死点序 ⇒ 揭示越多选得越准 ✓）。注：与 solver「每图只规划一次」口径不同
+        #   是有意的：solver 每轮重算要卡几十秒 ✗，EffPolicy 毫秒级无感 ✓
+        if st.get('plan_src') == 'eff' and c.get('st'):
+            _eff = eff_order(st, c, log=log, max_steps=20)
+            _eff_pick = []
+            for _p in _eff:
+                if marks_mod.cell_center(_p[0], _p[1]) in done:
+                    continue
+                _eff_pick.append(_p)
+                # ⭐ 取前 2 步（2026-09-28 离线扫描 60 张：batch=4 → 11.88，
+                #   batch=2 → 10.97，batch=1 → 10.72；2→1 只省 0.25 但真机轮数翻倍
+                #   （每轮截图+OCR 有开销）⇒ 2 是甜点 ✓ solver plan 消费保持 4 不动
+                #   ——那是静态点序（不重算），多取几步减少空轮 ✓）
+                if len(_eff_pick) >= 2:
+                    break
+            if _eff_pick:
+                _eff_px = [marks_mod.cell_center(r, cc) for (r, cc) in _eff_pick]
+                order = _eff_px + order
+                entry['eff_order'] = ['%d,%d' % p for p in _eff_pick]
+        else:
+            _eff_pick = []
+        _picked = []
+        _plan = list(st.get('plan') or [])
+        if _plan:
+            # 取"接下来还没做完的几步" ✓（已完成的跳过 ✓）
+            for _p in _plan:
+                if marks_mod.cell_center(_p[0], _p[1]) in done:
+                    continue
+                _picked.append(_p)
+                if len(_picked) >= 4:
+                    break
+            if _picked:
+                _sol_px = [marks_mod.cell_center(r, cc) for (r, cc) in _picked]
+                order = _sol_px + order
+                _sp_px3 = st.get('spawn') or st.get('camp')
+                _sp_rc3 = None
+                if _sp_px3:
+                    try:
+                        _sp_rc3 = cell_of(_sp_px3[0], _sp_px3[1])
+                    except Exception:       # noqa: BLE001
+                        _sp_rc3 = None
+                entry['solver_order'] = ['%d,%d' % p for p in _picked
+                                         if p != _sp_rc3]
+                entry['plan_left'] = len(_plan)
+        # ⭐⭐⭐ 2026-09-28 修「点了 33 却没打」（用户真机报）：计划内剩余步 =
+        #   「计划内的路」⇒ popups 的战斗面板判定用（solver/EffPolicy 已做过
+        #   「绕开更贵」的权衡 ⇒ 计划内弹出的战斗**必打**，不再被 offroad_fight
+        #   旧口径关掉 ✗ → 参见 popups 里 on_plan 分支 ✓）
+        st['plan_road'] = [marks_mod.cell_center(r, cc) for (r, cc) in
+                           (_eff_pick if st.get('plan_src') == 'eff' else _picked)]
+
+    # ⚠ 2026-09-27 用户要求：**去掉**"战斗刚结束 ⇒ 把目标格插到最前"这个行为 ✗
+    #   （原来 st['try_targets'] 会在战斗后把目标排最前 ✓ 用户明确不要 ✓）
+    if st.get('try_targets'):        # 兼容老状态：只清标记，不再改点序 ✓
+        st['try_targets'] = False
+    st['road'] = road_all
+    # ⭐ 2026-09-27：`plain_road` = 这条路上**可点的空地块**（判断"是否被迫打"用 ✓）
+    try:
+        _nones_set = set(nones) | set(nones_extra)
+        # ⚠ 必须排除**已完成**的格 ✓（否则"已经点掉的空地"还在算 ⇒ 会误判成"前面有空地"✗
+        #   ⇒ 该打的障碍不打 ✗ = 用户报「点了 33 却没打掉这个战斗格」✓）
+        st['plain_road'] = [p for p in road_all
+                            if p in set(nones) and p not in done]
+    except Exception:       # noqa: BLE001
+        st['plain_road'] = []
+    # ⭐ 待处理目标（供 popups 判「紧挨目标的战斗格 = 拦路」用）
+    st['targets'] = list(marked) + list(buy_any)
+    if not order and not marked:
+        st['blank'] = st.get('blank', 0) + 1
+        log.append(entry)
+        log.append({'finish': 'blank_board', 'n': st['blank']})
+        if st['blank'] >= 3:
+            return 'blank'
+        time.sleep(1.5)
+        return None
+    # ⭐ 刚点那格的地块 ID（给 popups 判"是不是紫/橙探索地块"用 ✓）
+    try:
+        if st.get('last') and c.get('st'):
+            _tc = cell_of(st['last'][0], st['last'][1])
+            st['tapped_sid'] = str((c['st'].get(_tc) or {}).get('sid') or '')
+    except Exception:       # noqa: BLE001
+        st['tapped_sid'] = ''
+    marked_px = set(marked)
+    # ⭐ 商人/宝库格**永不拉黑**（用户 2026-09-25：「有黄金宝库你没点就要退」）：
+    #   点它那一下如果面板没被 OCR 认到（动画/时机），旧逻辑会给它 cold+1，
+    #   两次之后进 `done` 永久排除 → 下一轮 buy=0 → 直接退图，宝库白白漏掉。
+    buy_px = set(buy) | set(buy_hidden)
+    # ⭐ 2026-09-26：按格累计「点了画面完全没反应」（跨轮持久，见下方拉黑逻辑）
+    _nc = st.setdefault('nochange', {})
+    cands = [x for x in order if x not in done
+             and (x in marked_px or x in buy_px or cold.get(x, 0) < 2)]
+    if not cands:
+        log.append(entry)
+        if marked:
+            log.append({'finish': 'targets_unreachable'})
+            return 'stuck'
+        log.append({'finish': 'all_done'})
+        return 'done'
+    hit, tried = None, 0
+    progress_set = set(clearable) | set(nones)     # 点这些格 = 开路/揭格（消耗地块 → 连锁揭示）
+    tapped_progress = False
+    for (cx, cy) in order:
+        # ⭐⭐ 立即停止的**最细粒度**检查点（2026-09-29）：一次点击 + 连锁动画 ≈ 2~4 秒，
+        #   放在这里 ⇒ 用户点 ■ 后**最多再等一次当前点击**就收工（不是"打完这张图"✓）
+        if stop_checked(log, '点击前'):
+            return 'stopped'
+        if (cx, cy) in done or tried >= 12:
+            continue
+        if cold.get((cx, cy), 0) >= 2 and (cx, cy) not in marked_px \
+                and (cx, cy) not in buy_px:
+            done.add((cx, cy))
+            continue
+        tried += 1
+        st['last'] = (cx, cy)
+        if (cx, cy) not in (st.get('clicked') or []):
+            st.setdefault('clicked', []).append((cx, cy))     # 退出前补点用
+        # ⭐⭐ 2026-09-28 诊断（**零行为影响**，只多记几个字段）：每次点击记
+        #   「格 / 本轮开始后第几秒 / 画面是否变化」⇒ 用来判"点了没反应"到底是
+        #   ① 格子不可点（规则）还是 ② 连锁揭示动画还没播完（时序）。
+        #   背景：r_221835_0 那把计划 8 点、实花 7 点，(4,5) 那一击 `changed is False`
+        #   且没扣体力；(5,4) 却是"第一次 noop、第二次成功" ⇒ 两种解释都成立，
+        #   必须靠"点击时刻"区分（见 .workbuddy/memory/2026-09-28.md §37.3 ✓）
+        _t_tap = time.time()
+        changed = b.tap(cx, cy, wait=1.3)
+        try:
+            entry.setdefault('taps', []).append(
+                ['%d,%d' % cell_of(cx, cy), round(_t_tap - _t_round, 1),
+                 (changed is not False)])
+        except Exception:       # noqa: BLE001
+            pass
+        b.snap()
+        # ⭐ B（2026-09-25 用户要求「都试试」）：**只在"画面完全没变"时**跳过这次 OCR
+        #   （0.74 秒/次，36 次/图是大头）。
+        #   ⚠ 为什么这次敢跳：弹面板**必然**引起画面变化 ⇒ `changed` 会是 True ⇒ 照样 OCR ✓；
+        #     只有"点了跟没点一样"（点不动的暗格/被挡）才会 False ⇒ 那种情况 OCR 也读不到东西 ✓。
+        #   （之前那次事故是因为**同时**还砍了"回合开头的全屏 OCR"，漏看残留面板 ⇒ 乱点；
+        #     回合开头那次全屏 OCR 现在保留着 ✓）
+        if changed is False:
+            it2 = []
+            # ⭐⭐ 2026-09-27 修（用户报「第 7 张图 boss 没打就说没目标」）：
+            #   点不动有两种 —— ① **未揭示的雾格**（游戏本来就点不动 ✓ 正常 ✓）
+            #   ② 真被面板/别的东西挡住 ✓。原来不分 ⇒ 雾格被记 nochange ⇒ 3 次拉黑 ✗
+            #   ⇒ 拉黑后 boss 目标等同消失 ⇒ 判 targets_done 提前退图 ✗✗
+            #   判据：该格亮度比 <0.8 = 未揭示（已揭示≈1.0 / 未揭示≈0.65 ✓）
+            #   （v0.29 回退：v0.27 的 revealed 前置改动撤销，恢复 v0.26 原判定 ✓）
+            _cells_now = (c.get('st') or {}) if c else {}
+            _tap_rc = cell_of(cx, cy)
+            _tv = _cells_now.get(_tap_rc) or {}
+            _ratio = _tv.get('ratio')
+            _fogged = (_ratio is not None and float(_ratio) < 0.8) or (_tap_rc not in _cells_now)
+            if _fogged:
+                log.append({'tap': 'fogged_noop', 'at': (cx, cy),
+                            'cell': '%d,%d' % _tap_rc,
+                            'ratio': _ratio,
+                            'note': '未揭示格点不动=正常 ⇒ 不计 nochange ✓'})
+            else:
+                entry.setdefault('tap_no_change', 0)
+                entry['tap_no_change'] += 1
+                # ⭐ 2026-09-26：**按格**记「点了画面完全没反应」
+                _nc[(cx, cy)] = _nc.get((cx, cy), 0) + 1
+
+        else:
+            # ⭐ 2026-09-26：上界 980 → **1080**（「获得新装备！」标题实测在 y≈992，
+            #   卡在条带外 ⇒ 认不到 ⇒ 循环对着弹窗继续点 ✗）。只多 100px（+12% 高度）✓
+            it2 = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1080)), tag='tap')
+            # ⭐ v0.35：撤掉 tap_ocr 诊断日志（校准使命已完成：FIGHT_Y=735 已钉死；
+            #   用户 09-29 要求去掉）。⚠ **OCR 本体保留** —— it2 是偶遇强敌/获得新装备/
+            #   预言石板/发现莱姆的唯一判据，删了这些面板就全瞎了 ✗
+        # ⭐ 2026-09-27：点完回报"连锁 or 面板"⇒ 边跑边学空地判据 ✓
+        #   ⚠ 判据必须是"**认到面板文字**" ✓ 不能只看"画面有变化"✗
+        #     （点空地连锁也会让画面变化 ✗ 我第一版就是这么写错的 ✗
+        #      实测把草地 S00003_001 学成了 panel ✗ ⇒ 计划绕开草地 ✗）
+        if LEARN_TILES:
+            try:
+                _sid_now = ''
+                if st.get('last') and c.get('st'):
+                    _tc2 = cell_of(st['last'][0], st['last'][1])
+                    _sid_now = str((c['st'].get(_tc2) or {}).get('sid') or '')
+                if _sid_now:
+                    _ptxt = ' '.join((i.get('text') or '') for i in (it2 or []))
+                    _has_panel = any(k in _ptxt for k in
+                                     ('战斗事件', '探索产出', '探索配队', '选择奖励',
+                                      '一键派遣', '开始探索'))
+                    if changed is not None:
+                        import mapsim as _ms2
+                        _ms2.learn_tile(_sid_now, plain=not _has_panel)
+                        log.append({'learn_tile': _sid_now,
+                                    'as': 'panel' if _has_panel else 'plain'})
+            except Exception:       # noqa: BLE001
+                pass
+
+        # ⭐ 2026-09-25 用户报「综合那个被遭遇强敌卡住了」：**点完这一下必须检查
+        #   「偶遇强敌 / 遭遇强敌」和「发现莱姆」** —— 原来这两个不在检查列表里，
+        #   于是循环对着面板继续点（把下面的点击全点到面板按钮上）= 卡住 + 乱点。
+        #   这里就地关掉（强敌点右上角 X；莱姆点返回），然后继续点序里的下一格。
+        if fb(it2, *L['strong']):
+            x = find_x(it2)
+            if x:
+                b.tap(x['cx'], x['cy'], wait=1.5)
+            else:
+                close_x_panels(b, b.img())
+            log.append({'tap': 'strong_closed', 'at': (cx, cy),
+                        'closed_at': (x['cx'], x['cy']) if x else None})
+            say('       · 点 (%d,%d) 弹出「偶遇强敌」→ 不打，关掉' % (cx, cy))
+            continue
+        lb2 = lime_back(it2)
+        if lb2:
+            b.tap(lb2['cx'], lb2['cy'], wait=1.5)
+            log.append({'tap': 'lime_back', 'at': (cx, cy)})
+            say('       · 点 (%d,%d) 弹出「发现莱姆」→ 点返回' % (cx, cy))
+            continue
+        # ⭐「获得新装备！」（2026-09-26）：点到大拇指/莱姆点时弹，就地关掉再点下一格
+        if close_newequip(b, it2, log, 'tap', at=(cx, cy)):
+            say('       · 点 (%d,%d) 弹出「获得新装备！」→ 点返回' % (cx, cy))
+            continue
+        # ⭐「预言石板」（2026-09-26 用户要求）：点出它就关掉，并**拉黑这格不再点** ✓
+        #   ⚠ 面板标题可能不在条带(y130~1080)里 ⇒ 这里只当**快路径**；漏了下一轮
+        #     `popups()` 的全屏 OCR 还会兜住（那里也会关 + 拉黑 ✓）
+        if fb(it2, *L['prophecy']):
+            universal_close(b, log, items=it2, probe=L['prophecy'][0], where='tap',
+                            at=(cx, cy))
+            block_cell(log, st, (cx, cy), 'prophecy')
+            say('       · 点 (%d,%d) 弹出「预言石板」→ 关掉并拉黑这格' % (cx, cy))
+            continue
+        if (cx, cy) in progress_set:
+            st['clear_clicks'] = st.get('clear_clicks', 0) + 1
+            tapped_progress = True
+        # ⭐ v0.33：原来只认面板**标题** ⇒ 真机高分辨率上标题落在弹性区看不见
+        #   ⇒ 判不成"弹了面板" ⇒ 主循环带着面板继续点后面的格（点击全落到面板上 ✗）
+        #   ⇒ 改用 panel_seen()（补"弹窗系独立按钮"这条判据，PC 行为不变 ✓）
+        if panel_seen(it2):
+            hit = ('tap', cx, cy)
+            done.add((cx, cy))
+            # ⭐ v0.33 诊断：记下是"认到标题"还是"靠弹窗系按钮"判成的（真机只会是后者）
+            entry['panel_via'] = 'title' if (
+                fb(it2, L['fight'], L['expl'], *L['claim'])
+                or fb(it2, *L['desc']) or fb(it2, *L['special'])) else 'dlg_btn'
+            say('       · 点 (%d,%d) → 弹面板' % (cx, cy))
+            break
+        cold[(cx, cy)] = cold.get((cx, cy), 0) + 1
+        if cold[(cx, cy)] >= 2 and (cx, cy) not in marked_px \
+                and (cx, cy) not in buy_px:
+            done.add((cx, cy))
+        # ⭐ 2026-09-26（用户报「综合乱点」）：同一格**点了没反应**也要计数拉黑 ✱
+        #   原来只有 cold 计数，而 **marked（标记格）/ buy（商人宝库）被"永不拉黑"保护**
+        #   ⇒ 面板盖着棋盘、它又点不动时 ⇒ **每轮点同一格**，实测连点 5 轮
+        #   （日志 `tap_no_change:1, tried:1, clear_clicks:3` ×5）⇒ stuck⇒no_progress ✗
+        #   ⇒ 现在：同一格累计 3 次「点了没反应」⇒ 本轮拉黑，下一轮不再点它 ✓
+        if _nc.get((cx, cy), 0) >= 3:
+            done.add((cx, cy))
+            log.append({'tap_no_change_blacklist': '%d,%d' % (cx, cy),
+                        'n': _nc[(cx, cy)]})
+    entry['tried'] = tried
+    entry['clear_clicks'] = st.get('clear_clicks', 0)
+    # ⭐⭐ 整轮"点了都没反应" ⇒ 十有八九是**盖着面板** ⇒ 连续 2 轮就清面板/脱困，
+    #   别再下一轮盲点（原来要等到 stuck>=4 才退图，中间全是白点 ✗）
+    if entry.get('tap_no_change', 0) >= 1 and not hit:
+        st['nochange_rounds'] = st.get('nochange_rounds', 0) + 1
+        if st['nochange_rounds'] >= 2:
+            n = close_x_panels(b, b.img())
+            if not n:
+                x = find_x(b.ocr(tag='nochange'))
+                if x:
+                    b.tap(x['cx'], x['cy'], wait=1.5)
+                    n = 1
+            if not n:
+                # ⭐⭐ v0.34：连着两轮"点了没反应" + 关不掉 ⇒ 多半是**认不出类型的面板**
+                #   （真机上标题落在归一化帧丢弃的弹性区：偶遇强敌/旅行商人/预言石板/…）
+                #   ⇒ 补一次**弹窗帧** OCR（≈2s，只在真的卡住时）认类型再按类型处理 ✓
+                _dp = dlg_ocr(b, tag='nochange_dlg')
+                if _dp:
+                    _OCR_CH['dlg'] = True      # ⭐ 同上：_dp 是弹窗系
+                    try:
+                        _act3 = popups(b, _dp, log, ctx={'in_dlg': True,
+                                                         'flags': st,
+                                                         'tapped': st.get('last'),
+                                                         'marks': st.get('marks') or {},
+                                                         'st': st.get('cells')})
+                    finally:
+                        _OCR_CH['dlg'] = False
+                    log.append({'popup': 'dlg_frame_retry_nochange',
+                                'n_items': len(_dp), 'act': _act3,
+                                'texts': [(i.get('text') or '')[:10] for i in _dp][:26]})
+                    if _act3 in ('battle', 'battle_clear', 'handled'):
+                        n = 1
+            if not n:
+                force_unstick(b, log, 'tap_no_change',
+                              ctx={'tapped': st.get('last'), 'flags': st})
+            log.append({'tap': 'nochange_unstick', 'closed': n,
+                        'rounds': st['nochange_rounds']})
+            say('       · 连续 %d 轮点了没反应 ⇒ 清面板/脱困（closed=%d）'
+                % (st['nochange_rounds'], n))
+            st['nochange_rounds'] = 0
+    else:
+        st['nochange_rounds'] = 0
+    if hit or tapped_progress:
+        if hit:
+            entry['hit'] = hit
+        st['stuck'] = 0
+    else:
+        st['stuck'] += 1
+        entry['stuck'] = st['stuck']
+        if st['stuck'] >= 4:
+            log.append(entry)
+            log.append({'finish': 'no_progress'})
+            return 'stuck'
+    log.append(entry)
+    return None
+
+
+def scan_bag():
+    """把当前屏 OCR 出来并落盘截图（用于标定背包/「使用」按钮坐标）"""
+    b = Bot(log_prefix='scanbag', serial=SERIAL, tag=INSTANCE_TAG, use_fast=True)
+    b.snap('scanbag', save=True)
+    items = b.ocr(min_conf=0.3, tag='scanbag')
+    say('当前屏文字 %d 条：' % len(items))
+    for i in sorted(items, key=lambda x: (x['cy'], x['cx'])):
+        say('   (%4d,%4d) %s' % (i['cx'], i['cy'], i['text'][:36]))
+    say('截图已存到 runs/ 目录（scanbag.png）')
+    return 0
+
+
+def _release_lock():
+    if _LOOP_LOCK:
+        try:
+            import loopguard
+            loopguard.release(_LOOP_LOCK[0], _LOOP_LOCK[1])
+        except Exception:       # noqa: BLE001
+            pass
+
+
+def next_5am(now=None):
+    """下一个停止时刻（默认 04:58；今天还没到就今天，否则明天）"""
+    import datetime as _dt
+    now = now or _dt.datetime.now()
+    t = now.replace(hour=STOP_HM[0], minute=STOP_HM[1], second=0, microsecond=0)
+    if t <= now:
+        t += _dt.timedelta(days=1)
+    return t
+
+
+def past_stop_time():
+    """到点了吗（到点就该收工）"""
+    import datetime as _dt
+    # 【Android】广播 cmd=stop → 与「到点」共用同一个挂载点
+    #   ⚠ 2026-09-29 用户口径改成「立即停止」后，主路径已由 `stop_requested()` 在
+    #   轮首/每次点击前**抢先**接住（不等打完）；这里是兜底（万一有新挂载点用到它）
+    if _MAPBOT_ANDROID and globals().get('_ANDROID_STOP'):
+        say('⏹ 收到外部停止指令 ⇒ 收工')
+        return True
+    if not STOP_AT_5AM or STOP_TIME is None:
+        return False
+    return _dt.datetime.now() >= STOP_TIME
+
+
+def stop_requested():
+    """⭐ **立即停止**信号（2026-09-29 用户口径：「停止键点了要立即停止，不要等打完这张图」）
+
+    · 端上（APK）：悬浮条点 ■ ⇒ 广播 ⇒ `explore_android.stop()` ⇒ `android_request_stop()`
+      ⇒ `_ANDROID_STOP = True` ⇒ 这里立刻返回 True
+    · PC 上 `_ANDROID_STOP` **根本不存在** ⇒ 恒 False ⇒ **行为一字不变 ✓**（零回归风险）
+    · 与 `past_stop_time()`（凌晨 5 点 / 两张图之间）的区别：那个**故意**等到图边界，
+      这个**每一步都要查**（见 `run_one_map` 的轮首 + 每次点击前）
+    """
+    return bool(globals().get('_ANDROID_STOP'))
+
+
+def stop_checked(log=None, where=''):
+    """查到停止请求就记一条日志并返回 True（调用方负责立刻 return/break ✓）"""
+    if not stop_requested():
+        return False
+    if log is not None:
+        log.append({'stop': 'user_immediate', 'where': where})
+    say('⏹ 收到「停止」⇒ %s 立刻收工（不等这张图打完 ✓）' % (where or '',))
+    return True
+
+
+def guard_duplicates(device, tag, force=False):
+    # 【Android】单实例运行，没有 tasklist / 多开抢点击的问题 ⇒ 直接放行
+    if _MAPBOT_ANDROID:
+        return True
+    """⭐ 用户 2026-09-25：启动前查重 —— 同一台模拟器已经有循环在跑就**拒绝启动**
+
+    两道防线见 `loopguard.py`：原子锁（同 tag 抢锁）+ 进程枚举（兜住绕过锁的）。
+    `--force` 可以强行启动（调试用）。
+    """
+    try:
+        import loopguard
+    except Exception:       # noqa: BLE001
+        return True
+    try:
+        return _guard_duplicates_inner(loopguard, device, tag, force)
+    except Exception as ex:     # noqa: BLE001 —— 守卫自身出错就放行，绝不让它拖垮循环 ✓
+        import traceback
+        say('⚠ 重复循环自检出错（%r），本次直接放行' % ex)
+        say('   ' + ' | '.join(traceback.format_exc().splitlines()[-2:]))
+        return True
+
+
+def _guard_duplicates_inner(loopguard, device, tag, force):
+    dupes = loopguard.duplicates_for(device, tag, exclude_pid=os.getpid())
+    if dupes:
+        say('')
+        say('⚠ 已经有一个循环在跑同一台模拟器（%s）：' % device)
+        for p in dupes:
+            say('     PID %-6d 设备 %-20s tag %s' % (p['pid'], p['device'] or '?',
+                                                     p['tag'] or '-'))
+        if not force:
+            say('')
+            say('   为避免两边抢点击，这次不启动 ✗')
+            say('   · 想停掉旧的：在它的窗口点「停止」，或删掉锁文件后重来')
+            say('   · 确实要强开（调试用）：加 --force')
+            return False
+        say('   --force：仍然启动（可能互相抢点击）')
+    ok, info = loopguard.acquire(device, tag)
+    if not ok:
+        say('⚠ 设备锁被占用：%s' % json.dumps(info, ensure_ascii=False))
+        if not force:
+            return False
+    globals()['_LOOP_LOCK'] = (device, tag)
+    return True
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--max-round', type=int, default=45)
+    ap.add_argument('--force', action='store_true',
+                    help='已有同设备循环时也强行启动（调试用）')
+    ap.add_argument('--no-guard', action='store_true',
+                    help='跳过重复循环自检（GUI 已查过时用）')
+    ap.add_argument('--scan-bag', action='store_true',
+                    help='把当前屏 OCR 落盘（标定背包界面用）')
+    ap.add_argument('--maps', type=int, default=1)
+    ap.add_argument('--deadline', type=int, default=900)
+    ap.add_argument('--quiet', action='store_true', help='关掉控制台实时进度')
+    ap.add_argument('--no-dump', action='store_true', help='结束时不打印全量 json 日志')
+    ap.add_argument('--min-stamina', type=int, default=25,
+                    help='进图前体力下限（低于它就收工）；连刷模式用 50')
+    ap.add_argument('--bag-every', type=int, default=10,
+                    help='每连刷多少张图去背包做一次装备一键升星（0=关闭，默认10）')
+    ap.add_argument('--no-solver', action='store_true',
+                    help='关掉精确规划（走原来的启发式点序）')
+    ap.add_argument('--device', default=None,
+                    help='adb 设备号（多开：127.0.0.1:16384 / 16416 / 16448 …）')
+    ap.add_argument('--tag', default='',
+                    help='多开实例名（隔离截图/日志/统计目录），如 acc1 / acc2')
+    ap.add_argument('--auto-supply', action='store_true',
+                    help='没体力时自动进背包使用「结实补给」（窗口勾选框用）')
+    ap.add_argument('--opt', action='store_true',
+                    help='体力最省模式：每轮用 Dijkstra 求最优点序（mapsolve）')
+    # ⭐⭐ 2026-09-27 用户要求：「开一个新脚本抓另一个模拟器 —— 只进图截图退图，拿图片快一些」
+    ap.add_argument('--collect-only', dest='collect_only', action='store_true',
+                    help='采图模式：只「进图 → 存首帧 → 退图」，不揭格/不打怪/不买/不补点'
+                         '/不背包升星（拿到最干净的首帧；⚠ 每张图照旧扣 25 体力）')
+    a = ap.parse_args()
+    # ⭐ 用户 2026-09-25：「加个检测有没有重复的循环进程」
+    #   同一台模拟器上已有循环在跑 ⇒ 拒绝启动（两个循环会互相抢点击、抢状态）
+    if not getattr(a, 'no_guard', False):
+        import atexit
+        if not guard_duplicates(a.device or '', a.tag or '',
+                                force=getattr(a, 'force', False)):
+            return 3
+        atexit.register(_release_lock)
+    global VERBOSE, DUMP_AT_END, MIN_STAMINA, WIN, LOG_PATH, SUMMARY_PATH, AUTO_SUPPLY
+    global INSTANCE_TAG, INSTANCE_DEV, _BOT, STOP_TIME, COLLECT_ONLY
+    VERBOSE = not a.quiet
+    DUMP_AT_END = not a.no_dump
+    MIN_STAMINA = a.min_stamina
+    # ⭐ 每 N 张图做一次装备升星（窗口可填 ✓ 默认 10 ✓）
+    global BAG_EVERY, OPT_SOLVER   # 必须声明，否则只是局部变量（用户报取消勾选还规划）
+    BAG_EVERY = max(0, int(getattr(a, 'bag_every', 10) or 0))
+    OPT_SOLVER = not bool(getattr(a, 'no_solver', False))
+    say('   · 精确规划：' + ('开 ✓' if OPT_SOLVER else '关（走启发式 ✓）'))
+    say('   · 装备升星：' + (('每 %d 张图一次' % BAG_EVERY) if BAG_EVERY else '关闭（0）'))
+    global STOP_TIME
+    STOP_TIME = next_5am() if STOP_AT_5AM else None
+    if STOP_TIME:
+        say('⏰ 本次运行到 %s 自动停止（打完手上这张图就收工）'
+            % STOP_TIME.strftime('%m-%d %H:%M'))
+    AUTO_SUPPLY = bool(getattr(a, 'auto_supply', False))
+    global OPT
+    OPT = bool(a.opt)
+    COLLECT_ONLY = bool(getattr(a, 'collect_only', False))
+    if COLLECT_ONLY:
+        # 采图模式下这些开关没意义 ⇒ 直接按最省的方式跑，免得误触
+        BAG_EVERY = 0
+        _tag = (getattr(a, 'tag', '') or '').strip()
+        say('')
+        say('📷 采图模式（--collect-only）：只做「进图 → 存首帧 → 退图」')
+        say('   · 不揭格 / 不打怪 / 不买 / 不补点 / 不背包升星')
+        say('   · ⚠ 每张图照旧扣 **25 体力**（进图瞬间扣，退图不退）—— 这是拿体力换图片')
+        say('   · 存图目录：%s' % (os.path.join(RUNS, _tag) if _tag else RUNS))
+        say('')
+    INSTANCE_TAG = (a.tag or '').strip()
+    INSTANCE_DEV = a.device or DEV
+    _lock = acquire_device_lock(INSTANCE_DEV)
+    if _lock is None:
+        say('⚠ 这台模拟器（%s）已经有另一个自动探索在跑了 —— 同时跑两个会互相抢点击。' % INSTANCE_DEV)
+        say('   要强制重跑：先停掉那个窗口，或删掉 %s' % device_lock_path(INSTANCE_DEV))
+        return
+    # ⭐ 红装锁：上次发现红装还没处理 ⇒ **拒绝启动**，绝不把那一局带走
+    #   （用户 2026-09-25：「下次遇到红装要立刻停止，不准退出图」）
+    rl = red_locked(INSTANCE_DEV)
+    if rl:
+        say('')
+        say('🛑 上次在这台模拟器上**发现了红装（SS）**，已经锁定，不启动新的探索：')
+        say('     地图 %s  格 %s  时间 %s  截图 %s'
+            % (rl.get('map'), rl.get('cell'), rl.get('at'), rl.get('shot')))
+        say('     请先在游戏里处理掉那件红装；处理完在窗口上点「红装已处理·解锁」，')
+        say('     或手动删掉：%s' % red_lock_path(INSTANCE_DEV))
+        say('')
+        release_device_lock(_lock)
+        return
+    try:
+        run_maps(a)
+    finally:
+        release_device_lock(_lock)
+
+
+def run_maps(a):
+    global WIN, LOG_PATH, SUMMARY_PATH, _BOT
+    b = Bot(log_prefix='loop', serial=INSTANCE_DEV, tag=INSTANCE_TAG or None)
+    # ⭐ 分辨率自适应：拿到真实屏幕尺寸后刷新坐标 ✓（1080×1920 下零变化 ✓）
+    try:
+        _im = b.img()
+        if _im is not None:
+            _h, _w = _im.shape[:2]
+            _L = apply_layout(_w, _h)
+            say('屏幕 %dx%d ⇒ 缩放 k=%.4f（参考 1080×1920 ✓）' % (_w, _h, _L.k))
+            if (_w, _h) != (layout_mod.REF_W, layout_mod.REF_H):
+                say('   ⚠ 非参考分辨率：棋盘 x0=%d y0=%d 格距=%.1f（自适应 ✓）'
+                    % (_L.grid['x0'], _L.grid['y0'], _L.grid['cx']))
+    except Exception as _e:      # noqa: BLE001
+        say('⚠ 分辨率自适应失败（按 1080×1920 继续 ✓）：%r' % (_e,))
+    _BOT = b
+    if INSTANCE_TAG:                      # 多开：日志/统计也各自独立
+        WIN = os.path.join(b.runs, 'loop')
+        os.makedirs(WIN, exist_ok=True)
+        LOG_PATH = os.path.join(WIN, 'loop_log.json')
+        SUMMARY_PATH = os.path.join(b.runs, 'last_summary.json')
+    say('实例：%s  设备：%s  目录：%s' % (INSTANCE_TAG or '（单开）', INSTANCE_DEV, b.runs))
+    log = []
+    t_all = time.time()
+    for mi in range(a.maps):
+        # ⭐ 2026-09-29 用户口径：点 ■ 要**立即停止**（比凌晨 5 点的判定点**更靠前**）
+        if stop_checked(log, '地图边界（第 %d 张前）' % (mi + 1)):
+            STATS['stopped'] = '用户点了停止'
+            break
+        # ⭐ 2026-09-26 用户要求：凌晨 5 点自动停止
+        #   停**每张图之间**（不打断正在打的那张 ⇒ 退图流程照常走完，不会留下半张图 ✓）
+        if past_stop_time():
+            log.append({'stop': 'five_am', 'at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'stop_time': STOP_TIME.strftime('%m-%d %H:%M')})
+            STATS['stopped'] = '到点自动停止（%02d:%02d）' % STOP_HM
+            say('⏰ 到 %s 了（%02d:%02d 自动停止），最后一张图已打完，收工'
+                % (STOP_TIME.strftime('%m-%d %H:%M'), STOP_HM[0], STOP_HM[1]))
+            break
+        b.snap('m%d_pre' % mi)
+        # ⭐ 2026-09-28 提速（P1）：原版这里对**同一帧**跑了两遍全屏 OCR
+        #   （一遍查顶号、一遍读体力，0.8s/次纯浪费）⇒ 合并成一次，两项都从这帧取 ✓
+        _items_pre = b.ocr(tag='pre')
+        if fb(_items_pre, *L['kick']):
+            log.append({'stop': 'kicked'})
+            STATS['stopped'] = '账号被其他设备顶下线'
+            say('⚠ 账号被其他设备顶下线，已停止（不会自动点确定）')
+            break
+        # ⭐ 每连刷 BAG_EVERY 张图 ⇒ 去背包一键升级（用户 2026-09-27 要求 ✓）
+        if BAG_EVERY and mi > 0 and mi % BAG_EVERY == 0:
+            try:
+                bag_upgrade(b, log, tag='bag%d_' % mi)
+            except Exception as e:      # noqa: BLE001
+                log.append({'bag': 'error', 'e': repr(e)[:120]})
+                say('   ⚠ 背包升级异常：%r（已跳过，继续刷图 ✓）' % (e,))
+            # 背包升级后画面已变 ⇒ 重截重读（只有这种图才多花这一次 OCR）
+            b.snap('m%d_pre_bag' % mi)
+            _items_pre = b.ocr(tag='pre')
+        say('== 第 %d 张图 ==' % (mi + 1))
+        # ⭐ 2026-09-27：**进图前**读一次体力（选图界面 ✓ 此时还没扣那 25）
+        #   ⇒ 相邻两次"进图前"的差 = 25 进图消耗 + 图内消耗 ✓（用户要求算进图消耗 ✓）
+        try:
+            _st_pre = stamina(_items_pre)
+            if _st_pre is not None:
+                STATS['stamina_entries'].append((_st_pre, time.time()))
+                say('   进图前体力 %d（已记入统计 ✓）' % _st_pre)
+        except Exception as _e3:      # noqa: BLE001
+            say('   ⚠ 进图前体力读取失败：%r' % (_e3,))
+        if not ensure_in_map(b, log, tag='m%d_' % mi):
+            log.append({'map': mi, 'stop': 'not_in_map'})
+            STATS['stopped'] = STATS['stopped'] or '进图失败（体力不足 / 不在选图界面）'
+            say('⚠ 进图失败（可能体力不足 / 不在选图界面），已停止')
+            break
+        # ⭐ 分辨率自适应：进图成功后标定一次棋盘几何 ✓（只跑一次 ✓ 永不退化 ✓）
+        if ADAPTIVE_LAYOUT and not _GRID_CALIBRATED['done']:
+            try:
+                _im0 = b.img()
+                if _im0 is not None:
+                    auto_calibrate_grid(b, _im0, log=log)
+                    # ⭐ 不管成功/被拒，本次启动只测一次 ✓（用户 2026-09-27）
+                    _GRID_CALIBRATED['done'] = True
+            except Exception as _e2:      # noqa: BLE001
+                say('   ⚠ 棋盘自检异常：%r' % (_e2,))
+        # ⭐ 2026-09-28 提速（P1）：体力在顶部 HUD ⇒ band OCR 就够（~0.25s），
+        #   不必全屏（0.8s）；这行只用于日志展示，不进账（进账在"进图前"那次 ✓）
+        st_now = stamina(b.ocr(band=(0, int(LAYOUT.sy(320))), tag='pre'))
+        say('   已进图，体力 %s' % (st_now if st_now is not None else '?'))
+        if st_now is not None:
+            # ⚠ 2026-09-27：这里**不再记账**（改由"进图前"那次记账 ✓）
+            #   否则会把"扣完 25 之后"的值当基准 ⇒ 25 又丢了 ✗
+            ent = STATS['stamina_entries']
+            if len(ent) >= 2:
+                (s0, t0), (s1, t1) = ent[-2], ent[-1]
+                regen = max(0.0, t1 - t0) / 30.0
+                say('   上一张图消耗体力约 %.0f（进图 %d → %d，间隔 %.0f 秒，期间回 +%.0f）'
+                    % (max(0.0, (s0 - s1) + regen), s0, s1, t1 - t0, regen))
+        STATS['current_map'] = mi + 1
+        # ⭐⭐ 2026-09-27 采图模式（--collect-only）：
+        #   进图成功这一刻的画面 = **整张图最干净的一帧**（没有任何图标/战斗/面板盖住）
+        #   ⇒ 存下来 → 立刻退图 → 下一张。全程不揭格、不打怪、不买、不补点 ✓
+        #   ⚠ 退图**不做 final_collect**（那一步是"把打过的格再点一遍领战利品"，
+        #     采图模式一格没打过 ⇒ 点了反而会揭开新格/弹面板 ✗）
+        if COLLECT_ONLY:
+            t_one = time.time()
+            _shot = save_board_frame(b, log, rnd=0)
+            ok = finish_map(b, log)
+            _dt = time.time() - t_one
+            log.append({'map': mi, 'collect_only': True, 'finished': ok,
+                        'shot': os.path.basename(_shot) if _shot else None,
+                        'secs': round(_dt, 1)})
+            say('   采图：%s（本张 %.0f 秒）%s'
+                % (os.path.basename(_shot) if _shot else '⚠ 存图失败', _dt,
+                   '' if ok else '  ⚠ 退图没成功'))
+            if _shot:
+                STATS['shots'] += 1
+            if ok:
+                STATS['map_secs'].append(_dt)
+                STATS['current_map'] = 0
+                STATS['current_secs'] = 0
+            else:
+                STATS['stopped'] = STATS['stopped'] or '退图失败（采图模式）'
+                flush(log)
+                break
+            flush(log)
+            continue
+        t_one = time.time()
+        try:
+            why = run_one_map(b, log, a.max_round, prefix='m%d_' % mi, deadline=a.deadline)
+        finally:
+            STATS['current_secs'] = time.time() - t_one
+        log.append({'map': mi, 'end_reason': why})
+        say('   本图结束：%s（耗时 %.0f 秒）' % (why, time.time() - t_one))
+        if why == 'kicked':
+            STATS['stopped'] = '账号被顶下线'
+            break
+        if why == 'red_equip':
+            # 🛑 看到红装标记：**不退图、不补点**，停在原地交给人处理
+            STATS['stopped'] = '发现红装（SS）标记 → 立即停止（现场保留）'
+            say('⚠ 已停止：红装标记格留在图上，请你自己处理（本轮不再动作）')
+            break
+        if why == 'stopped':
+            # ⭐ 2026-09-29 用户口径「点 ■ 要立即停止」：**连退图都别做**（打图动作立刻全停 ✓）
+            #   留在图内即可：游戏账号空闲、下次启动可接着打这张图 ✓
+            STATS['stopped'] = '用户点了停止'
+            say('⏹ 已停止：留在图内，不退图不补点（下次启动可接着打 ✓）')
+            break
+        ok = finish_map(b, log)
+        log.append({'map': mi, 'finished': ok})
+        if ok:
+            STATS['maps'] += 1
+            STATS['map_secs'].append(time.time() - t_one)
+            STATS['current_map'] = 0        # 正常跑完就不算「被停止」
+            STATS['current_secs'] = 0
+        say('   已退出地图并回到选图界面' if ok else '⚠ 退图没成功，已停止')
+        if not ok:
+            STATS['stopped'] = STATS['stopped'] or '退图失败'
+            break
+    flush(log)
+    STATS['running'] = False
+    say('==== 全部结束，共 %.0f 秒；日志：%s' % (time.time() - t_all, LOG_PATH))
+    say(summary_text())
+    dump_summary()
+    # ⭐ 2026-09-27：收尾再读一次体力 ⇒ 最后一张图的"25 + 图内消耗"也能算出来 ✓
+    try:
+        _st_end = stamina(b.ocr(tag='end'))
+        if _st_end is not None:
+            STATS['stamina_entries'].append((_st_end, time.time()))
+            say('收尾体力 %d（已记入统计 ✓）' % _st_end)
+    except Exception:       # noqa: BLE001
+        pass
+
+    if DUMP_AT_END:
+        for e in log:
+            print(e)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        STATS['stopped'] = STATS['stopped'] or '手动中断（Ctrl+C）'
+        STATS['running'] = False
+        say(summary_text())
+        dump_summary()
+    except SystemExit:
+        # 锁冲突 / 红装锁等**正常退出路径**（main 里 return 或显式退出）⇒ 原样放行，
+        # 不写 crash 日志（否则假崩溃太多 ✗）
+        raise
+    except BaseException as _e:        # noqa: BLE001
+        # ⭐⭐⭐ 2026-09-28 加固：任何未捕获异常都**留下证据**
+        #   背景：21:36 那把循环打印「进图前体力」后**无声消失**（无 traceback、
+        #   无 summary、无 [warn]）⇒ 事后完全无法定位死因 ✗ 只能靠这个兜住。
+        #   崩溃记录写 `runs/<tag>/_crash.log`（append，不覆盖历史）。
+        import traceback as _tbm
+        _tb = _tbm.format_exc()
+        _crash = os.path.join(RUNS, INSTANCE_TAG or '', '_crash.log')
+        try:
+            os.makedirs(os.path.dirname(_crash), exist_ok=True)
+            with open(_crash, 'a', encoding='utf-8') as _f:
+                _f.write('\n===== %s  pid=%d  dev=%s =====\n%s\n'
+                         % (time.strftime('%Y-%m-%d %H:%M:%S'), os.getpid(),
+                            INSTANCE_DEV, _tb))
+        except Exception:       # noqa: BLE001
+            pass
+        try:
+            say('💥 未捕获异常 ⇒ 已写入 %s（可据此定位死因）' % _crash)
+            say(_tb)
+        except Exception:       # noqa: BLE001
+            pass
+        STATS['stopped'] = STATS['stopped'] or ('崩溃：%s' % repr(_e)[:80])
+        STATS['running'] = False
+    finally:
+        try:
+            STATS['running'] = False
+            dump_summary()
+        except Exception:       # noqa: BLE001
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 【Android 入口 · 由 port_loop.py 追加】
+# 不走 argparse（APK 里没有命令行），由 explore_android.py 设置好模块级开关后调用。
+# ═════════════════════════════════════════════════════════════════════════════
+class _Args(object):
+    """假装成 argparse.Namespace（run_maps 只读这几个字段 ✓）"""
+    def __init__(self, maps=1, max_round=45, deadline=900):
+        self.maps = maps
+        self.max_round = max_round
+        self.deadline = deadline
+
+
+def android_run(maps=1, max_round=45, deadline=900,
+                min_stamina=25, opt_solver=True, bag_every=0,
+                stop_at_5am=False, auto_supply=False, say_fn=None):
+    """Android 主入口：跑 maps 张图
+
+    调用方（explore_android.py）负责：
+      · 设置环境变量 MAPBOT_ROOT / MAPBOT_RUNS / MAPBOT_DT（**必须在 import 本模块之前**）
+      · 设置 INSTANCE_TAG / VERBOSE / LOG_PATH 等模块级开关
+    本函数只做「开关落位 + 调 run_maps」，并把 SYSTEM 异常写进 _crash.log。
+
+    ⭐ 2026-09-29（APK 需求 ④⑤⑥）新增两件事：
+      · `auto_supply` —— 没体力自动进背包用「结实补给」（对应界面上的勾选框）
+      · **红装锁拦截** —— `main()` 里的红装闸门 Android 走不到（APK 不走 argparse），
+        这里补上：上次发现红装还没处理 ⇒ 直接拒绝启动（绝不把那一局退掉）。
+    """
+    global OPT_SOLVER, MIN_STAMINA, BAG_EVERY, STOP_AT_5AM, VERBOSE, DUMP_AT_END
+    global AUTO_SUPPLY
+    MIN_STAMINA = int(min_stamina)
+    OPT_SOLVER = bool(opt_solver)
+    BAG_EVERY = max(0, int(bag_every or 0))
+    AUTO_SUPPLY = bool(auto_supply)
+    STOP_AT_5AM = bool(stop_at_5am)
+    if STOP_AT_5AM:
+        global STOP_TIME
+        STOP_TIME = next_5am()
+    # ⭐ 红装锁：上次发现红装（SS）还没处理 ⇒ 拒绝启动（与 PC 的 main() 同口径 ✓）
+    #   处理完在界面上点「红装解锁」（或 explore_android.red_unlock()）即可放行
+    _rl = red_locked(INSTANCE_DEV)
+    if _rl:
+        say('')
+        say('🛑 上次在这台设备上**发现了红装（SS）**，已锁定，不启动新的探索：')
+        say('     地图 %s  格 %s  时间 %s  截图 %s'
+            % (_rl.get('map'), _rl.get('cell'), _rl.get('at'), _rl.get('shot')))
+        say('     处理完在界面上点「红装解锁」即可重新开跑')
+        say('')
+        return 'red_locked'
+    say('   · 自动补给：' + ('开 ✓（没体力就进背包用结实补给）' if AUTO_SUPPLY else '关'))
+    say('   · 装备升星：' + (('每 %d 张图一次' % BAG_EVERY) if BAG_EVERY else '关闭（0）'))
+    return run_maps(_Args(maps=maps, max_round=max_round, deadline=deadline))
+
+
+def android_stop_requested():
+    """供外部（广播）设置的中断标志 —— 2026-09-29 用户口径：立即停止（不等打完 ✓）"""
+    return bool(globals().get('_ANDROID_STOP'))
+
+
+def android_request_stop():
+    globals()['_ANDROID_STOP'] = True

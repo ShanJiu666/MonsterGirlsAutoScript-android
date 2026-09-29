@@ -1,0 +1,1 @@
+{'solver': 'ok', 'cost': 12, 'steps': 3, 'targets': 2, 'secs': 0.05}
