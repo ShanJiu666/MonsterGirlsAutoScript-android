@@ -3332,7 +3332,6 @@ def popups(b, items, log, ctx=None):
                     _panel_tap(b, 275, 1507, 'norm', log=log, what='返回(兜底)')
             return 'handled'
         _gone = False
-        it2 = None          # ⭐ 初始化：下面 `if _try and it2` 与收尾的 find_x/n_free 都要读它
         for _try in range(2):
             # ⭐⭐⭐ 2026-10-01 用户报「点搓（错）一键派遣位置了」⇒ **改用 OCR 现读的按钮坐标**：
             #   面板 OCR 里本来就有那颗按钮（真机实测读到 `键派遣`、`开始探索`）✗
@@ -3342,16 +3341,7 @@ def popups(b, items, log, ctx=None):
             #     只有实在读不到文字时才退回标定常量（并有通道兜底 ✓）
             #   好处：与分辨率无关、与文案变化无关（键派遣/一键派遣/开始探索 都认 ✓）
             _btn_it = None
-            # ⚠⚠ 2026-10-01 修 NameError：原来写 `for _src in (it2 if _try else items, items)`
-            #   —— `it2` 只在**循环体末尾**（ocr_ch 之后）才赋值 ⇒ **首轮必然 NameError** ✗
-            #   （被上层 `except Exception: pass` 吞掉 ⇒ 症状：派遣面板点了两下都关不掉，
-            #    日志永远停在 dispatch 的第一条，user 报「点不了派遣」）
-            # ⇒ 第 2 轮及以后才用 `it2`（它有值了）；第 1 轮只有 `items`。
-            #   更好的做法是**每轮都重新 OCR 一遍**再找按钮（面板文字会变：键派遣→开始探索）。
-            _src_list = [items]
-            if _try and it2:
-                _src_list.insert(0, it2)
-            for _src in _src_list:
+            for _src in (it2 if _try else items, items):
                 for _it in (_src or []):
                     _t = (_it.get('text') or '').strip()
                     if ('派遣' in _t or '开始探索' in _t) and '预计时间' not in _t:
@@ -3661,13 +3651,9 @@ def popups(b, items, log, ctx=None):
         #   探索槽已经满了的时候点「探索」游戏没有反应 ⇒ 面板不关 ⇒ 下一帧又认到同一段
         #   面板文字、又点探索…⇒ 整个闭环卡死（最后表现就是"退出地图失败"）。
         _free2 = int(ctx.get('slots_free', 1) or 0)
-        # ⚠⚠ 2026-10-01 修 NameError：`entry` 是 **one_round()** 的局部变量，本函数里根本没有
-        #   ⇒ 走到「紫/橙探索格」分支时**必抛 NameError**（被上层 except 吞掉 ⇒
-        #     症状：点到紫橙格就静默中断那一轮，日志没有 explore_panel 记录）。
-        # ⇒ 诊断信息改成直接进 `log`（那才是本函数能写的），不依赖 one_round 的局部变量。
-        log.append({'explore_panel': {'hv': bool(hv), 'btn': bool(act),
-                                      'target_tile': _is_target_tile,
-                                      'slots_free': _free2}})
+        entry['explore_panel'] = {'hv': bool(hv), 'btn': bool(act),
+                                  'target_tile': _is_target_tile,
+                                  'slots_free': _free2}
         # ⭐ 不靠 slots_free 当闸门（OCR 偶尔认不到「空闲」会误判成 0 ✗），
         #   改成**先点、再验证**：点了「探索」面板还在 ⇒ 就是派不进去（多半槽位满）⇒ 改走战斗
         # ⭐⭐ 2026-09-30：**已经确认满本图**（`slots_full_latched`，两次点不动）时不再给
