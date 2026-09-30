@@ -164,6 +164,44 @@ def map_table():
     return out
 
 
+FOG_SIL_MIN = 0.04        # 雾下"有东西"的剪影占比阈值（真机实测：有物体 0.064~0.292 / 平坦 0.014~0.016）
+
+
+def fog_silhouette(img, r, c, board):
+    """雾格剪影占比（0~1）—— 「雾底下有没有东西」的**尺度无关**判据
+
+    做法：取该格图像 → 只留中间 80%（躲开外框/圆角）→ 雾底 = 中位亮度 →
+    剪影掩码 = 明显暗于雾底（`median − max(12, 2.2·MAD)`，MAD 是稳健方差，抗纹理噪声）→
+    开运算去毛刺 → 最大连通块/总面积（占比）。
+
+    实测（1280×2772 真机帧，铁血高地，见 `_tmpman/fog_silhouette.py`）：
+      有物体：0.292 岩石图腾 / 0.271 巨大木桩 / 0.169 宝箱(2,2) / 0.064 岩石 …
+      平  坦：0.014~0.016（雾格里的空地）
+    ⇒ 阈值 0.04：**判"非空地"** ⇒ 连锁到此为止（不再靠"雾格一律挡"的一刀切 ✓）
+    """
+    import cv2
+    import numpy as np
+    G = board.grid if board is not None else GRID
+    cx = int(G['x0'] + (c - 1) * (G.get('cx') or G.get('pitch') or 144)
+             + (G.get('cx') or G.get('pitch') or 144) / 2)
+    cy = int(G['y0'] + (r - 1) * (G.get('cy') or G.get('pitch') or 144)
+             + (G.get('cy') or G.get('pitch') or 144) / 2)
+    half = int((G.get('cx') or 144) / 2)
+    sub = img[max(0, cy - half):cy + half, max(0, cx - half):cx + half]
+    if sub.size == 0:
+        return 0.0
+    g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    m = int(g.shape[0] * 0.10)
+    if g.shape[0] > 3 * m and g.shape[1] > 3 * m:
+        g = g[m:g.shape[0] - m, m:g.shape[1] - m]
+    med = float(np.median(g))
+    mad = float(np.median(np.abs(g - med))) or 1.0
+    mask = ((med - g) > max(12.0, 2.2 * mad)).astype('uint8')
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    return float(mask.mean())
+
+
 def code_of(mapname):
     mt = map_table()
     if mapname in mt:
@@ -547,6 +585,24 @@ class Board:
                       'block_score': (round(blk['score'], 3) if blk else None),
                       'top': [(round(float(s), 3), s2, anch)
                               for s, s2, _f, anch in lst]}
+            # ⭐⭐⭐ 2026-10-01 v1.03【雾格剪影识别】——用户口径「优化识别模型，认出雾格里那块不能穿过」：
+            #   雾格（ratio≈0.65）**底下的真身只能靠剪影认**：分类器隔着雾猜名字，真机实测会把
+            #   挡连锁的物体猜成「草地」（score 还 0.95 ✗）⇒ 规划以为连锁能穿过它 ✗✗
+            #   而"雾底 + 暗剪影"是**看得见**的：真机同帧实测（1280×2772 设备帧，铁血高地）
+            #     · 有物体的雾格 剪影占比 **0.064 ~ 0.292**（(2,2) 宝箱=0.169、(3,1) 石碑=0.292…）
+            #     · 平坦雾格   剪影占比 **0.014 ~ 0.016**
+            #   ⇒ 中间有 4 倍空档，阈值 0.04 判「雾下有没有东西」稳 ✓（判**非空地** ⇒ 连锁到此为止）
+            if ratio and ratio < 0.78:
+                try:
+                    sil = fog_silhouette(img, r, c, self)
+                    out[k]['fog_sil'] = sil
+                    out[k]['fog_object'] = bool(sil >= FOG_SIL_MIN)
+                    # ⭐ v1.05：**平坦**（剪影很小）= 雾下是空地 ⇒ 交给模型当 plain 用
+                    #   （雾格上的模板名字很不可信：真机这盘中位分只有 0.276，平坦格还被
+                    #    猜成「岩石/巨大木桩」✗ ⇒ 雾格的"是不是空地"以**剪影实测**为准 ✓）
+                    out[k]['fog_flat'] = bool(sil < FOG_SIL_MIN)
+                except Exception:       # noqa: BLE001
+                    pass
         return out
 
     # ---------- 紫/橙探索大块（2026-09-26 新） ----------

@@ -366,12 +366,22 @@ class MapGen:
             blocks.append(b)
 
         sim = mapsim.MapSim(board, blocks)
-        # 开局揭示：营地 + 它的 4 邻格（Block.cells 存的是 **cell 索引**）
+        # 开局揭示：营地 + **与营地 4 邻接的块**（真机口径：最先只有营地挨着的格子能点）
+        # ⚠⚠ 2026-09-30 修（离线保真度 bug，影响面很大）：
+        #   原实现把 `placed[...]['cells']`（`stamp()` 存的是 **0 基 (r,c)**，见 224-229 行）
+        #   直接当成 (r,c) 去和 `mapsim.rc_of()` 算出来的 **1 基**坐标比 ⇒ 集合整体错位 (−1,−1)
+        #   ⇒ 开局揭示集不是"营地四邻"，而是"**营地左上那一格**的四邻" ✗
+        #   实测铁证（seed 5000，营地 1 基 (3,3)）：revealed 竟是
+        #       (1,1)(1,2)(2,1)(2,3)(3,2) = (2,2) 的四邻 ✗
+        #   ⇒ 后果：所有离线评估（`mapsolve --bench` 的最优值、`strategy` 的权重扫描、
+        #     `地图生成算法.md §16` 那套 11.02/11.68）都建立在**开局态与真机不一致**的盘上；
+        #     且「真盘 vs 生成器」对拍时会与 `mapsim/mapsolve` 的"营地四邻"口径互相打架 ✗
+        #   ⇒ 修法：统一走 `rc_of(r * COLS + c)` 把 0 基 (r,c) 换成 1 基，再比 ✓
         camp_idx = next((i for i, p in enumerate(placed)
                          if p['spot'].get('Name') == '营地'), None)
-        camp_cells = placed[camp_idx]['cells'] if camp_idx is not None else []
-        camp_r = {(r, c) for (r, c) in camp_cells}
         if camp_idx is not None:
+            camp_r = {mapsim.rc_of(r * COLS + c)
+                      for (r, c) in placed[camp_idx]['cells']}
             for blk in sim.blocks.values():
                 rc = [mapsim.rc_of(ci) for ci in (blk.cells or [])]
                 if blk.idx == camp_idx or any(

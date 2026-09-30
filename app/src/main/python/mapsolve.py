@@ -48,6 +48,11 @@ NCELL = ROWS * COLS
 FIGHT_X2 = {'boss', 'redEquip', 'recommend', 'battle'}      # 战斗格：体力 ×2
 
 
+def rc_of(idx):
+    """cell 索引 -> 1 基 (r, c)（与 `mapsim.rc_of` 同口径）"""
+    return idx // COLS + 1, idx % COLS + 1
+
+
 class Problem:
     """把一张盘编译成"搜索用"的纯数据（不依赖 MapSim 的可变状态）"""
 
@@ -76,9 +81,87 @@ class Problem:
 
     # ---------- 状态派生 ----------
     def consumed_cells(self, state):
-        out = set()
+        """「已消耗的格」= 观测里**本来就是空的格**（`board < 0`）+ 本状态吃掉的格
+
+        ⭐⭐ 2026-09-30 修（保真度核心，离线对拍抓到）：
+            旧实现只算 `state` ⇒ 从**空集**起步 ⇒ 模型以为"一步都没走过"，
+            于是 `visible()` 只剩「营地四邻」⇒ 已经走出去的地图完全看不见 ✗✗
+            —— 真机表现就是「每轮都从营地重新起步、走法明显不是最优」。
+            而"哪一格已经空了"**观测里本来就有**（消耗掉的格没有地块美术 ⇒
+            `MapSim.from_observation` 建盘时 board = -1 ✓）
+            ⇒ 必须并进来 ✓
+        """
+        out = {c for c in range(NCELL) if self.board[c] < 0}
         for bi in state:
             out.update(self.cells_of.get(bi, ()))
+        return out
+
+    def block_revealed(self, bi, consumed):
+        """块 bi 在「已消耗格集合 = consumed」下**是否已揭示**（能点）
+
+        ⭐ 2026-09-30 新增。揭示规则（真机 + `mapsim._reveal_neighbours` 同口径）：
+            块已揭示 ⟺ 块内某格与「营地的任一格」或「任一已消耗格的任一格」4 邻接
+          （营地开局自带揭示 ✓）
+        """
+        if bi < 0:
+            return False
+        if self.camp is not None and bi == self.camp:
+            return True
+        camp_cells = self.cells_of.get(self.camp, ()) if self.camp is not None else ()
+        for c in self.cells_of.get(bi, ()):
+            r, cc = c // COLS, c % COLS
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                rr, ccc = r + dr, cc + dc
+                if not (0 <= rr < ROWS and 0 <= ccc < COLS):
+                    continue
+                n = rr * COLS + ccc
+                if n in camp_cells:
+                    return True
+                nb = self.board[n]
+                if nb < 0 or (nb >= 0 and nb in consumed):
+                    return True
+        return False
+
+    def cells_for_plan(self, acts):
+        """把搜索出来的 `[(block_idx, 体力)…]` 翻成**每一步真的能点的格**
+
+        ⭐⭐ 2026-09-30 修（离线对拍抓到的核心 bug）：
+            `Problem.visible()` 会把**一整片连通空地**去重成"片内最小 idx 的代表块"
+            （`REP`）—— 规划语义上是对的（点片里任意一格都连锁消掉整片 ✓），
+            但**代表块本身不一定是"已经揭示"的那一块** ✗
+            ⇒ 真机点它 = `fogged_noop`；而且点不动 ⇒ 这片空地在下一帧里边界不变、
+              揭示集不变 ⇒ **后面整条计划全部错位**（空转 + 漏目标）✗✗
+            实测（`_bench_online.py` 60 张盘）：不修时 30/60 张真的清不完目标。
+            ⇒ 修法：**逐步推演模型状态**，每一步在目标块（片）里挑一个
+              "当下已揭示"的格；片里必有一个已揭示格（否则它进不了 visible ✓）
+
+        返回 [((r, c), block_idx, 体力)…]（1 基行列，与 visible()/rc_of 同坐标系 ✓）
+        """
+        consumed = set(self.consumed_cells(frozenset()))   # ⭐ 含观测里本来就是空的格 ✓
+        out = []
+        for bi, w in acts:
+            b = self.blocks.get(bi)
+            if b is None:
+                continue
+            # ⭐ 空地：候选格 = **整片**的所有格（bi 只是"片内最小 idx 的代表块"，
+            #   它自己很可能还没揭示 ⇒ 必须从整片里挑一个已揭示的格 ✓）
+            if b.plain:
+                cells = []
+                for gb in self.plain_group(bi):
+                    cells.extend(self.cells_of.get(gb, ()))
+            else:
+                cells = list(self.cells_of.get(bi, ()))
+            if not cells:
+                continue
+            pick = None
+            for c in cells:
+                if self.block_revealed(self.board[c], consumed):
+                    pick = c
+                    break
+            if pick is None:                  # 兜底：整片都没揭示（不该发生）
+                pick = cells[0]
+            out.append((rc_of(pick), bi, w))
+            consumed |= (self.plain_group(bi) if b.plain else {bi})
         return out
 
     def visible(self, state):
@@ -186,19 +269,91 @@ class Problem:
         return not (self.targets - set(state))
 
 
+def _build_cache(prob):
+    """⭐ 2026-09-29 深夜优化：把 Problem 编译成**位掩码 + 预计算表**（缓存在 prob 上）
+
+    三个性能杠杆（语义与旧版逐点等价，最优体力值不变）：
+      1. 状态 frozenset → **int 位掩码**（块 ≤35 个）：哈希/比较/并集 O(n)→O(1)
+      2. **A\* 启发** h(state) = Σ 未消耗目标的体力。可采纳且一致：
+         目标全是非空地块（空地连锁不吃内容块）⇒ 每个未消耗目标必须被单独点掉、
+         各花 block_cost(t) ⇒ 真优解花费 ≥ g + h；且点目标这条边 w=cost(t)=h 下降量。
+      3. **空地等价组去重**：同一整片空地的成员块 step 结果相同 ⇒ 只展开代表块
+         （片内最小 idx），分支数不再随片大小膨胀。
+    """
+    blocks = prob.blocks
+    idxs = sorted(blocks)
+    bit = {bi: 1 << k for k, bi in enumerate(idxs)}
+    # 每块的格子位掩码（cell 位）
+    cell_bit = {i: 1 << i for i in range(NCELL)}
+    block_cells_mask = {bi: 0 for bi in idxs}
+    for c, bi in enumerate(prob.board):
+        if bi >= 0:
+            block_cells_mask[bi] |= cell_bit[c]
+    # 块级邻接：NB_MASK[bi] = 与 bi 任一格 4 邻接的其他块位掩码（含雾块 ✓）
+    NB_MASK = {bi: 0 for bi in idxs}
+    for bi in idxs:
+        for c in prob.cells_of.get(bi, ()):
+            r, cc = c // COLS, c % COLS
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                rr, ccc = r + dr, cc + dc
+                if 0 <= rr < ROWS and 0 <= ccc < COLS:
+                    nb = prob.board[rr * COLS + ccc]
+                    if nb >= 0 and nb != bi:
+                        NB_MASK[bi] |= bit[nb]
+    # 整片空地组（按块并集，含穿雾穿草地口径 —— 直接复用旧逻辑预计算一次 ✓）
+    PLAIN_GROUP_MASK = {}
+    for bi in idxs:
+        grp = prob.plain_group(bi)
+        m = 0
+        for x in grp:
+            m |= bit[x]
+        PLAIN_GROUP_MASK[bi] = m
+    # 等价代表：同片空地取最小 idx；非空地 = 自己
+    REP = {}
+    for bi in idxs:
+        if prob.blocks[bi].plain:
+            REP[bi] = min(x for x in (prob.plain_group(bi)))
+        else:
+            REP[bi] = bi
+    cost = {bi: prob.step_cost(frozenset(), bi) for bi in idxs}
+    camp = prob.camp
+    camp_mask = bit[camp] if camp is not None else 0
+    camp_nb = NB_MASK[camp] & ~camp_mask if camp is not None else 0
+    # ⭐⭐ 2026-09-30：「观测里本来就是空的格」（已消耗）⇒ 它的邻居块**现在就已经揭示**。
+    #   全知盘（新生成的盘）没有任何 -1 ⇒ EMPTY_ADJ = 0，行为一字不变 ✓
+    #   观测盘（真机 / 在线推演）则有 -1 ⇒ 模型终于知道"已经走到哪了" ✓
+    EMPTY_ADJ = 0
+    for c, bi in enumerate(prob.board):
+        if bi >= 0:
+            continue
+        r, cc = c // COLS, c % COLS
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            rr, ccc = r + dr, cc + dc
+            if 0 <= rr < ROWS and 0 <= ccc < COLS:
+                nb = prob.board[rr * COLS + ccc]
+                if nb >= 0:
+                    EMPTY_ADJ |= bit[nb]
+    EMPTY_ADJ &= ~camp_mask
+    targets_mask = 0
+    for t in prob.targets:
+        targets_mask |= bit[t]
+    tcost = {bit[t]: cost[t] for t in prob.targets}     # ⭐ 键 = 单 bit（与 h() 一致）
+    return {'bit': bit, 'bits': [bit[bi] for bi in idxs],
+            'NB_MASK': {bit[k]: v for k, v in NB_MASK.items()},   # ⭐ 键 = 单 bit
+            'PLAIN_GROUP_MASK': PLAIN_GROUP_MASK, 'REP': REP,
+            'cost': cost, 'camp_mask': camp_mask, 'camp_nb': camp_nb,
+            'empty_adj': EMPTY_ADJ,
+            'targets_mask': targets_mask, 'tcost': tcost,
+            'idx_of_bit': {v: k for k, v in bit.items()}, 'bit_keyed': True}
+
+
 def solve(prob, max_states=400000, report=None, max_secs=None):
-    """Dijkstra（按体力边权）求**最省体力**地清完所有目标
+    """A\*（按体力边权 + Σ剩余目标体力启发）求**最省体力**地清完所有目标
 
     -> (最小体力, [(block_idx, 体力)…])；无解返回 (None, None)
-
-    report（可选 dict）：把本次搜索的规模信息写进去，便于**量化"状态爆炸"** ✓
-      {'pushed': 入队状态数, 'expanded': 出队展开次数,
-       'max_states': 上限, 'reason': 'ok' / 'max_states' / 'max_secs' / 'exhausted',
-       'cost': 最小体力}
-    max_secs（可选）：**墙钟超时**（秒）—— 2026-09-28 加（用户报「进图要等很久」）：
-      复杂盘 60k 状态枚举可达 30~60s，而 solver 失败后下轮还会重试 ⇒ 进图后
-      几分钟不点格。超时返回 (None, None)（reason='max_secs'）⇒ 调用方
-      fail-open 退回 EffPolicy/启发式 ✓ 每 2048 次展开查一次时钟（摊薄开销 ✓）
+    语义与旧 Dijkstra 完全一致（最优体力值唯一），只是**快一个数量级以上**：
+      2026-09-29 深夜优化：frozenset→int 位掩码 / A\* 启发 / 空地等价组去重（见 _build_cache）
+    report / max_states / max_secs 语义不变（fail-open 口径不变 ✓）
     """
     import time as _time
     if report is None:
@@ -206,42 +361,91 @@ def solve(prob, max_states=400000, report=None, max_secs=None):
     report.update({'pushed': 0, 'expanded': 0, 'max_states': max_states,
                    'reason': 'exhausted', 'cost': None, 'n_targets': len(prob.targets)})
     _t0 = _time.time() if max_secs else None
-    start = frozenset()
-    if prob.done(start):
+    ch = getattr(prob, '_cache', None)
+    if ch is None:
+        ch = _build_cache(prob)
+        prob._cache = ch
+    bit, NB, PGM, REP, cost = ch['bit'], ch['NB_MASK'], ch['PLAIN_GROUP_MASK'], ch['REP'], ch['cost']
+    # NB_MASK 的键统一成「单 bit」：把块键表换成 bit 键
+    if 'bit_keyed' not in ch:
+        ch['NB_MASK'] = {ch['bit'][k]: v for k, v in NB.items()}
+        ch['bit_keyed'] = True
+    NB = ch['NB_MASK']
+    idx_of_bit = ch['idx_of_bit']
+    targets_mask = ch['targets_mask']
+    tcost = ch['tcost']
+    camp_mask = ch['camp_mask']
+    camp_nb = ch['camp_nb']
+    empty_adj = ch.get('empty_adj', 0)
+
+    def visible(m):
+        # ⭐ 起手可见 = 营地四邻 ∪ **观测里已经空掉的格的邻块**（= 已经走出去的地图 ✓）
+        out = camp_nb | empty_adj
+        mm = m
+        while mm:
+            low = mm & -mm
+            out |= NB.get(low, 0)
+            mm ^= low
+        out &= ~m & ~camp_mask
+        ded = 0
+        while out:
+            low = out & -out
+            bi = idx_of_bit[low]
+            ded |= bit[REP[bi]]
+            out ^= low
+        return ded
+
+    def h(m):
+        s = 0
+        t = targets_mask & ~m
+        while t:
+            low = t & -t
+            s += tcost[low] if low in tcost else tcost[idx_of_bit[low]]
+            t ^= low
+        return s
+
+    start = 0
+    if not (targets_mask & ~start):
         report.update({'reason': 'ok', 'cost': 0})
         return 0, []
+    h0 = h(start)
     dist = {start: 0}
-    prev = {start: None}                 # state -> (prev_state, action, cost)
-    pq = [(0, 0, start)]                 # (体力, 计数器, 状态)  —— 计数器防比较 frozenset
+    prev = {start: None}                 # mask -> (prev_mask, block_idx, cost)
+    pq = [(h0, 0, start)]                # (f=g+h, 计数器, mask)
     cnt = 1
     n = 0
     best_goal = None
     while pq:
-        d, _c, st = heapq.heappop(pq)
-        if d > dist.get(st, 1 << 30):
+        f, _c, st = heapq.heappop(pq)
+        g = dist.get(st)
+        if g is not None and f - h(st) > g:      # 过期条目（A* 惰性删除）
             continue
         report['expanded'] += 1
-        if prob.done(st):
+        if not (targets_mask & ~st):
             best_goal = st
             report['reason'] = 'ok'
             break
-        for bi in sorted(prob.visible(st)):
-            ns = prob.step(st, bi)
+        vm = visible(st)
+        while vm:
+            low = vm & -vm
+            vm ^= low
+            bi = idx_of_bit[low]
+            ns = st | PGM[bi]
             if ns == st:
                 continue
-            w = prob.step_cost(st, bi)
-            nd = d + w
-            if nd < dist.get(ns, 1 << 30):
+            w = cost[bi]
+            nd = g + w
+            old = dist.get(ns)
+            if old is None or nd < old:
                 dist[ns] = nd
                 prev[ns] = (st, bi, w)
-                heapq.heappush(pq, (nd, cnt, ns))
+                heapq.heappush(pq, (nd + h(ns), cnt, ns))
                 cnt += 1
                 n += 1
                 report['pushed'] = n
                 if n > max_states:
                     report['reason'] = 'max_states'
                     return None, None
-        # ⭐ 2026-09-28：墙钟超时（每次展开查一次太贵 ⇒ 每 2048 次查 ✓）
         if max_secs and (report['expanded'] & 2047) == 0 \
                 and _time.time() - _t0 > max_secs:
             report['reason'] = 'max_secs'

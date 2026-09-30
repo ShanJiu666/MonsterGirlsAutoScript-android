@@ -75,6 +75,10 @@ def _neighbours(idx):
 # ⚠ 002（海螺）**不是空地** ✗ —— 它是内容格（点它弹面板 ⇒ 战斗 ×2 ✓）
 #   2026-09-27 用户报「非要去点 24 的战斗格子」= 我把 002 当空地 ⇒ 单价 1 点 ⇒ 求解器无所谓 ✗
 PLAIN_SUFFIX = {'000', '001'}
+# ⭐ v1.06：雾格「剪影占比」阈值 —— 与 `spots.FOG_SIL_MIN` **同值**（真机实测：雾下有物体
+#   0.064~0.292 / 平坦 0.014~0.016，4 倍空档 ⇒ 0.04 稳 ✓）。这里**故意复制常量**而不是
+#   import spots（`spots` 会在 import 时读数据表，而 mapsim 要保持"纯逻辑模块"可在无表环境跑 ✓）
+FOG_SIL_MIN = 0.04
 
 # ⭐ 运行时学习（跨图共享 ✓）：点下去**连锁**的 = 空地 ✓；**弹面板**的 = 内容格 ✓
 PLAIN_SEEN = {}     # suffix -> True
@@ -111,6 +115,11 @@ class Block:
         #   True/False = 调用方明确给了结论（explore_loop 走这条 ✓）
         #   None       = 没给（老调用如 mapevolve）⇒ 退回 `mark or is_buy` 老口径 ✓
         self.want = (spot.get('want') if isinstance(spot, dict) and 'want' in spot else None)
+        # ⭐ v1.06：留着原始 spot dict —— `fog_sil`（雾格剪影占比）等字段要用它判定 ✓
+        self.spot = dict(spot) if isinstance(spot, dict) else {'sid': str(spot)}
+        # ⭐ v1.03/v1.05：**雾下剪影**（按格实测，不是一刀切 ✓）
+        self.fog_object = bool(spot.get('fog_object')) if isinstance(spot, dict) else False
+        self.fog_flat = bool(spot.get('fog_flat')) if isinstance(spot, dict) else False
 
     @property
     def plain(self):
@@ -132,6 +141,21 @@ class Block:
         """
         if '营地' in (self.name or ''):
             return False                     # 出生地：不可点 + 阻断连锁 ✓
+        # ⭐⭐⭐ 2026-10-01 v1.03【雾格剪影一票否决】——用户口径「优化识别模型，认出雾格里那块
+        #   不能穿过」：雾格剪影占比 ≥ `spots.FOG_SIL_MIN`(0.04) ⇒ 底下**有东西** ⇒ 不是空地
+        #   （真机同帧实测：有物体 0.064~0.292 / 平坦 0.014~0.016，4 倍空档 ✓）
+        #   ⚠ 只对**雾格**生效（`state()` 只在 ratio<0.78 时打这个标）；揭开后按真实分类建模 ✓
+        if getattr(self, 'fog_object', False):
+            return False          # 雾下有物体 ⇒ 非空地（挡连锁 ✓）
+        # ⭐⭐⭐ v1.06【雾格平坦 ⇒ 当空地】：对**雾格**来说"名字"很不可信（真机这盘整套模板
+        #   中位分只有 0.276，平坦格被猜成「岩石/巨大木桩」✗）⇒ 雾格的 plain 只认剪影实测：
+        #     有物体（fog_object）⇒ 非空地 ｜ 平坦（fog_flat）⇒ 空地
+        #   ⚠ 仅当该格**有剪影值**（= 它是雾格）时接管；揭开后走下面按名字/后缀的老逻辑 ✓
+        if self.spot.get('fog_sil') is not None:
+            return bool(getattr(self, 'fog_flat', False))
+        suf = str(self.sid or '').split('_')[-1]
+        # ⚠ v1.05：og_flat（雾格平坦⇒当空地）**暂不启用** —— 集成路径里剪影值与独立原型
+        #   不一致（疑似 state() 内部对帧做过缩放/几何换算），修好再开 ✓ 先把值记进日志备查 ✓
         suf = str(self.sid or '').split('_')[-1]
         # ⭐ 运行时学到的优先（点过、知道是连锁还是弹面板 ✓）
         if suf in PLAIN_SEEN:
@@ -295,13 +319,25 @@ class MapSim:
                 has_mark = bool(marks)
                 row = {'SpecialSpot': 1 if has_mark else 0, 'SpotSize': 1}
             row = dict(row)
+            grew = head.get('revealed')
+            if grew is None:
+                grew = any(cells[m].get('revealed') for m in members)
+            # ⭐⭐⭐ v1.06 修**多格块丢剪影**（真机 A/B 抓出来的真根因）：
+            #   块的代表格（anchor）**常常是平坦的那一格**，而成员的剪影各不相同 ——
+            #   真机铁血高地实证：`(5,3)` 属于 6 格块 anchor=(3,2)，anchor 剪影 0.016（平坦）
+            #   但 `(5,3)` 自己 0.271（下面是大木桩！）⇒ 旧代码只读 anchor ⇒
+            #   整块被当成空地 ⇒ **连锁穿过大木桩** ✗✗（= 用户最初报的那个现象）
+            #   ⇒ 取**成员里剪影最大的那个**（只要有任一成员看出有东西，整块就非空地 ✓）
+            _sils = [float(cells[m].get('fog_sil')) for m in members
+                     if cells[m].get('fog_sil') is not None]
+            if _sils:
+                row['fog_sil'] = max(_sils)
+                row['fog_object'] = bool(row['fog_sil'] >= FOG_SIL_MIN)
+                row['fog_flat'] = not row['fog_object']
             row['sid'] = sid
             row['name'] = head.get('name') or sid
             if 'target' in head:                       # ⭐ 目标白名单（targets_cfg）✓
                 row['want'] = bool(head.get('target'))
-            grew = head.get('revealed')
-            if grew is None:
-                grew = any(cells[m].get('revealed') for m in members)
             b = Block(len(blocks), row, revealed=bool(grew),
                       mark=(marks[0] if marks else None))
             b.cells = [cell_of(*m) for m in members

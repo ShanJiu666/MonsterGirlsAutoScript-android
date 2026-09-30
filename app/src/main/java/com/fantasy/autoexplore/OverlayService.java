@@ -42,9 +42,12 @@ import java.util.concurrent.TimeUnit;
  * ```
  *
  *   ●/▶/!/⛔ 状态灯：灰=空闲 / ▶绿=运行中 / !红=出错过 / ⛔红=红装锁
- *   MGAS  点它 = 展开/收起（也是**拖动手柄**）；长按 = 强制显示/隐藏日志行
+ *   MGAS  点它 = 展开/收起（也是**拖动手柄**）；长按 = 强制显示/隐藏**日志行**（只动日志行！）
+ *         ⚠ 长按三态：自动 → 强制显示 → 强制隐藏 → 自动。它**绝不**影响 张数/▶ 的可见性
+ *           （2026-09-30 修：旧版把 ▶ 挂在这个开关上 ⇒ 拖动时手一抖误触长按 ⇒ 启动按钮消失）
  *   1图   点它切换「本次跑几张」：**1图 ⇄ 连刷**（连刷 = 一直刷到体力耗尽）
  *   ▶     开始（**点一下就走**，无二次确认/倒计时 —— 用户明确要求"点一下就开始"）
+ *         可见性 = 「展开 且 没在跑」⇒ 空闲时永远找得到它，跑起来才收掉（不能重复启动）
  *   ■     停止（停在两张图之间，打完手上这张才收工 ✓ 不会留半张）
  *   日志行 显示**当前的行动**（由原始日志翻译成一句人话），**平滑跑马灯**向左飘；
  *          点一下 = 往回翻一条（显示 `↺n` + 原始日志）；长按 = 回到最新
@@ -522,9 +525,13 @@ public class OverlayService extends Service {
     private void buildView() {
         choiceIdx = Math.max(0, Math.min(MAP_LABELS.length - 1, Prefs.mapsChoice(this)));
         // ⚠ 先把屏幕尺寸喂给 RefMapper：`afterLayout` 要用它算"涂平矩形"（FrameStore 依赖），
-        //   而第一次截图（toRef 会顺带设）可能还没发生 ⇒ 不设就按 1080×1920 算，非该分辨率会错
-        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        RefMapper.setScreen(dm.widthPixels, dm.heightPixels);
+        //   而第一次截图（toRef 会顺带设）可能还没发生 ⇒ 不设就按 1080×1920 算，非该分辨率会错。
+        // ⭐⭐ 2026-09-30 修：这里**必须**用真实屏幕（含系统导航栏），不能用 `dm.heightPixels`
+        //   —— 真机 1280×2772 上后者是 2588（少 184px），而截图帧是 2772 ⇒ 两条口径混用，
+        //   涂平矩形会整体偏 184px（偏进棋盘里！详见 afterLayout 的长注释）。
+        //   RefMapper 的 devY/devX/toRef 本来就是为"截图帧坐标系"服务的 ⇒ 传真实尺寸才是自洽的。
+        int[] rs = realScreen();
+        RefMapper.setScreen(rs[0], rs[1]);
 
         // ── ① **两行**：上行 = 日志（整行、上下滚动），下行 = 按钮 ──
         //    用户口径 2026-09-29：「悬浮窗要在按钮上面。滚动方式是整行上下滚动，不是现在的左右」
@@ -678,6 +685,20 @@ public class OverlayService extends Service {
         if (bar == null || lp == null || bar.getWidth() <= 0 || bar.getHeight() <= 0) {
             return;
         }
+        // ⭐⭐ 2026-09-30 修：这里的屏幕高**必须**是「真实屏幕」（含系统导航栏，= 截图帧高）。
+        //   以前直接吃 RefMapper.screenH()，可它在真机上是个**会跳的值**：
+        //     · buildView() 喂的是 `dm.heightPixels` = **2588**（1280×2772 的机器少了底部导航栏 184px）
+        //     · 而 RefMapper.toRef()/toDlgRef() 每次截图又会用帧尺寸把它改成 **2772**
+        //   ⇒ 同一个 screenH 在 2588/2772 之间跳，涂平矩形跟着跳 184px（实测铁证：
+        //     mask_check 报矩形 y 2353~2468，而条子真身在屏幕 y 2537~2652）。
+        //   后果有两个，都很难查：
+        //     ① 涂平**没盖住**悬浮条（机器人照样 OCR 到条子上的字，含 `关闭/探索/开始冒险`
+        //        这类关键词 ⇒ 可能被当成游戏面板）—— 「让机器人对自己瞎」其实是失效的；
+        //     ② 涂错的地方是**棋盘**！错位矩形 参考 y 1566~1663 正落在棋盘 1002~1722 内
+        //        ⇒ 那一行格子被抹成纯色：识别错 + 点不动（硬约束①说的就是这个事故）。
+        //   ⇒ 改成用 getMaximumWindowMetrics()（与 CaptureService.realScreenSize / adb screencap 同口径）。
+        int[] rs = realScreen();
+        RefMapper.setScreen(rs[0], rs[1]);   // 顺手把 RefMapper 也校准到同一口径（幂等，只在变化时打日志）
         int sw = RefMapper.screenW(), sh = RefMapper.screenH();
         barMaxH = Math.max(barMaxH, bar.getHeight());
         barMaxW = Math.max(barMaxW, bar.getWidth());
@@ -703,8 +724,27 @@ public class OverlayService extends Service {
         }
         int l = Math.max(0, lp.x);
         int r = Math.min(sw, lp.x + bar.getWidth());
+        // ⚠ Gravity.BOTTOM ⇒ lp.y 是「离**真实屏幕**底边的距离」（真机实测 2772−120=2652 = 条子底边）
         int b = Math.min(sh, sh - lp.y);
         int t = Math.max(0, b - bar.getHeight());
+        // ⭐ 再加一道**实测复核**（2026-09-30）：窗口坐标万一和"我算的"不一致（改 gravity / 加 flag /
+        //   系统改导航栏策略都可能），涂平就会静默偏 —— 而它偏的后果是「抹掉棋盘一行格子」，
+        //   用户只会看到"怎么点不动"，根本查不到这儿。所以直接问 View 要绝对屏幕坐标，差 >4px 就以实测为准。
+        int[] loc = new int[2];
+        boolean measured = false;
+        try {
+            bar.getLocationOnScreen(loc);
+            measured = (loc[1] > -bar.getHeight() && loc[1] < sh + bar.getHeight());
+        } catch (Throwable ignored) {
+        }
+        if (measured && Math.abs(loc[1] + bar.getHeight() - b) > 4) {
+            AppLog.i("[ovl] ⚠ 涂平矩形与实测不符：按 lp 算得底边 " + b
+                    + "，View 实测底边 " + (loc[1] + bar.getHeight()) + " ⇒ 以实测为准");
+            l = Math.max(0, loc[0]);
+            r = Math.min(sw, loc[0] + bar.getWidth());
+            b = Math.min(sh, loc[1] + bar.getHeight());
+            t = Math.max(0, loc[1]);
+        }
         BLANK_RECT = (r > l && b > t) ? new int[]{l, t, r, b} : null;
 
         float topRef = RefMapper.refY(t);
@@ -717,11 +757,43 @@ public class OverlayService extends Service {
                 + "~" + Math.round(bottomRef) + " 展开=" + expanded
                 + " 日志=" + logMode + " 涂平=" + (BLANK_RECT == null ? "无" : "有")
                 + " 设备屏 " + sw + "x" + sh);
-        if (topRef < BOARD_Y1_REF) {
+        // ⚠ 阈值留 10px 容差：实测条子两行 = 115 设备px = 97 参考px，而预算只有 94
+        //   ⇒ 顶边落在 参考 1719，比棋盘下沿 1722 **高 3px**（真机跑满 10 张图实测无影响：
+        //   那 3px 是最后一行的描边，格子中心/模板都不在那儿）。以前这里每展开一次就刷一条
+        //   「会盖住最低一行格子」的红色警告 ⇒ 真出事时反而没人当回事（狼来了）。
+        //   ⇒ 只有**真的**越过 10px（说明预算被改坏了）才报。
+        if (topRef < BOARD_Y1_REF - 10) {
             AppLog.i("⚠⚠ 悬浮条顶边 参考 y=" + Math.round(topRef) + " 越过了棋盘下沿 "
-                    + BOARD_Y1_REF + " ⇒ 会盖住最低一行格子（识别错 + 那几格点不动）！"
+                    + BOARD_Y1_REF + " 足 " + Math.round(BOARD_Y1_REF - topRef)
+                    + "px ⇒ 会盖住最低一行格子（识别错 + 那几格点不动）！"
                     + " 请调小 LOG_ROW_H_REF / CHIP_TEXT_REF（高度预算见类注释硬约束①）");
         }
+    }
+
+    /**
+     * 真实屏幕像素（含状态栏/导航栏，与「截图帧」「adb screencap」同一口径）。
+     * ⚠⚠ **不要**改用 `getResources().getDisplayMetrics()` —— 那个不含系统导航栏
+     * （真机 1280×2772 上给的是 2588，差 184px），而 MediaProjection 的帧、`dispatchGesture`
+     * 的坐标、RefMapper 的映射全都在"真实屏幕"坐标系里 ⇒ 混用必错 184px。
+     * 抄的是 {@link CaptureService#realScreenSize}（Screenshots 那条链已经验证过口径对）。
+     */
+    private int[] realScreen() {
+        try {
+            WindowManager w = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Rect r = w.getMaximumWindowMetrics().getBounds();
+                if (r.width() > 0 && r.height() > 0) {
+                    return new int[]{r.width(), r.height()};
+                }
+            }
+            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+            w.getDefaultDisplay().getRealMetrics(dm);
+            if (dm.widthPixels > 0 && dm.heightPixels > 0) {
+                return new int[]{dm.widthPixels, dm.heightPixels};
+            }
+        } catch (Throwable ignored) {
+        }
+        return new int[]{RefMapper.screenW(), RefMapper.screenH()};   // 兜底：别返回 0
     }
 
     /** 运行中？（用状态灯那一套判据，别另起一套） */
@@ -734,18 +806,29 @@ public class OverlayService extends Service {
         if (bar == null) {
             return;
         }
-        boolean wantLog = (logForce != null) ? logForce : isRunningState();
-        logMode = wantLog;
+        // ⭐⭐ 2026-09-30 修（用户原话「悬浮窗的启动按钮呢？？」）：
+        //   张数/▶ **只能**看「展开 + 没在跑」，绝不能再挂在 logForce 上！
+        //   旧写法 `(expanded && !wantLog)` 的后果：长按气泡切日志时顺手把 ▶ 和 张数 藏掉，
+        //   而长按在真机上**极容易在拖动时误触**（拖动起步窗口 500ms/6dp，手一抖就是长按）
+        //   ⇒ 用户看到的就是「启动按钮不见了」，而条子上只剩 ■ ✕，完全无从下手。
+        //   实测复现：长按一次后 logcat 打「强制隐藏」，条子从 `● MGAS|■|✕` 变回
+        //   `● MGAS|连刷|▶|■|✕`（即在此之前 ▶ 是被 logForce 藏掉的）。
+        //   ⇒ 按钮可见性 = 运行状态；`logForce` 只管**日志行自己**露不露脸（见下）。
+        // ⚠ 判据必须是 isRunningState() 而不是「wantLog」：跑起来才把 ▶ 收掉（跑着也不能重复启动）。
+        // ⚠ 「准备启动」提醒挂起时（hintUntilStart）**强制**露日志行 —— 那句提醒就是「点 ▶ 启动」，
+        //   要是被收起态/强制隐藏吃掉，用户就找不到下一步了。
+        boolean showLog = hintUntilStart || ((logForce != null) ? logForce : expanded);
+        logMode = showLog;
         int vis = expanded ? View.VISIBLE : View.GONE;
-        // 上行：日志行只在展开时露脸（收起态只留气泡，条子最矮）
-        tvLog.setVisibility(expanded ? View.VISIBLE : View.GONE);
-        // 下行：张数/▶ 只在"空闲且展开"时露脸；跑起来就把位置让给日志
-        int busyVis = (expanded && !wantLog) ? View.VISIBLE : View.GONE;
-        btnCount.setVisibility(busyVis);
-        btnStart.setVisibility(busyVis);
+        // 上行：日志行（展开时默认露脸；收起态只留气泡，条子最矮）
+        tvLog.setVisibility(showLog ? View.VISIBLE : View.GONE);
+        // 下行：张数/▶ 空闲就有；跑起来让位给 ■/✕
+        int startVis = (expanded && !isRunningState()) ? View.VISIBLE : View.GONE;
+        btnCount.setVisibility(startVis);
+        btnStart.setVisibility(startVis);
         btnStop.setVisibility(vis);
         btnClose.setVisibility(vis);
-        if (!wantLog && expanded) {
+        if (!showLog && expanded) {
             tvLog.showActionOnly();
         }
         bar.post(this::afterLayout);
@@ -771,28 +854,32 @@ public class OverlayService extends Service {
 
     // ───────────────────────── 日志行 ─────────────────────────
 
-    /** AppLog 每来一条就走这里（**已回到主线程**，见 onCreate 的 listener） */
+    /** AppLog 每来一条就走这里（**已回到主线程**，见 onCreate 的 listener）。
+     *
+     *  ⭐ 2026-09-30：**只收 Python 明确标了 `› ` 的「当前行动」**，其余（开发日志）直接丢
+     *  —— 它们留在界面控制台与 logcat 里给开发看，不占悬浮条那一行（见上面 UI_MARK 段）。
+     */
     private void onLog(String line) {
         if (line == null) {
             return;
         }
         String s = sanitize(line);
-        if (s.isEmpty()) {
+        if (!s.startsWith(UI_MARK)) {
+            return;                     // 开发日志 ⇒ 不进悬浮条（不碰 action / logBuf）
+        }
+        String act = s.substring(UI_MARK.length()).trim();
+        if (act.isEmpty()) {
             return;
         }
-        logBuf.addLast(s);
+        logBuf.addLast(act);            // 历史只留"行动"，往回翻才不会被噪声淹没
         while (logBuf.size() > LOG_KEEP) {
             logBuf.removeFirst();
         }
         if (logBack > logBuf.size()) {
             logBack = logBuf.size();
         }
-        // ⭐ "当前的行动" = 从这条日志翻译出来的一句人话；翻译不出来（噪声/大 JSON）就沿用上一条
-        String act = describeAction(line);
-        if (act != null && logBack == 0) {
-            action = act;
-        }
         if (logBack == 0) {
+            action = act;
             applyLogText();
         }
     }
@@ -817,213 +904,23 @@ public class OverlayService extends Service {
         return s.trim();
     }
 
-    // ── 「当前的行动」翻译层 ──────────────────────────────────────
-    // 用户要求："最好文字播放的是当前的行动"。循环的原始日志有两大类：
-    //   · 人话行：`== 第 1 张图 ==   进图前体力 1377`、`board：35 格真识别（…）`、`本图结束：done（耗时 62 秒）`
-    //   · 机器行：`{'enter': 'in_map', 'stamina': 1353}`、`{'solver': 'ok', 'cost': 9, ...}`
-    // 直接播原始行既难看（多行会被 logcat/文本流拆开）又占宽度，所以翻成短句。
-    // 翻不出来（自己的噪声行、超大 JSON、闲话）就返回 null，日志行沿用上一条行动。
-
-    /** 浮条/调试自己打的噪声行：不进"当前行动" */
-    private static boolean isNoise(String s) {
-        return s.startsWith("[ovl]") || s.startsWith("[overlay_") || s.startsWith("收到广播命令")
-                || s.startsWith("[py") || s.startsWith("[summary]") || s.startsWith("[selftest]")
-                || s.startsWith("[classify]") || s.startsWith("[red_") || s.startsWith("[explore_")
-                || s.startsWith("悬浮条") || s.startsWith("✓ 悬浮条") || s.startsWith("悬浮控制条");
-    }
-
-    /** 一行里撞上几个 OCR 关键词（≥3 ⇒ 是整屏 OCR 词表 dump，不是行动） */
-    private static int ocrKeywordHits(String s) {
-        int n = 0;
-        for (String k : OCR_KEYWORDS) {
-            if (s.contains(k)) {
-                n++;
-            }
-        }
-        return n;
-    }
-
-    /** 取出 `key` 后面紧跟的值（到 `,`/`}`/`)` 为止）；取不到返回 null */
-    private static String val(String s, String key) {
-        int i = s.indexOf(key);
-        if (i < 0) {
-            return null;
-        }
-        i += key.length();
-        // ⚠ 必须跳过 `: ` 分隔符 —— 漏了这步会把 `'win': True` 取成 `": True"`，
-        //   于是 `"True".equalsIgnoreCase(": True")` 为假 ⇒ **胜负判反**（2026-09-29 实测踩到）
-        while (i < s.length() && (s.charAt(i) == ':' || s.charAt(i) == ' ')) {
-            i++;
-        }
-        int j = i;
-        while (j < s.length() && s.charAt(j) != ',' && s.charAt(j) != '}' && s.charAt(j) != ')') {
-            j++;
-        }
-        String v = s.substring(i, j).trim();
-        if (v.length() > 1 && (v.charAt(0) == '\'' || v.charAt(0) == '"')) {
-            v = v.substring(1);
-            if (v.endsWith("'") || v.endsWith("\"")) {
-                v = v.substring(0, v.length() - 1);
-            }
-        }
-        return v.isEmpty() ? null : v;
-    }
-
-    /** `numBefore` 的限定版：只从 `fromKey` 之后开始找 */
-    private static String numBeforeAfter(String s, String fromKey, String unit) {
-        int k = s.indexOf(fromKey);
-        if (k < 0) {
-            return null;
-        }
-        return numBefore(s.substring(k + fromKey.length()), unit);
-    }
-
-    /** 取出 `unit` 前面那串数字（形如 `耗时 62 秒` → `62`）；取不到返回 null */
-    private static String numBefore(String s, String unit) {
-        int i = s.indexOf(unit);
-        while (i >= 0) {
-            int a = i;
-            while (a > 0 && (Character.isDigit(s.charAt(a - 1)) || s.charAt(a - 1) == ' ')) {
-                a--;
-            }
-            String n = s.substring(a, i).trim();
-            if (!n.isEmpty()) {
-                return n;
-            }
-            i = s.indexOf(unit, i + unit.length());
-        }
-        return null;
-    }
-
-    /** 把一条原始日志翻成"当前行动"；返回 null = 这条不值得当行动播报 */
-    private static String describeAction(String raw) {
-        if (raw == null || raw.isEmpty()) {
-            return null;
-        }
-        String s = raw.trim();
-        if (isNoise(s)) {
-            return null;
-        }
-        // ⭐ 「整屏 OCR 词表 dump 行」不是行动：循环把识别到的所有面板文字打进日志
-        //   （`关闭 探索 开始冒险 进入地图 一键派遣 探索配队 探索产出 派遣 领取`），
-        //   里面必然含「派遣 / 探索 / 关闭」⇒ 会被下面的规则误判成"紫金地块 ⇒ 派遣"（2026-09-29 实测踩到）。
-        //   判据：一行里撞上 ≥3 个 OCR 关键词 ⇒ 是面板词表。真实行动行最多撞 2 个
-        //   （`发现 N 块紫/橙探索地块 … ⇒ 去探索+派遣` = 探索/派遣）。
-        if (ocrKeywordHits(s) >= 3) {
-            return null;
-        }
-        // ── 危险/收尾类（最高优先级，必须看得见）──
-        if (s.contains("red_equip") || s.contains("红装")) {
-            return "⛔ 发现红装 ⇒ 已停下（去界面点「红装解锁」再开跑）";
-        }
-        if (s.contains("体力不够") || s.contains("体力不足") || s.contains("不够进图")) {
-            return "体力不够进图 ⇒ 收工";
-        }
-        if (s.contains("全部结束")) {
-            String secs = numBeforeAfter(s, "全部结束", "秒");
-            return "全部结束" + (secs == null ? "" : "（共 " + secs + " 秒）");
-        }
-        if (s.contains("补给")) {
-            return "没体力 ⇒ 用「结实补给」";
-        }
-        if (s.contains("一键升级") || s.contains("升星")) {
-            return "背包：装备一键升星";
-        }
-        // ── 紫/橙探索地块（俗称"紫金地块"）──
-        // ⚠ 不能用 `s.contains("派遣")` 兜：整屏 OCR 词表里就有「派遣/一键派遣」⇒ 已在上面的
-        //   `ocrKeywordHits>=3` 里拦掉；这里再要求**完整的真日志文案**（见 explore_loop.py）
-        if (s.contains("紫/橙探索地块") || s.contains("紫橙探索地块")) {
-            return s.contains("槽已满")
-                    ? "紫/橙探索地块 ⇒ 探索槽已满，改战斗"
-                    : "紫/橙探索地块 ⇒ 去探索 + 派遣";
-        }
-        if (s.contains("已派遣")) {
-            return "已派遣一支探索队 ✓";
-        }
-        if (s.contains("探索槽已满") || s.contains("三槽全满")) {
-            return "探索槽已满 ⇒ 不派遣，关掉面板";
-        }
-        // ── 流程类 ──
-        int k = s.indexOf("第");
-        if (k >= 0 && s.contains("张图")) {
-            int e = s.indexOf("张图");
-            String n = s.substring(k + 1, e).trim();
-            String st = val(s, "进图前体力");
-            if (st == null) {
-                st = val(s, "体力");
-            }
-            return "第 " + n + " 张图 · 准备进图" + (st == null ? "" : "（体力 " + st + "）");
-        }
-        String enter = val(s, "'enter'");
-        if ("in_map".equals(enter)) {
-            String st = val(s, "'stamina'");
-            return "已进图" + (st == null ? "" : "（体力 " + st + "）") + " · 正在读棋盘";
-        }
-        if ("clicked".equals(enter)) {
-            return "点「进入地图」中…";
-        }
-        if (s.contains("fog_wait")) {
-            return "等暗罩/雾退去…";
-        }
-        if (s.contains("'shot'") || s.contains("shot")) {
-            String f = val(s, "'file'");
-            return "已存棋盘截图" + (f == null ? "" : " " + f);
-        }
-        String solver = val(s, "'solver'");
-        if ("ok".equals(solver)) {
-            String cost = val(s, "'cost'");
-            String steps = val(s, "'steps'");
-            String tg = val(s, "'targets'");
-            return "规划完成：cost " + cost + " / " + steps + " 步 / 目标 " + tg;
-        }
-        if (solver != null) {
-            return "规划 " + solver + " ⇒ 换策略重算";
-        }
-        if (s.contains("'round'")) {
-            // ⚠ `round` 是**0 基**的，直接播 "第 0 轮" 会让人以为出错了 ⇒ 只播体力
-            String st = val(s, "'stamina'");
-            return "读棋盘" + (st == null ? "…" : "（体力 " + st + "）");
-        }
-        if (s.contains("'battle'")) {
-            String win = val(s, "'win'");
-            if (s.contains("started")) {
-                return "战斗中…";
-            }
-            if (win != null) {
-                return "战斗结束：" + ("True".equalsIgnoreCase(win) ? "胜" : "负");
-            }
-            return "战斗结束";
-        }
-        if (s.contains("board：") || s.contains("格真识别")) {
-            // 形如 `board：35 格真识别（草地/营地/…）` —— 数字和「格」之间可能有空格 ✓
-            int b = s.indexOf("格真识别");
-            if (b > 0) {
-                int a = b;
-                while (a > 0 && (Character.isDigit(s.charAt(a - 1)) || s.charAt(a - 1) == ' ')) {
-                    a--;
-                }
-                String n = s.substring(a, b).trim();
-                return "识别棋盘：" + (n.isEmpty() ? "?" : n) + " 格";
-            }
-            return "识别棋盘…";
-        }
-        if (s.contains("本图结束")) {
-            String secs = numBefore(s, "秒");
-            return "本图结束：" + (s.contains("done") ? "完成" : "结束")
-                    + (secs == null ? "" : "（" + secs + " 秒）");
-        }
-        if (s.contains("'pre'") && s.contains("menu")) {
-            return "在大厅/菜单 · 准备进图";
-        }
-        if (s.contains("Android 探索启动")) {
-            return s.replace("▶ ", "");
-        }
-        // ── 兜底：短的人话行照播，长 JSON / 看不懂的不播 ──
-        if (s.length() <= 46 && s.indexOf('{') < 0) {
-            return s;
-        }
-        return null;
-    }
+    // ── 「当前的行动」（悬浮条日志行）──────────────────────────────
+    // ⭐⭐ 2026-09-30（用户口径）：悬浮条上的日志是**给用户看的** ——
+    //   「用户只需要知道现在在干什么」，不需要看「识别了 N 条 / 用时 xx ms / band 区间 /
+    //   x0 y0 格距 / cost 步数」这些。
+    //
+    //   旧实现是「从原始日志流里**猜**哪条是行动」：`describeAction()` 一堆正则 + 最后一条
+    //   `if (len <= 46 && 无 '{') 照播` 兜底 ⇒ 任何短技术行都漏上悬浮条
+    //   （`识别棋盘：35 格`、`分类兜底：低门槛重试拿到 30 格`、`自动跳过已勾选` …），
+    //   2026-09-29 为它打的 band-aid 就有好几处，属于典型的"在错的层上修"。
+    //
+    //   现在换成**显式契约**（一处定义、两端生效、零猜测）：
+    //     · Python `explore_loop.status()` 打印 `› <一句人话>`  ⇒ **只有它**进悬浮条；
+    //     · 其余所有 print()/say()（开发日志）⇒ 只进界面控制台与 logcat。
+    //
+    //   ⚠ 想加/改悬浮条文案 ⇒ **改 Python 的 status() 调用**，不要回来在这里加正则。
+    /** Python 侧「当前行动」的传输标记（见 explore_loop.UI_MARK）。只用于识别，不画到屏幕上。 */
+    private static final String UI_MARK = "\u203a";      // ›
 
     /** 点日志行：0（跟随最新）→ 1（上一条）→ … → 最老 → 回到 0 */
     private void cycleLogBack() {
@@ -1105,8 +1002,15 @@ public class OverlayService extends Service {
         final int maps = (choiceIdx == 1) ? MAPS_CONTINUOUS : 1;
         final int bagEvery = Prefs.bagEvery(this);
         final boolean autoSupply = Prefs.autoSupply(this);
+        // ⭐⭐ 2026-10-01 修（用户报「体力不够 50 怎么还去点进入地图」）：
+        //   **进图体力下限原来写死 25** ⇒ 连刷模式下也是 25 ⇒ 29 体力照样进图 ✗
+        //   （真机实证：`进图前体力 29` → 进图扣 25；而日志还写着「连刷下限」✗）
+        //   PC 侧 GUI 的规矩是：**连刷 <50 就停、跑单张 <25 才拦**（README/交接文档一致 ✓）
+        //   ⇒ 这里按同一个规矩算，并打进启动日志（以后一眼能看到门限 ✓）
+        final int minStamina = (maps == MAPS_CONTINUOUS) ? 50 : 25;
         AppLog.i("▶ 启动探索：" + MAP_LABELS[choiceIdx]
-                + "（maps=" + maps + "，进图 " + STAMINA_PER_MAP + " 体力/张）"
+                + "（maps=" + maps + "，进图 " + STAMINA_PER_MAP + " 体力/张，"
+                + "体力下限 " + minStamina + "）"
                 + "  自动补给=" + autoSupply + "  升星=每 " + bagEvery + " 张");
         new Thread(() -> {
             // ⭐ v0.26（用户口径）：**悬浮条 ▶ 不再自动切游戏前台**。
@@ -1117,7 +1021,7 @@ public class OverlayService extends Service {
             // ⚠ 参数顺序必须与 explore_android.start 的形参一致（**10 个位置参数**）：
             //   maps, max_round, deadline, min_stamina, tag, opt_solver,
             //   bag_every, save_first, stop_at_5am, auto_supply
-            String r = PyBridge.call("start", maps, 45, 900, 25, "", true,
+            String r = PyBridge.call("start", maps, 45, 900, minStamina, "", true,
                     bagEvery, true, false, autoSupply);
             AppLog.i("▶ " + r);
         }, "ovl-start").start();
@@ -1274,6 +1178,22 @@ public class OverlayService extends Service {
         int[] r = BLANK_RECT;
         sb.append("blankRect(dev): ").append(r == null ? "无（悬浮条没显示）"
                 : ("[" + r[0] + "," + r[1] + "][" + r[2] + "," + r[3] + "]")).append('\n');
+        // ⭐ 2026-09-30 加：条子在屏幕上的**真实**位置（绝对坐标）。有它就能一眼看出
+        //   blankRect 有没有对上（对不上 = 涂平跑偏 ⇒ 既没盖住自己、又抹了棋盘）
+        if (bar != null && bar.getHeight() > 0) {
+            int[] loc = new int[2];
+            boolean ok = false;
+            try {
+                bar.getLocationOnScreen(loc);
+                ok = true;
+            } catch (Throwable ignored) {
+            }
+            sb.append("barOnScreen: ").append(ok
+                    ? ("x " + loc[0] + "~" + (loc[0] + bar.getWidth())
+                       + "  y " + loc[1] + "~" + (loc[1] + bar.getHeight()))
+                    : "取不到（getLocationOnScreen 抛了）").append('\n');
+        }
+        sb.append("涂平记账: ").append(FrameStore.lastMaskInfo()).append('\n');
         if (tvLog != null) {
             sb.append("logW(dev): ").append(tvLog.getWidth()).append('\n');
             sb.append("logShown: ").append(tvLog.shownText()).append('\n');
@@ -1283,13 +1203,9 @@ public class OverlayService extends Service {
         sb.append("logBack: ").append(logBack).append("  buf=").append(logBuf.size()).append('\n');
         List<String> tail = new ArrayList<>(logBuf);
         int from = Math.max(0, tail.size() - 12);
-        sb.append("--- 最近 ").append(tail.size() - from)
-                .append(" 条（原始 → 当前行动翻译）---\n");
+        sb.append("--- 最近 ").append(tail.size() - from).append(" 条「当前行动」---\n");
         for (int i = from; i < tail.size(); i++) {
-            String raw = tail.get(i);
-            String act = describeAction(raw);
-            sb.append("  ").append(raw).append('\n');
-            sb.append("    → ").append(act == null ? "（不播报，沿用上一条）" : act).append('\n');
+            sb.append("  ").append(tail.get(i)).append('\n');
         }
         return sb.toString();
     }

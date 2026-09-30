@@ -48,6 +48,35 @@ PSEUDO_MARK = '★标记格'
 PSEUDO_EXPLORE = '★紫橙探索格'
 DEFAULT_ON = (PSEUDO_MARK, '旅行商人', '黄金宝库', PSEUDO_EXPLORE)
 
+# ⭐⭐⭐ 2026-10-01 用户口径（**最终版**）：
+#   「这个功能之后要做成**勾选就主动去处理，不勾选就拉黑**，能自由选择」
+#   ⇒ 不再用硬编码黑名单 ✗，而是**由勾选配置推导**：
+#        · 地块名在 `types` 里 **勾了(True)**  ⇒ 主动去处理它（进目标 ✓）
+#        · 地块名在 `types` 里 **没勾(False/缺)** ⇒ **拉黑**：不进目标、
+#          也不作为"内容格"排进点序（免得为了连通去点它、白弹一次面板 ✗）
+#   · `SPECIAL_NAMES` = 会被 `catalog()` 列进「商店 / 大奖励」组的那些名字
+#     （商人/宝库/宝箱怪/勇者之墓/祭坛/礼包/石碑…）⇒ 只有**这一组**享受
+#     "不勾 = 拉黑"语义；普通拾取格/建筑不勾只是"不去拿"，仍可当路 ✓
+SPECIAL_NAMES = {
+    '旅行商人', '黄金宝库', '金属宝箱怪', '机巧宝箱怪', '献祭宝箱怪',
+    '勇者之墓', '传承祭坛', '限时礼包', '预言石碑', '预言石板',
+}
+
+
+def is_blocked(name, cfg=None):
+    """这个名字是不是**拉黑**地块 ⇒ 用户口径：**弹窗类特殊地块，没勾选就拉黑** ✓
+
+    ⚠ 只有 `SPECIAL_NAMES`（商店/大奖励那一组）适用；别的名字不勾 = 不去拿，但不当路障 ✓
+    ⚠ 勾上了 ⇒ 立即变成"主动处理"，无需改代码 ✓（用户要求"能自由选择" ✓）
+    """
+    n = str(name or '')
+    if not n:
+        return False
+    for k in SPECIAL_NAMES:
+        if k in n:
+            return not enabled(k, cfg)      # 没勾 ⇒ 拉黑 ✓ ／ 勾了 ⇒ 主动处理 ✓
+    return False
+
 # 算作「标记格」的标记名（与 marks.py 的口径一致；battle = 认不出但带标记的兜底 ✓）
 MARK_KEYS = ('boss', 'redEquip', 'recommend', 'clover', 'battle')
 
@@ -128,8 +157,14 @@ def is_explore_tile(sid):
 
 
 def is_target(name, sid, marks=None, cfg=None):
-    """⭐ 该格是不是「当前配置下要拿的目标」"""
+    """⭐ 该格是不是「当前配置下要拿的目标」
+
+    ⚠ 2026-10-01：**拉黑地块一律不是目标**（哪怕它在配置里被勾上了 ✓ ——
+    用户口径「把有弹窗的地块拉黑，暂时不要点」，黑名单优先级最高 ✓）
+    """
     d = cfg or current()
+    if is_blocked(name):
+        return False
     if marks:
         for m in marks:
             if m in MARK_KEYS and enabled(PSEUDO_MARK, d):

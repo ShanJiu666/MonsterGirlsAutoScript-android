@@ -116,6 +116,64 @@ public class CaptureService extends Service {
                 reader.getSurface(), null, handler);
         Log.i(TAG, "开始截图 " + w + "x" + h + " dpi=" + dpi);
         AppLog.i("截图通道已启动：" + w + "x" + h + "（dpi " + dpi + "）");
+        staleRescues = 0;
+        handler.postDelayed(watchdog, WATCHDOG_MS);
+    }
+
+    // ⭐ 2026-09-30 截图流看门狗：MediaProjection 偶发断流（ImageReader 不再出帧，
+    //   FrameStore 冻结在旧帧 ⇒ 机器人变"瞎子"：OCR 全空、点击打在真实画面的无关位置、
+    //   wait_change 永远等不到变化 —— 模拟器 00:2x 连续两场 boss 后退图失败即此：
+    //   画面正常、无障碍正常、唯独机器人看不见，90 秒退图超时）。
+    //   ⇒ 每 4s 查 FrameStore 帧龄：>8s 先重建 ImageReader 并 setSurface 重挂
+    //     （复用同一 projection，无需重新授权，setSurface 必触发一帧新画面）；
+    //     连 3 次都救不活才明确报错让人处理。静止画面误报由"重挂必出新帧"天然排除。
+    private static final long WATCHDOG_MS = 4000;
+    private static final long STALE_MS = 8000;
+    private int staleRescues = 0;
+
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                long age = System.currentTimeMillis() - FrameStore.stamp();
+                if (FrameStore.has() && age > STALE_MS) {
+                    staleRescues++;
+                    if (staleRescues <= 3) {
+                        AppLog.i("截图流 " + (age / 1000) + "s 无新帧 ⇒ 自救 #" + staleRescues
+                                + "（重建 ImageReader）");
+                        rebuildReader();
+                    } else {
+                        AppLog.i("截图流断流且自救失败 ×" + staleRescues
+                                + " ⇒ 需重新授权截图（重启应用后点①授权截图）");
+                    }
+                } else {
+                    staleRescues = 0;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "watchdog: " + t);
+            }
+            if (handler != null) {
+                handler.postDelayed(this, WATCHDOG_MS);
+            }
+        }
+    };
+
+    private void rebuildReader() {
+        try {
+            if (reader != null) {
+                reader.setOnImageAvailableListener(null, null);
+                reader.close();
+            }
+            int[] size = realScreenSize();
+            reader = ImageReader.newInstance(size[0], size[1], PixelFormat.RGBA_8888, 2);
+            reader.setOnImageAvailableListener(this::onFrame, handler);
+            if (vdisplay != null) {
+                vdisplay.setSurface(reader.getSurface());
+            }
+            Log.i(TAG, "ImageReader 已重建");
+        } catch (Throwable t) {
+            Log.w(TAG, "rebuildReader: " + t);
+        }
     }
 
     /** 真实屏幕像素（含状态栏/导航栏，与 PC 端 adb screencap 口径一致） */
@@ -192,6 +250,9 @@ public class CaptureService extends Service {
     }
 
     private void release() {
+        if (handler != null) {
+            handler.removeCallbacks(watchdog);
+        }
         try {
             if (vdisplay != null) {
                 vdisplay.release();

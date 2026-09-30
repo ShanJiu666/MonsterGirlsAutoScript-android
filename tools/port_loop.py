@@ -11,11 +11,22 @@
     subprocess ×3（tasklist 查锁 PID、adb 回退键）  loopguard ×10（进程查重/设备锁）
     mapcollect ×3（内存通道，已由 COLLECT_REAL_MAPS=False 关掉）  ADB ×4
 
-本脚本只做 4 处补丁：
+本脚本只做 5 处补丁（+1 处结构补丁，共 5 项 replace + 1 段追加）：
   ① 资源根：`SUPPLY_TPL` 原来是**相对路径**（依赖 CWD）⇒ 改成 MAPBOT_ROOT 绝对路径
   ② `back_to_map` 的 adb 回退键 ⇒ Android 走无障碍 `b.back()`
   ③ `guard_duplicates` / 设备锁：Android 单实例，直接放行（不查 tasklist）
-  ④ 追加 `android_main()` —— 供 `explore_android.py` 直接驱动，不走 argparse
+  ④ `device_lock` 相关：同上，单实例无需文件锁
+  ⑤ **`stop_hook`**：`stop_requested()` 在 Android 上读 `_ANDROID_STOP`
+     （2026-10-01 补：这条是"点 ■ 立即停"的 Python 侧信号源 ✓）
+  + 追加 `android_main()` —— 供 `explore_android.py` 直接驱动，不走 argparse
+
+⚠ 与 `port_android.py` 的分工（别搞混，2026-10-01 踩过）：
+  · 本脚本只管 **explore_loop.py** 一个文件
+  · `port_android.py` 管**另外 11 个模块**（layout/spots/marks/badge/grid_detect/
+    buypanels/mapgen/mapsim/mapsolve/strategy/targets_cfg）—— 它们是**独立副本**，
+    改了 PC 侧必须重跑 `port_android.py`，否则手机上是旧代码 ✗
+  · `mapbot.py`（Android 版）**不在任何生成器里**，是手写独立文件 ⇒ 改 PC 的 mapbot
+    对手机**没有任何影响**（2026-10-01 就因此漏过一次停止中断 ✗）
 """
 import os
 
@@ -85,6 +96,13 @@ def android_run(maps=1, max_round=45, deadline=900,
         return 'red_locked'
     say('   · 自动补给：' + ('开 ✓（没体力就进背包用结实补给）' if AUTO_SUPPLY else '关'))
     say('   · 装备升星：' + (('每 %d 张图一次' % BAG_EVERY) if BAG_EVERY else '关闭（0）'))
+    # ⭐⭐⭐ v1.07 用户报「怎么连启动都启动不了了，完全用不了」——真因是**体力不足静默收工**：
+    #   点 ▶ 后 6 秒就停，悬浮条只写「体力不够了 · 收工」，用户看不出是什么毛病 ✗
+    #   ⇒ 启动瞬间就把**关键前提**摆到悬浮条上（体力下限 + 自动补给开关），
+    #     并且**自动补给关着时明确提示去开**（用户 09-30 那次成功时它是开着的 ✓）
+    #   ⚠ 文案避开 OCR 关键词（探索/派遣/领取/关闭/开始冒险…，见 OverlayService.sanitize ✗）
+    status('已启动 · 体力下限 %d ｜ 自动补给%s'
+           % (MIN_STAMINA, '开' if AUTO_SUPPLY else '关（体力不够会直接收工，建议开上）'))
     return run_maps(_Args(maps=maps, max_round=max_round, deadline=deadline))
 
 

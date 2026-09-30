@@ -15,7 +15,7 @@ import java.io.OutputStream;
  */
 public final class PackInstaller {
 
-    private static final String MARK = ".pack_v2";
+    private static final String MARK = ".pack_v3";
 
     private PackInstaller() {
     }

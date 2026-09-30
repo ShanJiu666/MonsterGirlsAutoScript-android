@@ -103,24 +103,54 @@ public class OcrEngine {
         return list;
     }
 
-    /** 主入口：喂 1080×1920 参考帧，拿参考系坐标的识别结果 */
+    /** 主入口：喂 1080×1920 参考帧，拿参考系坐标的识别结果（= 整帧，等价于 recognizeBand(0,1920)） */
     public List<OcrItem> recognize(Bitmap refBmp, float minConf) {
+        return recognizeBand(refBmp, 0, RefMapper.REF_H, minConf);
+    }
+
+    /**
+     * ⭐ v0.61：**只识别参考帧的 [y0ref, y1ref) 这一段**（真裁图，不是识别后过滤）。
+     *
+     * <p>为什么必须裁：端侧 rec 占 OCR 总时间的 ~81%（累计 203.7s vs det 43.5s），而 rec 的
+     * 成本 ∝ **框数**；裁掉上下的 HUD / 底部导航就少了一大批框。PC 端同一份代码实测
+     * 整帧 0.75x 1.54s / 中段 band 0.79s（省 ~50%）—— 端侧以前 band 只做"整帧识别后过滤"，
+     * 等于一直按整帧付钱（真机 2.41s/次 vs PC 0.76s/次，见 09-30 日报）。
+     *
+     * <p>⚠ det 的 limit_type=min 会把**矮带**放大（band 高 400 ⇒ 736/min 放大约 2.45 倍
+     * ⇒ det 面积反而比整帧大）⇒ 调用方负责只在 Δy ≥ BAND_CROP_MIN 时才裁
+     * （见 Python `mapbot.BAND_CROP_MIN`）。
+     *
+     * <p>⚠ y0ref=0 &amp; y1ref=REF_H 时**逐像素复用旧路径**（ratio 必为 1、det 800×1440），
+     * 保证整帧识别的口径一字不变。
+     */
+    public List<OcrItem> recognizeBand(Bitmap refBmp, int y0ref, int y1ref, float minConf) {
         List<OcrItem> out = new ArrayList<>();
         if (!ready || refBmp == null) {
             return out;
         }
+        final int chRef = Math.max(1, y1ref - y0ref);
+        final boolean full = (y0ref == 0 && chRef == RefMapper.REF_H);
         long tAll = System.currentTimeMillis();
+        // ⚠ tDet/tRec/tPre 是**累计**计数器（便于看全局占比）⇒ 这里先记快照，日志里报**本次**增量
+        long preBefore = tPre, detBefore = tDet, recBefore = tRec;
         try {
             long p0 = System.currentTimeMillis();
-            // ① 参考帧 → 0.75 倍（=810×1440，与 PC 一致）
-            Bitmap scaled = Bitmap.createScaledBitmap(refBmp, SCALED_W, SCALED_H, true);
-            int[] scaledPx = new int[SCALED_W * SCALED_H];
-            scaled.getPixels(scaledPx, 0, SCALED_W, 0, 0, SCALED_W, SCALED_H);
+            // ① 参考帧（的这一段）→ 0.75 倍（整帧 = 810×1440，与 PC 一致）
+            Bitmap cropBmp = full ? refBmp
+                    : Bitmap.createBitmap(refBmp, 0, y0ref, RefMapper.REF_W, chRef);
+            int sw = SCALED_W;
+            int sh = Math.max(1, Math.round(chRef * OCR_SCALE));
+            Bitmap scaled = Bitmap.createScaledBitmap(cropBmp, sw, sh, true);
+            int[] scaledPx = new int[sw * sh];
+            scaled.getPixels(scaledPx, 0, sw, 0, 0, sw, sh);
 
-            // ② det 预处理：limit_type=min ⇒ min(810,1440)=810 > 736 ⇒ ratio=1，
-            //    再按 /32 对齐 ⇒ resize_w=round(810/32)*32=800、resize_h=1440
-            int detW = Math.round(Math.round(SCALED_W / 32f)) * 32;
-            int detH = Math.round(Math.round(SCALED_H / 32f)) * 32;
+            // ② det 预处理（复刻 rapidocr 的 limit_type=min + /32 对齐）：
+            //    整帧：min(810,1440)=810 > 736 ⇒ ratio=1 ⇒ resize_w=round(810/32)*32=800、resize_h=1440 ✓
+            //    矮带：min 边 < 736 ⇒ ratio = 736/min（这就是"裁图反而更慢"的成因）
+            float mn = Math.min(sw, sh);
+            float ratio = mn < LIMIT_SIDE ? (LIMIT_SIDE / mn) : 1f;
+            int detW = Math.round(Math.round(sw * ratio / 32f)) * 32;
+            int detH = Math.round(Math.round(sh * ratio / 32f)) * 32;
             Bitmap detBmp = Bitmap.createScaledBitmap(scaled, detW, detH, true);
             int[] detPx = new int[detW * detH];
             detBmp.getPixels(detPx, 0, detW, 0, 0, detW, detH);
@@ -155,15 +185,15 @@ public class OcrEngine {
             List<int[]> boxes = dbPostProcess(prob, detH, detW);
             nDetBoxes = boxes.size();
 
-            // ⑤ 逐框裁剪（在 810×1440 帧上）+ rec
+            // ⑤ 逐框裁剪（在 sw×sh 帧上）+ rec
             long r0 = System.currentTimeMillis();
-            float sx = SCALED_W / (float) detW;      // 800 → 810
-            float sy = SCALED_H / (float) detH;      // 1440 → 1440
+            float sx = sw / (float) detW;
+            float sy = sh / (float) detH;
             for (int[] b : boxes) {
-                int x0 = clamp(Math.round(b[0] * sx), 0, SCALED_W - 1);
-                int y0 = clamp(Math.round(b[1] * sy), 0, SCALED_H - 1);
-                int x1 = clamp(Math.round(b[2] * sx), 1, SCALED_W);
-                int y1 = clamp(Math.round(b[3] * sy), 1, SCALED_H);
+                int x0 = clamp(Math.round(b[0] * sx), 0, sw - 1);
+                int y0 = clamp(Math.round(b[1] * sy), 0, sh - 1);
+                int x1 = clamp(Math.round(b[2] * sx), 1, sw);
+                int y1 = clamp(Math.round(b[3] * sy), 1, sh);
                 if (x1 - x0 < 2 || y1 - y0 < 2) {
                     continue;
                 }
@@ -172,7 +202,7 @@ public class OcrEngine {
                 int cw = x1 - x0, ch = y1 - y0;
                 int[] cropPx = new int[cw * ch];
                 for (int yy = 0; yy < ch; yy++) {
-                    System.arraycopy(scaledPx, (y0 + yy) * SCALED_W + x0, cropPx, yy * cw, cw);
+                    System.arraycopy(scaledPx, (y0 + yy) * sw + x0, cropPx, yy * cw, cw);
                 }
                 Bitmap crop = Bitmap.createBitmap(cropPx, cw, ch, Bitmap.Config.ARGB_8888);
                 String[] rr = recOne(crop);
@@ -184,11 +214,11 @@ public class OcrEngine {
                 if (text.trim().isEmpty() || conf < minConf) {
                     continue;
                 }
-                // ⑥ 坐标：810×1440 → 1080×1920 参考系
+                // ⑥ 坐标：裁剪帧的 0.75 倍 → 1080 宽的参考系（y 再补上裁剪起点 y0ref）
                 int rx0 = Math.round(x0 / OCR_SCALE);
-                int ry0 = Math.round(y0 / OCR_SCALE);
+                int ry0 = Math.round(y0 / OCR_SCALE) + y0ref;
                 int rx1 = Math.round(x1 / OCR_SCALE);
-                int ry1 = Math.round(y1 / OCR_SCALE);
+                int ry1 = Math.round(y1 / OCR_SCALE) + y0ref;
                 out.add(new OcrItem(text, (rx0 + rx1) / 2, (ry0 + ry1) / 2,
                         rx0, ry0, rx1, ry1, conf));
             }
@@ -197,7 +227,9 @@ public class OcrEngine {
                     : Integer.compare(a.cx, b.cx));
             AppLog.i("OCR " + out.size() + " 条 / " + boxes.size() + " 框，"
                     + (System.currentTimeMillis() - tAll) + "ms"
-                    + "（det " + tDet + "｜rec " + tRec + "｜预处理 " + tPre + "）");
+                    + (full ? "" : " band " + y0ref + "~" + y1ref)
+                    + "（本次 det " + (tDet - detBefore) + "｜rec " + (tRec - recBefore)
+                    + "｜预处理 " + (tPre - preBefore) + "）");
         } catch (Throwable t) {
             AppLog.i("⚠ OCR 异常：" + t);
             Log.e(TAG, "recognize failed", t);

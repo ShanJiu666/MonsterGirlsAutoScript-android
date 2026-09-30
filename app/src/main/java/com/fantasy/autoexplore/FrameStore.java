@@ -62,6 +62,20 @@ public final class FrameStore {
     }
 
     /**
+     * 上一次涂平的**实测记账**（涂平前的亮度统计 + 矩形）。
+     * ⭐ 2026-09-30 加：`DeviceApi.maskCheck()` 以前是拿**已经涂平的那张帧**去统计**那个矩形自己**
+     * ⇒ 恒定纯色，永远打印「涂平生效 ✓」—— **空过**（自己给自己打分）。
+     * 真问题（矩形偏了 184px、没盖住悬浮条）就是这么被它掩盖掉的。
+     * 所以改成：涂平**之前**就在这张帧上量一遍，这才是能证伪的证据。
+     */
+    private static volatile String lastMaskInfo = "（还没涂过）";
+
+    /** 上一次涂平的实测记账（给 mask_check 用） */
+    public static String lastMaskInfo() {
+        return lastMaskInfo;
+    }
+
+    /**
      * 把悬浮条占的设备像素矩形涂平（无悬浮条 ⇒ 原样返回）。
      * ⚠ 直接在原 Bitmap 上画（截图线程的那张本来就是拷贝，没有别处再引用）。
      */
@@ -71,6 +85,7 @@ public final class FrameStore {
         }
         int[] r = OverlayService.blankRect();
         if (r == null) {
+            lastMaskInfo = "悬浮条没显示 ⇒ 无涂平（帧是原样）";
             return bmp;
         }
         try {
@@ -79,8 +94,13 @@ public final class FrameStore {
             int rr = Math.min(bmp.getWidth(), r[2]);
             int b = Math.min(bmp.getHeight(), r[3]);
             if (rr <= l || b <= t) {
+                lastMaskInfo = "矩形越界（" + r[0] + "," + r[1] + "-" + r[2] + "," + r[3]
+                        + "）⇒ 没涂，帧是原样";
                 return bmp;
             }
+            // ⭐ 涂平**之前**先量：这一块的亮度极差就是「涂平到底有没有起作用」的判据
+            lastMaskInfo = sample(bmp, l, t, rr, b)
+                    + " rect=" + l + "," + t + "-" + rr + "," + b;
             Canvas c = new Canvas(bmp);
             Paint p = new Paint();
             p.setColor(MASK_COLOR);
@@ -89,5 +109,30 @@ public final class FrameStore {
             // 涂平失败也不能让截图整个崩掉（宁可让循环自己去对付）
         }
         return bmp;
+    }
+
+    /** 亮度的 均值/最小/最大/极差（隔 2px 采样，够用且快） */
+    private static String sample(Bitmap bmp, int x0, int y0, int x1, int y1) {
+        long sum = 0;
+        int n = 0, mn = 255, mx = 0;
+        for (int y = y0; y < y1; y += 2) {
+            for (int x = x0; x < x1; x += 2) {
+                int px = bmp.getPixel(x, y);
+                int v = (int) (0.299 * ((px >> 16) & 0xFF)
+                        + 0.587 * ((px >> 8) & 0xFF) + 0.114 * (px & 0xFF));
+                sum += v;
+                n++;
+                if (v < mn) {
+                    mn = v;
+                }
+                if (v > mx) {
+                    mx = v;
+                }
+            }
+        }
+        double mean = n == 0 ? 0 : (double) sum / n;
+        return String.format(java.util.Locale.US,
+                "涂平前该处亮度 均值=%.1f 最小=%d 最大=%d 极差=%d（采样%d）",
+                mean, mn, mx, mx - mn, n);
     }
 }

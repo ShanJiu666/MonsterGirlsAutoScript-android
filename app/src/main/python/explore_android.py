@@ -307,6 +307,9 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
           % (maps, max_round, deadline, EL.INSTANCE_TAG, opt_solver, bag_every,
              save_first, auto_supply),
           flush=True)
+    # ⭐ 2026-09-30：点 ▶ 后**立刻**给悬浮条一句反馈（后面第一句真行动要等切前台/读帧，
+    #   中间可能好几秒；空着会让人以为按钮没生效）。走 status() = 唯一能上悬浮条的口子。
+    EL.status('▶ 启动 · 正在连游戏')
     return EL.android_run(maps=maps, max_round=max_round, deadline=deadline,
                           min_stamina=min_stamina, opt_solver=opt_solver,
                           bag_every=bag_every, stop_at_5am=stop_at_5am,

@@ -50,6 +50,8 @@ public class MainActivity extends Activity {
     private static final long TICK_MS = 2000;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
+    /** ⭐ 2026-09-30：日志订阅句柄。**必须用 addListener 存句柄**——见 onCreate 里的说明。 */
+    private AppLog.Listener logListener;
     private TextView logView;
     private TextView sumView;
     private TextView statusView;
@@ -96,7 +98,13 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         RefMapper.detectTopInset(this);           // ⭐ 真机安全区（状态栏/挖孔）自动检测；模拟器=0
         setContentView(buildUi());
-        AppLog.setListener(line -> ui.post(() -> appendLog(line)));
+        // ⭐⭐ 2026-09-30 修（真 bug）：原来用 `AppLog.setListener(...)`，而它的语义是
+        //   **"清掉其它监听、只留这一个"**（见 AppLog 注释）⇒ MainActivity 每次 onCreate
+        //   都会把**悬浮控制条**的日志订阅顶掉 ⇒ 悬浮条那一行从此不再更新（停在旧句）。
+        //   实测触发路径：`am start` 重开界面、或从游戏切回 MGAS（Activity 被回收后重建）。
+        //   ⇒ 改成 addListener + onDestroy 里 removeListener（多播，互不干扰）。
+        logListener = line -> ui.post(() -> appendLog(line));
+        AppLog.addListener(logListener);
         DeviceApi.bind(getApplicationContext());      // ⭐ Python 桥依赖 appCtx（解包/OCR/RUNS）
 
         if (Build.VERSION.SDK_INT >= 33
@@ -122,8 +130,25 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        // ⭐⭐ 2026-10-01：切走/切游戏前把「每 X 张图升星」落盘（双保险 —— TextWatcher
+        //   已经边打边存，这里只做一次规范化收尾：空/非法回落默认值 ✓）
+        try {
+            commitBagEvery();
+        } catch (Throwable ignored) {
+        }
         ui.removeCallbacks(tick);
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // ⭐ 2026-09-30：把日志订阅还回去（配对 onCreate 的 AppLog.addListener）。
+        //   漏了这步 ⇒ 每重建一次 Activity 就多一个僵尸监听，越积越多（还各自持有 View）。
+        if (logListener != null) {
+            AppLog.removeListener(logListener);
+            logListener = null;
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -277,7 +302,30 @@ public class MainActivity extends Activity {
         etBagEvery.setInputType(InputType.TYPE_CLASS_NUMBER);
         etBagEvery.setWidth(dp(52));
         etBagEvery.setGravity(android.view.Gravity.CENTER);
-        // ⚠ 用「失去焦点」提交：每敲一个字都写会写坏（"1" → 存成 1，"10" 就再也打不出来）
+        // ⭐⭐ 2026-10-01 修（用户报「设了每 1 张图升一次，却完全没去升过」）：
+        //   原来**只在"失去焦点"时提交** ⇒ 在 MGAS 里把 10 改成 1、然后直接去悬浮条点 ▶
+        //   或切回游戏时，EditText 的**视图级焦点并没有变**（窗口失焦 ≠ 视图失焦）
+        //   ⇒ `onFocusChange` 不触发 ⇒ Prefs 里还是老值（默认 10）⇒ 悬浮条 ▶ 读到 10
+        //   ⇒ 日志里 `bag_every=10`、一次都没升星。
+        //   真机实锤（15:24 那轮）：logcat 里**连一条「设置：每 …」都没有** = 提交函数
+        //   一次都没跑过 ✓
+        //   ⇒ 改成**边打边存**（只写 Prefs、**绝不动 setText**）。老注释担心的
+        //     "1 存成 1、再打 0 变 01 打不出 10" 是 **setText 把光标复位**造成的，
+        //     这里不 setText ⇒ 那个坑不存在 ✓；空串（正在删改）跳过 ⇒ 不会存成 0 ✗
+        etBagEvery.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void afterTextChanged(android.text.Editable s) {
+                saveBagEveryQuiet(s == null ? "" : s.toString());
+            }
+
+            @Override
+            public void beforeTextChanged(CharSequence s, int st, int c, int a) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int st, int b, int c) {
+            }
+        });
         etBagEvery.setOnFocusChangeListener((v, has) -> {
             if (!has) {
                 commitBagEvery();
@@ -504,7 +552,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 「每 X 张图升级装备星级」提交（失去焦点时）—— 空/非法就回落默认 10 */
+    /** 「每 X 张图升级装备星级」提交（失去焦点 / onPause 时）—— 空/非法就回落默认 10 */
     private void commitBagEvery() {
         if (etBagEvery == null) {
             return;
@@ -520,6 +568,32 @@ public class MainActivity extends Activity {
         }
         Prefs.setBagEvery(this, v);
         etBagEvery.setText(String.valueOf(v));
+        AppLog.i("设置：每 " + v + " 张图升级装备星级" + (v == 0 ? "（= 关闭）" : ""));
+    }
+
+    /**
+     * ⭐⭐ 2026-10-01：「每 X 张图升星」**边打边存**（TextWatcher 用）
+     *
+     * 为什么不能直接调 `commitBagEvery()`：它会 `setText()` ⇒ 光标复位 ⇒ 打「10」
+     * 会变成「01」（老注释踩过这个坑，于是改成"只在失去焦点时提交"——而那个时机的
+     * 触发条件在真机上根本不成立，见字段创建处的长注释）。
+     * 这里**只写 Prefs、不碰文本**：空串（正在删改）跳过，打全了自然就存对了 ✓
+     */
+    private void saveBagEveryQuiet(String txt) {
+        String t = (txt == null ? "" : txt.trim());
+        if (t.isEmpty()) {
+            return;                       // 正在删/改 ⇒ 保留旧值，别写成 0 ✗
+        }
+        int v;
+        try {
+            v = Integer.parseInt(t);
+        } catch (Throwable e) {
+            return;
+        }
+        if (v < 0 || v == Prefs.bagEvery(this)) {
+            return;
+        }
+        Prefs.setBagEvery(this, v);
         AppLog.i("设置：每 " + v + " 张图升级装备星级" + (v == 0 ? "（= 关闭）" : ""));
     }
 

@@ -80,9 +80,13 @@ public final class DeviceApi {
     /**
      * dev 自检（广播 `mask_check`）：证明**"机器人对自己瞎"**这条地基还在。
      *
-     * 取 {@link FrameStore} 里的帧（已过 {@code maskOverlay}），把悬浮条矩形那块像素统计出来。
-     * 期望：亮度恒为涂平色 `0xFF101418`（≈19）且**极差 = 0** ⇒ 帧里那块是纯色，
-     * 全屏 OCR 拿不到"悬浮条上滚的字"，`wait_stable` 也不会被滚动文字晃到。
+     * ⚠⚠ 2026-09-30 重写：旧版只统计「{@link FrameStore} 里那张**已经涂平**的帧」上「那个矩形自己」
+     * ⇒ 恒定纯色，**永远**打印「涂平生效 ✓」—— 自己给自己打分（空过）。
+     * 真事故（涂平矩形整体偏了 184px，既没盖住悬浮条、又把棋盘一行格子抹成纯色）
+     * 就是这么被它掩盖的。所以现在分两段报：
+     *   ① **涂平前**该处的亮度极差（{@link FrameStore#lastMaskInfo()}，涂平那一刻记的账）
+     *      —— 极差大 ⇒ 那里本来有内容（说明涂平确实在做事）；极差≈0 ⇒ 那里本来就空，涂不涂都一样
+     *   ② **涂平后**同一处是否恒为涂平色（这一段是"结论"，但必须配上 ① 才有意义）
      * ⚠ 用**原始设备帧**（不是参考帧）：`blankRect` 本来就是设备像素，别做二次换算。
      */
     public static String maskCheck() {
@@ -98,8 +102,9 @@ public final class DeviceApi {
         int y0 = Math.max(0, r[1]);
         int x1 = Math.min(raw.getWidth() - 1, r[2] - 1);
         int y1 = Math.min(raw.getHeight() - 1, r[3] - 1);
+        String before = "① 涂平时记账：" + FrameStore.lastMaskInfo();
         if (x1 <= x0 || y1 <= y0) {
-            return "矩形越界：rect=" + r[0] + "," + r[1] + "-" + r[2] + "," + r[3]
+            return before + "\n② 矩形越界：rect=" + r[0] + "," + r[1] + "-" + r[2] + "," + r[3]
                     + " 帧=" + raw.getWidth() + "x" + raw.getHeight();
         }
         long sum = 0;
@@ -120,10 +125,10 @@ public final class DeviceApi {
             }
         }
         double mean = n == 0 ? 0 : (double) sum / n;
-        return String.format(Locale.US,
-                "rect=%d,%d-%d,%d 帧=%dx%d 采样=%d 亮度 均值=%.1f 最小=%d 最大=%d 极差=%d ⇒ %s",
+        return before + "\n" + String.format(Locale.US,
+                "② 涂平后 rect=%d,%d-%d,%d 帧=%dx%d 采样=%d 亮度 均值=%.1f 最小=%d 最大=%d 极差=%d ⇒ %s",
                 x0, y0, x1, y1, raw.getWidth(), raw.getHeight(), n, mean, mn, mx, mx - mn,
-                (mx - mn) <= 2 ? "涂平生效 ✓（帧里是纯色，认不出悬浮条上的字）"
+                (mx - mn) <= 2 ? "那块是纯色 ✓（帧里认不出悬浮条上的字）"
                         : "⚠ 帧里还能看见悬浮条内容");
     }
 
@@ -215,18 +220,36 @@ public final class DeviceApi {
             return "[]";
         }
         List<OcrItem> items = AutoPilot.scan(appCtx, minConf, false);
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < items.size(); i++) {
-            OcrItem it = items.get(i);
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append(String.format(Locale.US,
-                    "{\"text\":\"%s\",\"cx\":%d,\"cy\":%d,\"x0\":%d,\"y0\":%d,\"x1\":%d,\"y1\":%d,\"conf\":%.3f}",
-                    it.text.replace("\\", "\\\\").replace("\"", "'"),
-                    it.cx, it.cy, it.x0, it.y0, it.x1, it.y1, it.conf));
+        return itemsJson(items);
+    }
+
+    /**
+     * ⭐ v0.61：**只识别参考帧 [y0,y1) 这一段**（真裁图）的 OCR 结果 JSON。
+     *
+     * 端侧 rec 占 OCR 总时间 ~81%，成本 ∝ 框数 ⇒ 裁掉 HUD/导航条能少一大批框
+     * （PC 实测同口径省 ~50%）。调用方（Python `mapbot.Bot.ocr`）只在 band 高 ≥
+     * BAND_CROP_MIN 时走这里 —— 更矮的带会被 det 的 limit_side_len 放大，反而更慢。
+     *
+     * @return 识别结果 JSON；**失败时返回 null**（区别于"识别成功但没有文字"的 "[]"），
+     *         好让 Python 侧据以回退到整帧路径。
+     */
+    public static String ocrBandJson(float minConf, int y0, int y1) {
+        if (appCtx == null) {
+            return null;
         }
-        return sb.append(']').toString();
+        Bitmap raw = FrameStore.get();
+        if (raw == null) {
+            return null;
+        }
+        try {
+            Bitmap ref = RefMapper.toRef(raw.copy(Bitmap.Config.ARGB_8888, false));
+            AutoPilot.ensureOcr(appCtx);
+            List<OcrItem> items = AutoPilot.ocr().recognizeBand(ref, y0, y1, minConf);
+            return itemsJson(items);
+        } catch (Throwable t) {
+            Log.w(TAG, "ocrBandJson 失败: " + t);
+            return null;
+        }
     }
 
     /**
@@ -425,6 +448,25 @@ public final class DeviceApi {
             return "";
         }
         return PackInstaller.ensure(appCtx);
+    }
+
+    /** ⭐ 2026-10-01 崩溃自恢复：拉起游戏到前台（MGAS 有悬浮窗权限 ⇒ 后台启动 Activity 豁免） */
+    public static boolean bringGame() {
+        try {
+            android.content.Intent it = appCtx.getPackageManager()
+                    .getLaunchIntentForPackage("com.chillyroom.monstergirls.yw");
+            if (it == null) {
+                AppLog.i("拉起游戏失败：未安装或包不可见（Manifest queries）");
+                return false;
+            }
+            it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            appCtx.startActivity(it);
+            return true;
+        } catch (Throwable t) {
+            AppLog.i("拉起游戏异常: " + t);
+            return false;
+        }
     }
 
     public static String runsRoot() {

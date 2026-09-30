@@ -76,6 +76,9 @@ public final class RefMapper {
         if (w <= 0 || h <= 0) {
             return;
         }
+        // ⭐ 2026-09-29 晚：参数没变就别打日志——setScreen 每帧/每次点击都被调，
+        //   这一行把 logcat 环形缓冲几秒刷一屏，几十分钟前的日志全被冲掉（排查色子/宝库时受害）
+        boolean changed = (w != screenW || h != screenH);
         screenW = w;
         screenH = h;
         kx = w / (float) REF_W;
@@ -87,13 +90,15 @@ public final class RefMapper {
             dx = (REF_W - w * s) / 2f;
             dy = (REF_H - h * s) / 2f;
         }
-        AppLog.i("屏幕 " + w + "x" + h + " ⇒ " + (anchored
-                ? ("锚定模型 kx=" + fmt(kx) + " shift=" + Math.round(shift)
-                   + " 顶块偏移=" + Math.round(topInset)
-                   + (isRefRes() && topInset == 0 ? "（参考分辨率 ⇒ 零变换）"
-                                 : (shift == 0 && topInset == 0 ? "（9:16 ⇒ 与旧等比一致）"
-                                                                : "（顶块锚顶+其余锚底）")))
-                : ("矮胖屏 ⇒ 回退等比 s=" + fmt(s) + " 黑边=(" + Math.round(dx) + "," + Math.round(dy) + ")")));
+        if (changed) {
+            AppLog.i("屏幕 " + w + "x" + h + " ⇒ " + (anchored
+                    ? ("锚定模型 kx=" + fmt(kx) + " shift=" + Math.round(shift)
+                       + " 顶块偏移=" + Math.round(topInset)
+                       + (isRefRes() && topInset == 0 ? "（参考分辨率 ⇒ 零变换）"
+                                     : (shift == 0 && topInset == 0 ? "（9:16 ⇒ 与旧等比一致）"
+                                                                    : "（顶块锚顶+其余锚底）")))
+                    : ("矮胖屏 ⇒ 回退等比 s=" + fmt(s) + " 黑边=(" + Math.round(dx) + "," + Math.round(dy) + ")")));
+        }
     }
 
     /** device-per-ref（参考坐标 × k = 设备坐标）。⚠ 别拿它做"设备高度→参考高度"（那是 {@link #refPerDev}） */

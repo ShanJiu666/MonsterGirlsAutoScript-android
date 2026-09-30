@@ -47,6 +47,11 @@ def _api():
 
 _DLG_C = None
 
+# ⭐ v0.61：band 真裁图的**最小高度**。低于它就别裁 —— det 的 limit_side_len=736
+#   会把矮带放大（band 高 400 ⇒ 放大到 736 ⇒ det 面积 1.46M > 整帧 1.15M ⇒ 反而更慢）。
+#   实测盈亏平衡点 ≈ Δy 505，取 520 留余量。见 Bot.ocr 的 docstring。
+BAND_CROP_MIN = 520
+
 
 def dlg_shift():
     """⭐ v0.31 方案 B：居中弹窗系 − 归一化帧 的 y 偏移 C（弹窗系 y = 帧内 y + C）。
@@ -140,6 +145,10 @@ def _ocr():
 class Bot(object):
     """设备本机版 Bot：接口与 PC 版对齐"""
 
+    # ⭐ v0.61：端侧 `ocr()` 走 `api.ocrJson`，**内部自己抓当前帧** ⇒ 调用方不必先 snap
+    #   （PC 版 = False，因为它的 `ocr()` 用 `img()` 缓存的那一帧；buypanels 据此省一次 snap）
+    ocr_grabs = True
+
     # 探索棋盘几何（1080×1920 参考系，与 PC mapbot.Bot 相同）
     GRID_X0 = 36.0
     GRID_Y0 = 1002.0
@@ -161,7 +170,8 @@ class Bot(object):
         self._last = None
         self.api = _api()
         self.fast_ok = bool(self.api.touchReady()) and bool(self.api.hasFrame())
-        self.t = {'snap': 0.0, 'ocr': 0.0, 'wait': 0.0, 'wait_n': 0, 'tap': 0, 'ocr_n': 0}
+        self.t = {'snap': 0.0, 'ocr': 0.0, 'wait': 0.0, 'wait_n': 0, 'tap': 0, 'ocr_n': 0,
+                  'snap_n': 0, 'ocr_by': {}}     # ⭐ v0.61：与 PC 同口径的分账埋点
         # ⭐ v0.34：弹窗帧缓存（按帧戳），同一帧内多次 img_dlg() 只编码一次
         #   （close_x_panels / find_x / badge 常在同一轮里连着要弹窗帧 ⇒ 省几百 ms）
         self._dlg_cache = {'stamp': -1, 'arr': None}
@@ -181,6 +191,7 @@ class Bot(object):
         if png is None:
             self.fast_ok = False
             self.t['snap'] += time.time() - _t0
+            self.t['snap_n'] += 1
             return None
         arr = cv2.imdecode(np.frombuffer(bytes(png), dtype=np.uint8), cv2.IMREAD_COLOR)
         self._img_arr = arr
@@ -191,6 +202,7 @@ class Bot(object):
             self._img_path = p
         self.fast_ok = True
         self.t['snap'] += time.time() - _t0
+        self.t['snap_n'] += 1
         return p
 
     def img(self):
@@ -239,6 +251,9 @@ class Bot(object):
             items = [it for it in items if y0 <= it['cy'] <= y1]
         self.t['ocr'] += time.time() - _t0
         self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
+        if tag:                 # ⭐ v0.61：与 PC 同口径的分账（找 180s/图 到底花在哪个调用点）
+            cur = self.t.setdefault('ocr_by', {}).get(tag, [0.0, 0])
+            self.t['ocr_by'][tag] = [cur[0] + (time.time() - _t0), cur[1] + 1]
         return items
 
     def img_path(self):
@@ -256,22 +271,48 @@ class Bot(object):
     def ocr(self, min_conf=0.5, img=None, band=None, scale=None, tag=None):
         """返回 [{text,cx,cy,x0,y0,x1,y1,conf}]，坐标是 1080×1920 参考系
 
-        ⚠ 与 PC 版的差异：band 不做「裁图再识别」，而是**识别后按 y 过滤** ——
-          端侧 OCR 一次 2 秒，裁图省不了多少，但过滤后语义等价（调用方只用 band 内的条目）。
-          scale 参数仅为接口兼容（端侧固定 0.75 倍口径）。
+        ⭐ v0.61：`band` 现在是**真裁图**（走 `api.ocrBandJson`），不再"整帧识别后过滤"。
+          为什么必须裁：端侧 rec 占了 OCR 总时间的 ~81%（累计 203.7s vs det 43.5s），
+          而 rec 的成本 ∝ 框数 —— 裁掉上下的 HUD/导航条就少了一大批框。
+          PC 实测同一份代码：整帧 0.75x 1.54s / 中段 band 0.79s（省 ~50%）。
+          ⚠ 但 det 的 `limit_side_len=736 / limit_type=min` 会把**太矮**的 band 放大
+            （band 高 400 ⇒ 放大到 736 ⇒ det 面积反而比整帧大）⇒ 只有
+            `Δy >= BAND_CROP_MIN` 才裁，更矮的仍走整帧+过滤（口径不变）。
+          ⚠ 裁图失败（返回空串）自动回退整帧路径，保证不会"整段认不出来"。
+          `scale` 参数仅为接口兼容（端侧固定 0.75 倍口径）。
         """
         _t0 = time.time()
         if img is not None:
             # 调用方给了图（极少见）：落盘后走同一路（保证口径一致）
             p = os.path.join(self.runs, '_inline.png')
             cv2.imwrite(p, img)
-        raw = self.api.ocrJson(float(min_conf))
-        items = json.loads(raw) if raw else []
-        if band:
-            y0, y1 = int(band[0]), int(band[1])
-            items = [it for it in items if y0 <= it['cy'] <= y1]
+        raw = None
+        if img is None and band and (int(band[1]) - int(band[0])) >= BAND_CROP_MIN:
+            try:
+                raw = self.api.ocrBandJson(float(min_conf), int(band[0]), int(band[1]))
+            except Exception:       # noqa: BLE001
+                raw = None
+            if raw:
+                self.t['ocr_crop'] = self.t.get('ocr_crop', 0) + 1
+        if not raw:
+            raw = self.api.ocrJson(float(min_conf))
+            try:
+                items = json.loads(raw) if raw else []
+            except Exception:       # noqa: BLE001
+                items = []
+            if band:
+                y0, y1 = int(band[0]), int(band[1])
+                items = [it for it in items if y0 <= it['cy'] <= y1]
+        else:
+            try:
+                items = json.loads(raw) or []
+            except Exception:       # noqa: BLE001
+                items = []
         self.t['ocr'] += time.time() - _t0
         self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
+        if tag:                 # ⭐ v0.61：按调用点分账（PC 早就有，端侧补齐 ⇒ 可逐项对账）
+            cur = self.t.setdefault('ocr_by', {}).get(tag, [0.0, 0])
+            self.t['ocr_by'][tag] = [cur[0] + (time.time() - _t0), cur[1] + 1]
         self._last_items = items
         return items
 
@@ -290,6 +331,31 @@ class Bot(object):
         return cands[0]
 
     # ---------- 操作 ----------
+    def _sleep(self, sec):
+        """可被「停止」中断的 sleep（真机口径：点 ■ 要**立刻**停 ✓）
+
+        ⚠ 2026-10-01：`time.sleep(2.5)` 这类纯 Python 等待是 Java 侧 `requestInterrupt()`
+          **管不到**的（那只踹 wait 循环）⇒ 用户点 ■ 后还要干等 1~3 秒 ✗
+          这里把长 sleep 切成 0.1 秒一片，每片查一次停止位 ✓
+        """
+        try:
+            import sys as _sys
+            _el = _sys.modules.get('explore_loop')
+        except Exception:       # noqa: BLE001
+            _el = None
+        _stop = bool(getattr(_el, '_ANDROID_STOP', False)) if _el is not None else False
+        if not _stop and sec <= 0.15:
+            time.sleep(sec)
+            return
+        _end = time.time() + max(0.0, sec)
+        while True:
+            if _el is not None and getattr(_el, '_ANDROID_STOP', False):
+                return
+            _left = _end - time.time()
+            if _left <= 0:
+                return
+            time.sleep(min(0.1, _left))
+
     def tap(self, x, y, wait=1.2):
         """点 (x,y)（参考系坐标）；返回「画面是否变化」（同 PC 语义）"""
         ok = self.api.tapRef(float(x), float(y))
@@ -329,12 +395,12 @@ class Bot(object):
     def swipe(self, x1, y1, x2, y2, ms=300, wait=1.2):
         self.api.swipeRef(float(x1), float(y1), float(x2), float(y2), int(ms))
         if wait > 0:
-            time.sleep(wait)
+            self._sleep(wait)          # ⭐ 可中断（点 ■ 立刻停 ✓）
 
     def back(self, wait=1.5):
         self.api.backKey()
         if wait > 0:
-            time.sleep(wait)
+            self._sleep(wait)          # ⭐ 可中断 ✓
 
     # ---------- 等画面变化 / 稳定（走 Kotlin，避免 PNG 编解码开销） ----------
     def wait_change(self, max_sec=1.5, band=None, thr=3.0, interval=0.06,
@@ -369,7 +435,7 @@ class Bot(object):
             return None
         self.api.tapRef(float(p['cx']), float(p['cy']))
         if wait:
-            time.sleep(wait)
+            self._sleep(wait)          # ⭐ 可中断 ✓
         return (p['cx'], p['cy'])
 
     def wait_text(self, label, timeout=15, interval=1.2, required=True):
@@ -378,7 +444,7 @@ class Bot(object):
             p = self.find_text(label)
             if p:
                 return p
-            time.sleep(interval)
+            self._sleep(interval)      # ⭐ 可中断（点 ■ 不用等满 interval ✓）
         if required:
             raise RuntimeError('等待 %s 超时' % label)
         return None
