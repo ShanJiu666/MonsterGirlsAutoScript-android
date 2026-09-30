@@ -278,7 +278,10 @@ public final class DeviceApi {
         try {
             AutoPilot.ensureOcr(appCtx);
             if (bmp.getWidth() != RefMapper.REF_W || bmp.getHeight() != RefMapper.REF_H) {
-                bmp = RefMapper.toRef(bmp);
+                // ⚠ 这里**不能**用 RefMapper.toRef()：它会 setScreen(这张图的尺寸)，
+                //   把全局屏幕映射改坏（后面的 devX/devY/wait 观察窗全错）。
+                //   Python 侧本来就先把图贴上 1080×1920 黑底才进来，这段只是兜底 ⇒ 直接拉伸。
+                bmp = Bitmap.createScaledBitmap(bmp, RefMapper.REF_W, RefMapper.REF_H, true);
             }
             List<OcrItem> items = AutoPilot.ocr().recognize(bmp, minConf);
             return itemsJson(items);
@@ -364,12 +367,31 @@ public final class DeviceApi {
             sleep(minSec);
             return false;
         }
-        int rx0 = 0, rx1 = ref.getWidth(), ry0 = y0, ry1 = y1;
+        // ⭐ 2026-10-01 修（全分辨率真 bug）：FrameStore 里是**原始设备帧**，
+        //   而 y0/y1/ax/ay/radius 全是 **1080×1920 参考系**坐标（Python 侧契约，
+        //   见 mapbot.py「Python 侧看不到像素尺寸差异」）—— 旧代码直接拿参考坐标
+        //   在原始帧上采样 ⇒ 只在 1080×1920（kx=1、shift=0）上碰巧正确；
+        //   真机 1280×2772（shift≈496）上观察窗整体**上移约 500px**（点的底行格子
+        //   根本不在窗口里 ⇒ 每次点击都白等满超时；点击验证失真 ⇒ 误重试/连点）。
+        //   ⇒ 采样前先把参考系坐标换算成设备像素（band 跨顶块/锚底两段时中间会多含
+        //     一段弹性区，那是静态背景，对变化/稳定判定无害，且比"整段错位"好得多）。
+        RefMapper.setScreen(ref.getWidth(), ref.getHeight());
+        int rx0 = 0, rx1 = ref.getWidth();
+        int ry0 = Math.max(0, Math.min(RefMapper.devY(y0), ref.getHeight()));
+        int ry1 = Math.max(0, Math.min(RefMapper.devY(y1), ref.getHeight()));
+        if (ry1 < ry0) {                    // 矮胖屏回退时理论不会，防一下
+            int t = ry0;
+            ry0 = ry1;
+            ry1 = t;
+        }
         if (ax >= 0) {
-            rx0 = Math.max(0, ax - radius);
-            rx1 = Math.min(ref.getWidth(), ax + radius);
-            ry0 = Math.max(0, ay - radius);
-            ry1 = Math.min(ref.getHeight(), ay + radius);
+            int dx = RefMapper.devX(ax);
+            int dy = RefMapper.devY(ay);
+            int rr = RefMapper.devLen(radius);
+            rx0 = Math.max(0, dx - rr);
+            rx1 = Math.min(ref.getWidth(), dx + rr);
+            ry0 = Math.max(0, dy - rr);
+            ry1 = Math.min(ref.getHeight(), dy + rr);
         }
         int[] a = sample(ref, rx0, ry0, rx1, ry1, 6, 4);
         double refLuma = boardLuma(ref);
@@ -411,7 +433,16 @@ public final class DeviceApi {
             sleep(0.3);
             return false;
         }
-        int[] a = sample(prev, 0, y0, prev.getWidth(), y1, 6, 4);
+        // ⭐ 2026-10-01 修：同 waitChange —— y0/y1 是参考系坐标，帧是原始设备帧，必须换算
+        RefMapper.setScreen(prev.getWidth(), prev.getHeight());
+        int dy0 = Math.max(0, Math.min(RefMapper.devY(y0), prev.getHeight()));
+        int dy1 = Math.max(0, Math.min(RefMapper.devY(y1), prev.getHeight()));
+        if (dy1 < dy0) {
+            int t = dy0;
+            dy0 = dy1;
+            dy1 = t;
+        }
+        int[] a = sample(prev, 0, dy0, prev.getWidth(), dy1, 6, 4);
         int stable = 0;
         long t0 = System.currentTimeMillis();
         while ((System.currentTimeMillis() - t0) < maxSec * 1000) {
@@ -425,7 +456,7 @@ public final class DeviceApi {
             if (now == null || now.getWidth() != prev.getWidth()) {
                 continue;
             }
-            int[] b = sample(now, 0, y0, now.getWidth(), y1, 6, 4);
+            int[] b = sample(now, 0, dy0, now.getWidth(), dy1, 6, 4);
             double d = meanAbsDiff(a, b);
             a = b;
             if (d < thr) {
@@ -534,12 +565,17 @@ public final class DeviceApi {
         return sum / (3.0 * n);
     }
 
-    /** 棋盘带亮度（PC 端用来判「面板把棋盘压暗了」） */
+    /** 棋盘带亮度（PC 端用来判「面板把棋盘压暗了」）。
+     *  ⭐ 2026-10-01 修：1002/1722 是**参考系**行号，帧是原始设备帧 ⇒ 必须走 devY
+     *    （旧代码在真机 1280×2772 上量的是参考 427~1016 那段世界场景，根本不是棋盘） */
     private static double boardLuma(Bitmap bmp) {
-        if (bmp.getHeight() < 1730) {
+        RefMapper.setScreen(bmp.getWidth(), bmp.getHeight());
+        int y0 = Math.max(0, Math.min(RefMapper.devY(1002), bmp.getHeight()));
+        int y1 = Math.max(0, Math.min(RefMapper.devY(1722), bmp.getHeight()));
+        if (y1 - y0 < 50) {
             return 1;
         }
-        int[] s = sample(bmp, 0, 1002, bmp.getWidth(), 1722, 12, 8);
+        int[] s = sample(bmp, 0, y0, bmp.getWidth(), y1, 12, 8);
         long sum = 0;
         for (int p : s) {
             sum += (((p >> 16) & 0xff) * 299 + ((p >> 8) & 0xff) * 587 + (p & 0xff) * 114) / 1000;

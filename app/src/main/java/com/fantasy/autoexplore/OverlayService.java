@@ -1313,7 +1313,7 @@ public class OverlayService extends Service {
         /** 字号跟着参考系走（每次量/画前同步一次，避免构造时 RefMapper 还没就绪） */
         private void syncMetrics() {
             paint.setTextSize(RefMapper.devLen(LOG_TEXT_REF));
-            paint.setTypeface(LOG_TF);          // ⭐ 黑体（加粗等宽）——用户口径
+            paint.setTypeface(LOG_TF);          // 等宽、**常规字重**（用户口径「别加粗」，见 LOG_TF）
         }
 
         /**

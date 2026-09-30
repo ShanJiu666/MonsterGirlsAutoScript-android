@@ -2448,10 +2448,38 @@ def start_fight(b, log, btn, marks=()):
     return False
 
 
+def _price_is_red(b, it):
+    """结算面板骰子旁幸运草**价格**是否是红色（红 = 草不够；源码 `GetCloverPrice`
+    把付不起的价格 `SurroundColor(..., PresetColor.Red)`）。判据 = 亮像素里红色占比 >35%。
+    异常一律当"不红"（宁可点了弹购买提示被 no_confirm 拦下，也不错杀能摇的局）。"""
+    try:
+        img = b.img()
+        if img is None:
+            return False
+        x0, y0 = max(0, it['x0'] - 2), max(0, it['y0'] - 2)
+        x1 = min(img.shape[1], it['x1'] + 2)
+        y1 = min(img.shape[0], it['y1'] + 2)
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            return False
+        crop = img[y0:y1, x0:x1].astype(np.int32)
+        r, g, bl = crop[:, :, 2], crop[:, :, 1], crop[:, :, 0]     # cv2 = BGR
+        bright = np.maximum(np.maximum(r, g), bl) > 110
+        red = (r > 130) & (r > g + 55) & (r > bl + 55)
+        nb = int(bright.sum())
+        return nb > 0 and int((red & bright).sum()) * 100 // nb > 35
+    except Exception:       # noqa: BLE001
+        return False
+
+
 def handle_dice(b, log, items, tries=3):
     """重投命运之骰（源码 `GameApi.Explore.DiceRerollAsync` + `ChangeClover(-1,"重投命运之骰")`）：
     **每次重投消耗 1 个幸运草**，服务端返回新的掉落；`rerollTime` = 已重投次数（上限 3）。
-    按钮就在**战斗结算面板**上（不是另开界面），文本含「骰 / 重投 / 命运」。
+    按钮就在**战斗结算面板**上（不是另开界面）。
+    ⚠ 按钮**本体是图标+数字，没有文字**：上行=骰子点数（参考系 ~(105,905)）、
+    下行=幸运草数（~(115,975)）（标定帧 `tools/mapbot/runs/dice_ok_1.png`）——
+    docstring 旧写"文本含 骰/重投/命运"是错的；源码 `BattleEventPanel.OnDiceClick`
+    绑的就是那个骰子图标。幸运草 ≤0 时点它会弹「购买幸运草」而不是重掷确认框
+    （源码 `save.clover <= 0 ⇒ CloverPurchasePrompt()`）⇒ 检测到草=0 要直接跳过。
     摇到出现「带大拇目标记的装备」就停（用户 09-25 口径）。
 
     ⭐⭐ v0.35 重大修正（20:9 实测铁证，推翻 v0.31 的归类）：
@@ -2613,6 +2641,36 @@ def handle_dice(b, log, items, tries=3):
             if btn is not None:
                 log.append({'dice': 'narrow_hit', 'at': (btn['cx'], btn['cy']),
                             'text': btn.get('text'), 'n_items': len(_it2)})
+        # ⭐⭐⭐ v1.10 修（用户报「识别出大拇指格，打完却不摇色子」⇒ 日志 dice no_btn）：
+        #   骰子按钮**根本没有文字**（图标+数字，见函数 docstring 标定）⇒ v0.78 的
+        #   "必须文字命中"在真机上永远找不到 ⇒ rolls=0 收场 ✗。
+        #   ⇒ 文字路找不到就用**纯数字签名**兜底：奖励区最左（cx<230）的纯数字条目
+        #     （回放战斗/查看/统计都是汉字 ⇒ 不会误点 ✓ —— 这就是与 v0.78 前
+        #       "任意文字"规则的区别：只认数字，不认位置上的文字）；
+        #     数字在幸运草行（cy≥945）就**上移 68px** 点骰子格本体（历史上点骰子格
+        #     触发确认框是验证过的 ✓）。
+        #   ⚠ 幸运草行那个数字是**价格**（恒 "1"，草不够时染红，源码 GetCloverPrice）
+        #     ⇒ 红色 = 没草：点骰子会弹「购买幸运草」而不是重掷确认框 ⇒ 跳过。
+        if btn is None:
+            _nums = [it for it in items
+                     if (it.get('text') or '').strip().isdigit()
+                     and it['cx'] < LAYOUT.sx(230)
+                     and LAYOUT.sy(820) <= it['cy'] <= LAYOUT.sy(1120)]
+            if _nums:
+                _nums.sort(key=lambda i: (i['cy'], i['cx']))
+                _clv = [i for i in _nums if i['cy'] >= LAYOUT.sy(945)]
+                if _clv and _price_is_red(b, _clv[0]):
+                    say('       · 幸运草不够（价格标红）⇒ 摇不了色子，跳过')
+                    status('没幸运草了 · 跳过摇骰子')
+                    log.append({'dice': 'no_clover', 'rolls': rolls})
+                    break
+                _dv = _nums[0]
+                _ty = _dv['cy'] if _dv['cy'] < LAYOUT.sy(945) \
+                    else _dv['cy'] - int(LAYOUT.s(68))
+                btn = {'cx': _dv['cx'], 'cy': int(_ty), 'text': _dv.get('text')}
+                log.append({'dice': 'icon_hit', 'at': (btn['cx'], btn['cy']),
+                            'sig': {'t': (_dv.get('text') or '').strip(),
+                                    'cx': _dv['cx'], 'cy': _dv['cy']}})
         if btn is not None:
             btn_pos = (btn['cx'], btn['cy'])
         if btn_pos is None:
@@ -2948,7 +3006,7 @@ def vault_title_seen(ditems):
     return False
 
 
-def panel_seen(items, ditems=None):
+def panel_seen(items, ditems=None, b=None):
     """⭐ v0.33：**现在有没有弹着面板**（特殊地块 / 探索 / 战斗 / 领取 / 结算 / 确定）。
 
     ⚠⚠ 漏判的后果很严重：主循环靠它 `break` 出点序、交给 `popups()` 处理；判不成
@@ -2963,6 +3021,8 @@ def panel_seen(items, ditems=None):
       白烧 2 轮 + 一堆 OCR/等待才走「点了没反应」的兜底。改用归一化帧里看得见的签名：
         ① 说明文案「※花费金币分别解锁宝库的外层…」→ 含「解锁宝库」(dlg 1459 ⇒ 帧内 1250 ✓)
         ② 右下角按钮（dlg 1444 ⇒ 帧内 1235 ✓）
+    ⚠ 2026-10-01 修：弹窗帧兜底原来直接用**未定义的名字 `b`**（本函数根本没有这个形参）
+      ⇒ NameError 被裸 except 吞掉 ⇒ 这段兜底**从来没跑过**。现改为显式传 `b`。
     """
     if fb(items, *L['special']) or fb(items, L['fight']) or fb(items, L['expl']) \
             or fb(items, *L['claim']) or fb(items, *L['desc']):
@@ -2980,7 +3040,7 @@ def panel_seen(items, ditems=None):
         #   ⇒ 这里再补一手**真·弹窗帧 OCR**（`dlg_ocr`）：它覆盖到弹窗系 1769，
         #     宝库/商人的按钮就在那儿 ✓（≈2s，且**只在 dlg 环境**、有面板嫌疑时跑 ✓）
         try:
-            if hasattr(b, 'ocr_dlg'):
+            if b is not None and hasattr(b, 'ocr_dlg'):
                 _dp = dlg_ocr(b, tag='panel_seen_dlg')
                 if _dp:
                     if _dlg_panel_btn(_dp, L['fbtn']) or _dlg_panel_btn(_dp, L['ebtn']):
@@ -4363,7 +4423,7 @@ def final_collect(b, log, st):
                     'closed_at': (x['cx'], x['cy']) if x else None})
         say('       · 退图前补点弹出「偶遇强敌」→ 不打，关掉')
         return 1
-    opened = panel_seen(it) or bool(bottom_close(it))
+    opened = panel_seen(it, b=b) or bool(bottom_close(it))
     if opened:
         close_x_panels(b, b.img())
         cl = bottom_close(it)
@@ -4379,7 +4439,7 @@ def final_collect(b, log, st):
     #   「结束冒险」被面板遮住而 OCR 不到 ⇒ 空转到 90 秒 timeout ⇒ "退图没成功，已停止"
     #   ⇒ 这里关完**验证**一次；还在就强制脱困
     it2 = b.ocr(tag='collect2')
-    still = panel_seen(it2) or bool(bottom_close(it2))
+    still = panel_seen(it2, b=b) or bool(bottom_close(it2))
     log.append({'collect': 'tapped', 'at': pos, 'opened': bool(opened),
                 'still': bool(still)})
     if still:
@@ -6509,7 +6569,7 @@ def one_round(b, log, rnd, prefix, st):
         # ⭐ v0.33：原来只认面板**标题** ⇒ 真机高分辨率上标题落在弹性区看不见
         #   ⇒ 判不成"弹了面板" ⇒ 主循环带着面板继续点后面的格（点击全落到面板上 ✗）
         #   ⇒ 改用 panel_seen()（补"弹窗系独立按钮"这条判据，PC 行为不变 ✓）
-        if panel_seen(it2):
+        if panel_seen(it2, b=b):
             hit = ('tap', cx, cy)
             done.add((cx, cy))
             # ⭐ v0.33 诊断：记下是"认到标题"还是"靠弹窗系按钮"判成的（真机只会是后者）
