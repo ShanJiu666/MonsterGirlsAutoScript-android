@@ -2438,7 +2438,95 @@ except Exception as _e25:       # noqa: BLE001
     check('v1.25 重掷弹框宽容识别守门可运行（%r）' % (_e25,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊴ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊴ v1.26 两条真机实报：**截图流断了还瞎点** + **点完战斗没等到开打就去点下一格**
+#   ① 用户 2026-10-02：「点了战斗格、还没打就去点下一个格子」—— 真机日志显示那一局
+#      `截图流断流且自救失败 ×56 ⇒ 需重新授权截图`：帧从 02:03:35 起就冻结了，
+#      Python 拿**旧帧**继续判、继续点 ✗。Java 看门狗只在 Java 侧记日志 ⇒ Python 不知情 ✗
+#      ⇒ 修：`DeviceApi.frameAgeMs()` 暴露帧龄；Python 帧龄 >8s **连续 2 轮** ⇒ 停整局
+#        （`finish: capture_stale`）并说明怎么恢复（点①授权截图）✓
+#   ② 同一局更早（有帧时）也出现过：`{'battle':'no_battle_in_5s'}` → `not_started` →
+#      `blocked` ⇒ 上层"开路模式"就去点下一格；可下一轮却看到了结算面板
+#      （= 战斗其实打完了）⇒ **"5 秒没等到" ≠ "没打起来"**。真机开打 >5s 很常见 ✗
+#      ⇒ 修：`start_fight()` 等到 **15s**（看到战斗/结算立刻早退 ✓），
+#        且**认到结算面板也算"打过了"**（`result_panel_instead` ✓）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊴ v1.26 修：截图断流还瞎点 + 点完战斗没等到开打就去点下一格')
+try:
+    _el26p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src26 = open(_el26p, encoding='utf-8').read()
+    _java26 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                                'autoexplore', 'DeviceApi.java'), encoding='utf-8').read()
+    check('v1.26 ① Java 侧暴露**帧龄**（`DeviceApi.frameAgeMs()` ⇒ Python 能判"瞎了没" ✓）',
+          'public static long frameAgeMs()' in _java26 and 'FrameStore.stamp()' in _java26)
+    check('v1.26 ② Python 侧：帧龄 >8s **连续 2 轮** ⇒ 停整局（`capture_stale` ✓）',
+          'def frame_age_ms(' in _src26 and "'finish': 'capture_stale'" in _src26
+          and "st['stale'] >= 2" in _src26 and '请点①授权截图' in _src26)
+    check('v1.26 ③ `start_fight` 等待 5s → **15s**（真机开打 >5s 很常见 ✓）',
+          'while time.time() - _t0 < 15.0' in _src26
+          and "log.append({'battle': 'no_battle_in_5s'" not in _src26
+          and "'no_battle_in_15s'" in _src26)
+    check('v1.26 ④ **认到结算面板也算"打过了"**（自动跳过/极速战斗 ⇒ 别当 blocked ✗）',
+          "'battle': 'result_panel_instead'" in _src26)
+
+    # ⭐ 执行级：用假 bot 直接调真 `start_fight()`（含把 time 换成假时钟 ⇒ 不真等 15s ✓）
+    import importlib.util as _ilu26
+    import types as _ty26
+    _spec26 = _ilu26.spec_from_file_location('el_v126', _el26p)
+    _el26m = _ilu26.module_from_spec(_spec26)
+    _spec26.loader.exec_module(_el26m)
+
+    class _Clock(object):
+        """假时钟：`time()` 每次调用 +1s，`sleep` 不真睡 ⇒ 15s 等待瞬间跑完 ✓"""
+
+        def __init__(self):
+            self.t = 0.0
+
+        def time(self):
+            self.t += 1.0
+            return self.t
+
+        def sleep(self, _s):
+            return None
+
+    class _FakeFightBot(object):
+        def __init__(self, items):
+            self._items = items
+            self.tap_dlg_calls = 0
+            self.fast_ok = False
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.tap_dlg_calls += 1
+            return True
+
+        def ocr(self, *a, **k):
+            return list(self._items)
+
+    _btn26 = {'cx': 539, 'cy': 791}
+    _real_time26 = _el26m.time
+    try:
+        _el26m.time = _Clock()
+        _log_start = []
+        _act = _el26m.start_fight(_FakeFightBot([]), _log_start, _btn26, ['boss'])
+        check('v1.26 ⑤ 执行级：15s 内一直没动静 ⇒ 判失败（且只点 1 次 ✗ 不连点）',
+              _act is False
+              and any(e.get('battle') == 'no_battle_in_15s' for e in _log_start)
+              and _log_start[-1].get('battle') == 'not_started',
+              'act=%s log=%s' % (_act, _log_start))
+        _log_res = []
+        _act2 = _el26m.start_fight(
+            _FakeFightBot([{'text': '关闭', 'cx': 576, 'cy': 1441}]), _log_res, _btn26, ['boss'])
+        check('v1.26 ⑥ 执行级：直接进结算面板 ⇒ 也算"打过了"（返回 True ✓ 不当 blocked）',
+              _act2 is True
+              and any(e.get('battle') == 'result_panel_instead' for e in _log_res),
+              'act=%s log=%s' % (_act2, _log_res))
+    finally:
+        _el26m.time = _real_time26
+except Exception as _e26:       # noqa: BLE001
+    check('v1.26 断流/战斗等待守门可运行（%r）' % (_e26,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊵ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。

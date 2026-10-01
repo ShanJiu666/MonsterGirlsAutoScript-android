@@ -49,6 +49,27 @@ public final class DeviceApi {
         Log.i(TAG, "[stop] INTERRUPT_WAIT 置位（Java 端 wait 立即返回 false）");
     }
 
+    /**
+     * ⭐⭐ 2026-10-02 v1.26：**帧龄（毫秒）** —— 给 Python 判"机器人是不是瞎了"
+     *
+     * 背景（用户真机实报）：`CaptureService` 的看门狗发现截图流断流后**只在 Java 侧记日志**，
+     * Python 那头完全不知情 ⇒ 它继续拿**冻结的旧帧**做判断、**继续点地图格子** ✗✗
+     * 用户看到的就是「点了战斗格、还没打就去点下一个格子」。
+     * ⇒ 把帧龄暴露出来，Python 自己决定"帧不新鲜就别点、直接停"。
+     *
+     * @return 帧龄 ms；**没有帧**返回 -1（首次启动还没拿到帧时也是 -1，别当断流 ✗）
+     */
+    public static long frameAgeMs() {
+        try {
+            if (!FrameStore.has()) {
+                return -1L;
+            }
+            return System.currentTimeMillis() - FrameStore.stamp();
+        } catch (Throwable t) {
+            return -1L;
+        }
+    }
+
     /** 测试/手动复位用（一般不用调；wait 检测到中断会自动清回 false） */
     public static void clearInterrupt() {
         INTERRUPT_WAIT = false;

@@ -2563,8 +2563,17 @@ def battle_started(items):
 
 
 def start_fight(b, log, btn, marks=()):
-    """点「战斗」→ **最多等 5s 看有没有进战斗**（用户 09-25：战斗胜利不会超过 5s，
-    超过就是没进战斗）。没进就原位置再点一次（第一下可能被动画吃掉），再不行算失败。
+    """点「战斗」→ 等**战斗真的起来**（最多 ~15s，一起来看见就早退）
+
+    ⚠ 旧口径是「最多等 5s」（用户 09-25：战斗胜利不会超过 5s）—— 那是**模拟器**上的实测。
+    ⭐⭐ 2026-10-02 v1.26 真机翻车（用户报「点了战斗格、**还没打就去点下一个格子**」）：
+       真机（Redmi 1280×2772）点完「战斗」到**真正开打 >5 秒**（游戏加载慢）⇒
+       旧代码 5 秒就判 `not_started` ⇒ 上层当成 `blocked`（被挡路）⇒ **战斗还在加载就去点下一格** ✗✗
+       （真机日志：`{'battle':'no_battle_in_5s'}` → `not_started` → `blocked` → 下一轮却看到了
+        结算面板 —— 战斗其实打完了 ✓ 说明"没等到"≠"没打起来"）
+    ⇒ 现在：① 画面变了就**耐心等**（最多 15s，看到战斗/结算立刻返回 ✓）；
+            ② **认到结算面板也算"打过了"**（自动跳过/极速战斗会直接进结算 ✓）；
+            ③ 只有"点了完全没反应"才允许再点一次（防点到别的 UI ✗，原逻辑保留）。
     """
     # ⚠ 2026-09-26 用户报「连点两次战斗 ⇒ 第二下点到状态图标/战斗回放」✗
     #   ⇒ 只重试"点了完全没反应"的情况 ✓；画面变了但没进战斗**绝不重点** ✗
@@ -2577,15 +2586,23 @@ def start_fight(b, log, btn, marks=()):
         if changed is False and i == 0:
             log.append({'battle': 'tap_no_change_retry', 'try': i})
             continue                           # 点空了 ⇒ 允许再点一次 ✓
-        for _ in range(2):                     # ⚡ 中段 OCR（快 3 倍）≈ 1s/次
+        _t0 = time.time()
+        while time.time() - _t0 < 15.0:        # ⭐ v1.26：5s → 15s（真机开打更慢 ✓）
             items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(980)), tag='tap')
             if battle_started(items):
                 log.append({'battle': 'started', 'at': (btn['cx'], btn['cy']),
-                            'try': i, 'tries': tries, 'marks': list(marks)})
+                            'try': i, 'tries': tries, 'marks': list(marks),
+                            'secs': round(time.time() - _t0, 1)})
                 return True
-            time.sleep(0.5)
-        log.append({'battle': 'no_battle_in_5s', 'try': i, 'tries': tries,
-                    'note': '画面变了但没进战斗 ⇒ 不再重点 ✓'})
+            # ⭐ v1.26：直接到结算面板 = 这一场**已经打完了**（自动跳过/极速战斗）⇒ 也算成功 ✓
+            if bool(fb(items, L['win'], L['lose'])) or bool(bottom_close(items)) \
+                    or bool(fb(items, '回放战斗')):
+                log.append({'battle': 'result_panel_instead', 'try': i,
+                            'secs': round(time.time() - _t0, 1), 'marks': list(marks)})
+                return True
+            time.sleep(0.6)
+        log.append({'battle': 'no_battle_in_15s', 'try': i, 'tries': tries,
+                    'note': '画面变了但 15s 没进战斗 ⇒ 不再重点 ✓'})
         break                                  # ⭐ 不重试 ✗（防点到别的 UI）
     log.append({'battle': 'not_started', 'at': (btn['cx'], btn['cy']), 'tries': tries})
     return False
@@ -4788,6 +4805,24 @@ def final_collect(b, log, st):
     return 1
 
 
+def frame_age_ms():
+    """⭐ v1.26：当前帧的帧龄（ms）——`None` = 拿不到（PC 端 / 还没帧）
+
+    真机实报（用户 2026-10-02）：「点了战斗格、还没打就去点下一个格子」 ——
+    真因是**截图流断了**（`截图流断流且自救失败 ×56`），Python 却拿**冻结的旧帧**继续
+    做判断、继续点地图 ⇒ 瞎点 ✗✗
+    """
+    try:
+        from java import jclass        # Chaquopy
+    except Exception:       # noqa: BLE001
+        return None
+    try:
+        _v = int(jclass('com.fantasy.autoexplore.DeviceApi').frameAgeMs())
+        return _v if _v >= 0 else None
+    except Exception:       # noqa: BLE001
+        return None
+
+
 def run_one_map(b, log, max_round=45, prefix='', deadline=900):
     t0 = time.time()
     st = {'cold': {}, 'done': set(), 'last': None, 'err': 0, 'stuck': 0,
@@ -4804,6 +4839,24 @@ def run_one_map(b, log, max_round=45, prefix='', deadline=900):
         # ⭐ 立即停止（2026-09-29 用户口径）：**每轮开头先查**，不等这张图打完
         if stop_checked(log, '轮首 r%d' % rnd):
             return 'stopped'
+        # ⭐⭐⭐ 2026-10-02 v1.26【**帧断了就别再点**（瞎点会打乱游戏）】
+        #   真机实报：「点了战斗格、还没打就去点下一个格子」—— 真因是截图流断流
+        #   （`截图流断流且自救失败 ×56`），Python 拿**冻结的旧帧**继续判、继续点 ✗✗
+        #   判据：帧龄 >8s（与 Java 看门狗同口径）**连续 2 轮** ⇒ 停整局并说清怎么恢复。
+        #   ⚠ `frame_age_ms()` 返回 None（PC 端 / 还没拿到帧）时**不做判断**（别误停 ✓）
+        _age = frame_age_ms()
+        if _age is not None and _age > 8000:
+            st['stale'] = st.get('stale', 0) + 1
+            if st['stale'] >= 2:
+                log.append({'finish': 'capture_stale', 'age_ms': _age,
+                            'stale_rounds': st['stale']})
+                say('  ⚠⚠ 截图流断了 %.1fs 没新帧 ⇒ **停止点击**（瞎点会打乱游戏）'
+                    % (_age / 1000.0))
+                say('     · 恢复：点悬浮条「① 授权截图」（必要时先重启 App）再重新启动 ✓')
+                status('截图断了 · 请点①授权截图')
+                return 'stale'
+        else:
+            st['stale'] = 0
         if time.time() - t0 > deadline:
             log.append({'finish': 'deadline'})
             final_collect(b, log, st)
