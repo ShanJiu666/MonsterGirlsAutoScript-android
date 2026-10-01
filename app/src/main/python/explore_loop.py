@@ -4198,6 +4198,26 @@ def popups(b, items, log, ctx=None):
                     STATS['vaults'] += 1
                     say('       · 黄金宝库买完（第 %d 个）' % STATS['vaults'])
                     status('黄金宝库 · 完成 ✓')
+                    # ⭐⭐⭐ 2026-10-02 v1.27【**买完的宝库格要登记"已消耗"**】
+                    #   用户实报：「宝库都没问题了，但悬浮条显示还剩 1 个目标，我看着已经没目标了」
+                    #   真机日志（`vault: done` 之后 r11）：`marked`/`buy`/`buy_hidden` 全空
+                    #   （所以打了「没有目标了」），可 `pending_buy` 还留着 1 个 ⇒ 悬浮条
+                    #   「还剩 1 个目标」= **幽灵目标** ✗
+                    #   根因：那一格的贴图**买完还在**（认成宝库/商人、score ≥ 0.60）
+                    #   ⇒ `buy_seen`（跨轮记忆）每轮都被刷新 ⇒ 永远不会被"4 轮没再出现"清掉 ✗✗
+                    #   ⇒ 买完当场把它记进 `st['buy_consumed']`，并从 sticky/记忆里删掉 ✓
+                    try:
+                        _st_v = ctx.get('flags')
+                        if isinstance(_st_v, dict) and tapped:
+                            _rcv = cell_of(tapped[0], tapped[1])
+                            _pxv = marks_mod.cell_center(*_rcv)
+                            _st_v.setdefault('buy_consumed', set()).add(_rcv)
+                            for _kk in (_pxv, tuple(tapped)):
+                                _st_v.get('buy_seen', {}).pop(_kk, None)
+                                _st_v.get('buy_sticky', {}).pop(_kk, None)
+                            log.append({'vault': 'consumed', 'rc': list(_rcv)})
+                    except Exception:       # noqa: BLE001
+                        pass
                 else:
                     # ⚠ 不管成败都要**确保面板被收起**，否则下一轮又会点在面板上 ✗
                     try:
@@ -6299,6 +6319,11 @@ def one_round(b, log, rnd, prefix, st):
             % _unpinned)
     buy = [p for p in c['buy'] if p not in done]
     buy_hidden = [p for p in c.get('buy_hidden', []) if p not in done]   # 未揭示的商人/宝库
+    # ⭐ v1.27：**已经买完/消耗掉的格子不再当目标**（幽灵目标根因，见「vault: consumed」注释）
+    _cons_early = st.get('buy_consumed') or set()
+    if _cons_early:
+        buy = [p for p in buy if cell_of(*p) not in _cons_early]
+        buy_hidden = [p for p in buy_hidden if cell_of(*p) not in _cons_early]
     # ⚠ 2026-09-25 修（用户报「幻少第一张图明明还有一个未揭示的商人就退了」）：
     #   未揭示的商人/宝库**点不动**，绝对不能排进点击序列 —— 旧版把它当普通目标去点，
     #   点一次没反应就 cold+1，4 轮后被「放弃」规则踢掉 → 判成目标清完 → 退图漏掉它。
@@ -6505,6 +6530,10 @@ def one_round(b, log, rnd, prefix, st):
         for _k, _v in _cells_now2.items():
             _nm2 = str(_v.get('name') or '')
             _sc2 = float(_v.get('score') or 0)
+            # ⭐ v1.27：**已经买完/消耗掉的格子不再进记忆**（否则买完那张贴图还在 ⇒
+            #   每轮刷新记忆 ⇒ 幽灵目标永远清不掉，见上面「vault: consumed」注释 ✓）
+            if _k in (st.get('buy_consumed') or set()):
+                continue
             if _nm2 in spots_mod.BUY_OUT_NAMES and _sc2 >= BUY_MEMORY_MIN:
                 _px = marks_mod.cell_center(*_k)
                 _seen[_px] = st.get('_rnd', 0) + 1
@@ -6573,6 +6602,11 @@ def one_round(b, log, rnd, prefix, st):
     except Exception:       # noqa: BLE001
         pass
     pending_buy = list(buy) + list(buy_hidden) +         [q for q in sticky if q not in _buy_now]
+    # ⭐⭐⭐ 2026-10-02 v1.27：**买完的宝库格从所有目标集合里剔掉**（幽灵目标根因 ✓）
+    #   用户实报：「宝库都没问题了，但显示还剩 1 个目标，我看着已经没目标了」
+    _consumed = st.get('buy_consumed') or set()
+    if _consumed:
+        pending_buy = [p for p in pending_buy if cell_of(*p) not in _consumed]
     # ⭐⭐⭐ 2026-10-01：把**跨轮记忆**里的宝库/商人也算进 pending ⇒ 这一帧被面板盖住
     #   也不会误判「没有目标了」直接退图（用户报的「盘上有宝库却没识别到就退了」✗）
     try:
@@ -6594,6 +6628,17 @@ def one_round(b, log, rnd, prefix, st):
     #   用户也能看出"它还活着、在推进"，而不是盯着一句几分钟前的旧状态。
     status('第 %d 张图 · 正在找路（还剩 %d 个目标）'
            % (cur_map_no(), len(marked) + len(pending_buy)))
+    # ⭐ v1.27 诊断：**没有标记却有 pending 目标** ⇒ 记下这堆"幽灵"是谁（下次反馈能一眼定位 ✓）
+    if not marked and pending_buy:
+        try:
+            log.append({'targets_ghost': {
+                'buy': ['%d,%d' % cell_of(*p) for p in buy],
+                'buy_hidden': ['%d,%d' % cell_of(*p) for p in buy_hidden],
+                'sticky': ['%d,%d' % cell_of(*p) for p in sticky],
+                'mem': ['%d,%d' % cell_of(*p) for p in (st.get('buy_seen') or {})],
+                'consumed': sorted('%d,%d' % rc for rc in _consumed)}})
+        except Exception:       # noqa: BLE001
+            pass
     # 点序：**无条件交替** —— 揭一格 → 点一次商人/宝库 → 点一次标记格 → 再揭一格…
     #   ⭐ 内容格只在「还有未完成目标」时当**开路**用（用户 2026-09-25）：
     #      boss 那类标记格常常是「未揭示」状态、点不动，必须消耗它旁边的地块才会

@@ -2526,7 +2526,59 @@ except Exception as _e26:       # noqa: BLE001
     check('v1.26 断流/战斗等待守门可运行（%r）' % (_e26,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊵ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊵ v1.27 「宝库买完了，却永远显示还剩 1 个目标」= **幽灵目标**
+#   用户 2026-10-02 原话：「最近这把大拇指、探索、宝库都没问题了，就是现在显示还有一个目标，
+#     但是我看着已经没目标了」
+#   真机日志（`vault: done` 之后的 r11）：`没有目标了，准备退图` 与悬浮条
+#     `还剩 1 个目标` **同轮并存** ⇒ 说明 `marked`/`buy`/`buy_hidden` 全空，
+#     但 `pending_buy` 里还留着一个（`sticky` / `buy_seen` 跨轮记忆）✗
+#   根因：宝库**买完之后那张贴图还在**（仍被认成宝库/商人、score ≥ 0.60）
+#     ⇒ `buy_seen` 每轮都被刷新 ⇒ 永远等不到"4 轮没再出现"的清理 ✗✗
+#   修法：买完当场把该格登记进 `st['buy_consumed']`（`{'vault':'consumed','rc':…}`），
+#     并从 `buy`/`buy_hidden`/`sticky`/`buy_seen` 四处全部剔除 ✓
+#     另加诊断 `{'targets_ghost': {...}}`：没有标记却有 pending 时，把四个来源点名 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊵ v1.27 修「宝库买完还永远剩 1 个目标」幽灵目标（买完登记 buy_consumed）')
+try:
+    _el27p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src27 = open(_el27p, encoding='utf-8').read()
+    check('v1.27 ① 宝库买完当场登记 `buy_consumed` 并记日志（`vault: consumed` ✓）',
+          "'buy_consumed', set()).add(_rcv)" in _src27
+          and "'vault': 'consumed'" in _src27)
+    check('v1.27 ② 已消耗格**不再进** `buy_seen` 记忆（否则每轮刷新 ⇒ 清不掉 ✗）',
+          "if _k in (st.get('buy_consumed') or set()):" in _src27)
+    check('v1.27 ③ `buy` / `buy_hidden` 早期就按 `buy_consumed` 过滤 ✓',
+          '_cons_early = st.get(\'buy_consumed\') or set()' in _src27
+          and "buy = [p for p in buy if cell_of(*p) not in _cons_early]" in _src27
+          and "buy_hidden = [p for p in buy_hidden if cell_of(*p) not in _cons_early]"
+          in _src27)
+    check('v1.27 ④ `pending_buy`（含 sticky / 记忆）也按已消耗过滤 ✓',
+          "pending_buy = [p for p in pending_buy if cell_of(*p) not in _consumed]"
+          in _src27)
+    check('v1.27 ⑤ 诊断：没有标记却有 pending ⇒ 记 `targets_ghost`（点名四个来源 ✓）',
+          "'targets_ghost'" in _src27 and "'mem': ['%d,%d' % cell_of(*p)"
+          in _src27 and "'consumed': sorted(" in _src27)
+
+    # ⭐ 执行级：把"幽灵目标过滤"这段逻辑等价重放一遍（四来源 → 过滤后为空 ✓）
+    _st27 = {'buy_consumed': {(3, 6)}}
+    try:
+        import marks as _mk27
+        _px27 = _mk27.cell_center(3, 6)
+        _pend27 = [_px27]                                  # 记忆里那个已买完的宝库
+        _cons27 = _st27.get('buy_consumed') or set()
+        _cell27 = (int((_px27[1] - 1002) // 144) + 1, int((_px27[0] - 36) // 144) + 1)
+        _after27 = [p for p in _pend27 if _cell27 not in _cons27]
+        check('v1.27 ⑥ 执行级：已买完那格的像素中心 ⇒ 会被过滤掉（过滤后 pending 为空 ✓）',
+              _cell27 == (3, 6) and _after27 == [],
+              'cell=%s after=%s' % (_cell27, _after27))
+    except Exception as _e27b:      # noqa: BLE001
+        check('v1.27 ⑥ 执行级可运行（%r）' % (_e27b,), False)
+except Exception as _e27:       # noqa: BLE001
+    check('v1.27 幽灵目标守门可运行（%r）' % (_e27,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊶ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
