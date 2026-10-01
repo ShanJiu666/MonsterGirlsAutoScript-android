@@ -916,6 +916,46 @@ def eff_order(st, c, log=None, max_steps=20):
         return []
 
 
+# ⭐⭐⭐ 2026-10-02 v1.28【用户口径：**进图只规划一次**，之后不再重算】
+#   「规划就刚进入规划一次，后续不再规划。走完规划的还有目标就用之前的保底方案走」
+#
+#   ⚠ 这条 09-27 本来就是这么做的，09-30 被"每轮重解更省体力"的离线对拍推翻过：
+#     进图规划一次的目标集是**残缺**的（未揭示的标记格/商人还没认出来）
+#     ⇒ 全知对拍贵 +9.2%（marks 可见）/ +26.1%（marks 藏雾里），最坏单盘贵 16 体力。
+#     现在用户明确要回"进图一次"（可预期、不在图里反复改主意）⇒ 按用户口径实现 ✓，
+#     并保留两条安全网：**计划连着 3 轮没推进**（格子点不动/被挡）⇒ 自动切兜底，
+#     不会像旧版那样死抱着一个走不通的计划 ✗
+PLAN_STUCK_ROUNDS = 3
+
+
+def plan_next(st, rest_n, targets_left):
+    """进图只规划一次 + 走完切兜底（纯函数，可离线对拍 ✓）
+
+    返回 `(动作, 原因)`：
+        `('plan', 'first')`      —— 还没规划过 ⇒ 现在算一次（就是"进图那一下"）
+        `('keep', 'has_rest')`   —— 计划还有没做完的步 ⇒ **继续用，不重算** ✓
+        `('eff', 'stuck')`       —— 计划连着 `PLAN_STUCK_ROUNDS` 轮没推进 ⇒ 切兜底 ✓
+        `('eff', 'exhausted')`   —— 计划走完了、但还有目标 ⇒ 切**片感知兜底**（老方案 ✓）
+        `('none', 'no_targets')` —— 计划走完、也没目标了 ⇒ 什么都不做（交给收尾逻辑 ✓）
+    """
+    if rest_n > 0:
+        if rest_n >= st.get('plan_prev_len', rest_n):
+            st['plan_stuck'] = st.get('plan_stuck', 0) + 1
+        else:
+            st['plan_stuck'] = 0
+        st['plan_prev_len'] = rest_n
+        if st.get('plan_stuck', 0) >= PLAN_STUCK_ROUNDS:
+            return 'eff', 'stuck'
+        return 'keep', 'has_rest'
+    st['plan_stuck'] = 0
+    st['plan_prev_len'] = 0
+    if not st.get('planned'):
+        return 'plan', 'first'
+    if targets_left > 0:
+        return 'eff', 'exhausted'
+    return 'none', 'no_targets'
+
+
 def solver_order(st, c, log=None, max_steps=6, out=None):
     """⭐ 用精确解算器算"当前信息下的最省体力点序" ✓
 
@@ -6746,39 +6786,63 @@ def one_round(b, log, rnd, prefix, st):
     #     ③ 改「每轮用最新观测重解」后：真机盘 **95/95 张与全知最优逐字节相等**（0.00% 差）
     #        （`cur` 进图一次：89 相等 / 6 更贵；`EffPolicy`：75 相等 / 20 更贵）
     #   ⇒ 现在每轮都重解，旧计划**直接丢弃**（不再累积、不再"计划耗尽才兜底"）✓
-    if OPT_SOLVER and c.get('st'):
-        #   ⚠ 2026-09-27 修（保留）：原来"算一次失败就永久放弃" ✗
-        #     （第一轮若棋盘被面板盖住 ⇒ solver 返回空 ⇒ 整张图都没计划 ✗）
-        #     ⇒ 改成**没算出就下轮再试，最多 3 次** ✓
-        #   ⭐⭐ 2026-09-28（保留）：连续 3 次算不出 ⇒ 本图切 EffPolicy（plan_src='eff'），
-        #     避免每轮都白等一次超时 ✓
-        _sol = None
-        if st.get('plan_src') != 'eff':
-            if not OPT_SOLVER:
-                st['plan_src'] = 'eff'       # `--no-solver`：直奔 EffPolicy，别白数 3 轮 ✓
-            else:
-                _so = {}
-                # ⭐ 只要**前 4 步**（每轮真机就点 4 下；多要步数没有意义，还拖慢 ✓）
-                _sol = solver_order(st, c, log=log, max_steps=4, out=_so)
-                if _sol:
-                    st['plan'] = list(_sol)      # ⭐ 每轮**覆盖**（不是追加）
-                    st['plan_src'] = 'solver'
-                    st['plan_tries'] = 0
-                else:
-                    st['plan'] = []
-                    # ⚠ 「盘上已经没有目标了」**不算失败**（正常收尾）——否则会白切 EffPolicy ✗
-                    if not _so.get('no_targets'):
-                        st['plan_tries'] = st.get('plan_tries', 0) + 1
-                        if st['plan_tries'] >= 3:
-                            st['plan_src'] = 'eff'
-                            say('       · 精确规划连续 %d 轮没算出 ⇒ 本图改用片感知策略'
-                                '（EffPolicy）' % st['plan_tries'])
-                            try:        # ⭐ 悬浮条也告诉用户"这图改走兜底策略了" ✓
-                                status('规划：改用片感知兜底（精确解算没出结果）')
-                            except Exception:       # noqa: BLE001
-                                pass
+    # ⭐⭐⭐ 2026-10-02 v1.28【用户口径：**每张图只在进图后规划一次**】
+    #   「规划就刚进入规划一次，后续不再规划。走完规划的还有目标就用之前的保底方案走」
+    #   ⇒ 判据抽成纯函数 `plan_next()`（可离线对拍 ✓）：
+    #      · 计划还有没做完的步 ⇒ **继续照走，绝不重算** ✓
+    #      · 计划走完 / 连着 3 轮推不动 ⇒ 切 **EffPolicy 片感知兜底**（就是"之前的保底方案"）✓
+    #   ⚠ 09-30 曾按"每轮重解更省体力"（离线 +9.2%~+26.1% 优势）推翻本条，
+    #     现按用户口径改回"进图一次"，代价写进 README §6.53；安全网 = 3 轮推不动就切兜底 ✓
+    if c.get('st'):
+        if not OPT_SOLVER:
+            st['plan_src'] = 'eff'       # `--no-solver`：直奔 EffPolicy，别白数 3 轮 ✓
+        _rest = [p for p in (st.get('plan') or [])
+                 if marks_mod.cell_center(p[0], p[1]) not in done]
+        _tleft = len(marked) + len(pending_buy)
+        if st.get('plan_src') == 'eff':
+            _pact, _pwhy = 'keep', 'eff_mode'          # 已在兜底模式 ⇒ 不再规划 ✓
         else:
+            _pact, _pwhy = plan_next(st, len(_rest), _tleft)
+        if _pact == 'plan':
+            _so = {}
+            # ⭐ 只要**前 4 步**（每轮真机就点 4 下；多要步数没有意义，还拖慢 ✓）
+            _sol = solver_order(st, c, log=log, max_steps=4, out=_so)
+            if _sol:
+                st['plan'] = list(_sol)
+                st['plan_src'] = 'solver'
+                st['planned'] = True
+                st['plan_tries'] = 0
+                st['plan_stuck'] = 0
+                st['plan_prev_len'] = len(_sol)
+                log.append({'plan': 'once', 'cells': ['%d,%d' % (p[0], p[1]) for p in _sol]})
+                say('       · 进图规划一次：%s（后续照着走，不再重算 ✓）'
+                    % ' '.join('%d,%d' % (p[0], p[1]) for p in _sol[:6]))
+            else:
+                st['plan'] = []
+                # ⚠ 「盘上已经没有目标了」**不算失败**（正常收尾）——否则会白切 EffPolicy ✗
+                if not _so.get('no_targets'):
+                    st['plan_tries'] = st.get('plan_tries', 0) + 1
+                    if st['plan_tries'] >= 3:
+                        st['plan_src'] = 'eff'
+                        say('       · 进图规划连续 %d 轮没算出 ⇒ 本图直接用片感知兜底'
+                            '（EffPolicy）' % st['plan_tries'])
+                        try:        # ⭐ 悬浮条也告诉用户"这图改走兜底策略了" ✓
+                            status('规划：改用片感知兜底（精确解算没出结果）')
+                        except Exception:       # noqa: BLE001
+                            pass
+        elif _pact == 'eff':
             st['plan'] = []
+            st['plan_src'] = 'eff'
+            _sol = None
+            log.append({'plan': _pwhy, 'targets_left': _tleft})
+            if _pwhy == 'exhausted':
+                say('       · 进图那份计划走完了，还剩 %d 个目标 ⇒ 切回**片感知兜底**（老方案）✓'
+                    % _tleft)
+                status('规划走完 · 改用兜底策略')
+            else:
+                say('       · 计划连着 %d 轮没推进（格子点不动/被挡）⇒ 切回片感知兜底 ✓'
+                    % PLAN_STUCK_ROUNDS)
+                status('计划推不动 · 改用兜底策略')
         # ⭐⭐ 2026-09-28：EffPolicy 兜底 —— 每轮用**最新观测**现算点序（毫秒级 ✓）
         if st.get('plan_src') == 'eff' and c.get('st'):
             _eff = eff_order(st, c, log=log, max_steps=20)

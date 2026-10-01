@@ -2578,7 +2578,68 @@ except Exception as _e27:       # noqa: BLE001
     check('v1.27 幽灵目标守门可运行（%r）' % (_e27,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊶ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊶ v1.28【用户口径】**进图只规划一次**，之后不再重算；走完还有目标 ⇒ 切回兜底（老方案）
+#   用户 2026-10-02 原话：「规划就刚进入规划一次，后续不再规划。走完规划的还有目标
+#     就用之前的保底方案走」
+#   背景：09-27 本来就是"进图规划一次"，09-30 被离线对拍（每轮重解省 9.2%~26.1% 体力）推翻。
+#     现在按用户口径改回，代价写进 README §6.53；**安全网**：计划连着 3 轮没推进 ⇒ 自动切兜底 ✓
+#   实现：判据抽成纯函数 `plan_next(st, rest_n, targets_left)`（可离线对拍）
+#     `('plan','first')` 还没规划 ⇒ 算一次 ／ `('keep','has_rest')` 继续照走不重算
+#     `('eff','exhausted')` 走完还有目标 ⇒ 切 EffPolicy 兜底 ／ `('eff','stuck')` 推不动 ⇒ 切兜底
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊶ v1.28 进图只规划一次 + 走完还有目标就切兜底（用户口径）')
+try:
+    _el28p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src28 = open(_el28p, encoding='utf-8').read()
+    check('v1.28 ① 新增纯函数 `plan_next()`（进图一次/继续照走/走完切兜底/推不动切兜底 ✓）',
+          'def plan_next(st, rest_n, targets_left):' in _src28
+          and "return 'plan', 'first'" in _src28
+          and "return 'keep', 'has_rest'" in _src28
+          and "return 'eff', 'exhausted'" in _src28
+          and "return 'eff', 'stuck'" in _src28)
+    check('v1.28 ② 计划还在 ⇒ **不重算**（旧写法每轮 `st[\'plan\'] = list(_sol)` 覆盖 ✗）',
+          "'plan': 'once'" in _src28
+          and "st['plan'] = list(_sol)      # ⭐ 每轮**覆盖**" not in _src28)
+    check('v1.28 ③ 走完还有目标 ⇒ 切 EffPolicy（日志 `plan: exhausted` ✓）',
+          "'plan': _pwhy" in _src28 and "'exhausted'" in _src28)
+    check('v1.28 ④ 安全网：计划连着 3 轮推不动 ⇒ 切兜底（`PLAN_STUCK_ROUNDS = 3` ✓）',
+          'PLAN_STUCK_ROUNDS = 3' in _src28 and "_pwhy == 'exhausted'" in _src28)
+
+    import importlib.util as _ilu28
+    _spec28 = _ilu28.spec_from_file_location('el_v128', _el28p)
+    _el28m = _ilu28.module_from_spec(_spec28)
+    _spec28.loader.exec_module(_el28m)
+    _pn = _el28m.plan_next
+
+    _s = {}
+    check('v1.28 ⑤ 执行级：第一轮（没计划）⇒ `plan/first`（就是"进图那一下" ✓）',
+          _pn(_s, 0, 3) == ('plan', 'first'), 'got=%s' % (_pn(_s, 0, 3),))
+    _s = {'planned': True, 'plan': [(1, 1), (2, 2)], 'plan_prev_len': 2}
+    check('v1.28 ⑥ 执行级：计划还有剩 ⇒ `keep/has_rest`（**不重算** ✓）',
+          _pn(_s, 2, 3) == ('keep', 'has_rest'))
+    _s = {'planned': True, 'plan': [(1, 1)], 'plan_stuck': 0, 'plan_prev_len': 1}
+    _r1 = _pn(_s, 1, 2)
+    _r2 = _pn(_s, 1, 2)
+    _r3 = _pn(_s, 1, 2)
+    check('v1.28 ⑦ 执行级：同一批步数连着 3 轮**没推进** ⇒ `eff/stuck`（不会死抱计划 ✗）',
+          (_r1, _r2, _r3) == (('keep', 'has_rest'), ('keep', 'has_rest'), ('eff', 'stuck')),
+          'got=%s' % ((_r1, _r2, _r3),))
+    _s = {'planned': True, 'plan_stuck': 2, 'plan_prev_len': 4}
+    check('v1.28 ⑧ 执行级：步数**有减少** ⇒ 计数清零（继续照走 ✓）',
+          _pn(_s, 2, 2) == ('keep', 'has_rest') and _s['plan_stuck'] == 0,
+          'stuck=%s' % _s.get('plan_stuck'))
+    _s = {'planned': True}
+    check('v1.28 ⑨ 执行级：计划走完且还有目标 ⇒ `eff/exhausted`（切老兜底 ✓）',
+          _pn(_s, 0, 2) == ('eff', 'exhausted'))
+    _s = {'planned': True}
+    check('v1.28 ⑩ 执行级：计划走完且**没目标** ⇒ `none/no_targets`（交给收尾，不乱切 ✓）',
+          _pn(_s, 0, 0) == ('none', 'no_targets'))
+except Exception as _e28:       # noqa: BLE001
+    check('v1.28 进图一次规划守门可运行（%r）' % (_e28,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊷ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
