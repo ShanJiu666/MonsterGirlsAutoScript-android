@@ -2717,7 +2717,44 @@ except Exception as _e30:       # noqa: BLE001
     check('v1.30 取证闸守门可运行（%r）' % (_e30,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊹ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊹ v1.31 ⭐⭐⭐【真机整屏偏紫的根因】取帧**慢路径 R↔B 互换**
+#   用户 2026-10-02：「**人看和截图都是正常的，就反馈包里的不正常**」+「啥都没识别出来」
+#   ⇒ 显示/游戏没问题，是**我们自己取帧**这条链 ✗
+#   `CaptureService.onFrame()` 旧代码：
+#     快路径 `rowStride == w*4` ⇒ `copyPixelsFromBuffer()` ✓（Redmi 1280 宽走这条，颜色正常）
+#     慢路径（行距被 64 对齐填充）⇒ `asIntBuffer()` 把 RGBA 当 int 读（=ABGR）+
+#       `setPixels()`（要 ARGB）⇒ **R↔B 互换** ✗✗
+#   触发条件正是**宽 1264** 的 realme（1264*4=5056 ⇒ 补到 5120）⇒ 只有它走慢路径 ⇒
+#     暖色棋盘变**蓝紫**、金色图标变紫 ⇒ 标记形状 0.765 / 配色 0.466 全在闸门下 ⇒ 漏检 ✗
+#   （实证：反馈帧通道均值 B:G:R = **1.37:0.75:0.89**（蓝主导）；正常帧 = 0.87:0.98:1.16（红主导））
+#   修法：慢路径**去掉行距填充后交给 `copyPixelsFromBuffer()`**（与已验证的快路径同一套转换）；
+#     并把"走哪条路 + 行距"暴露给 Python（`DeviceApi.capturePath()`）⇒ 反馈包能自证 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊹ v1.31 取帧慢路径 R↔B 互换（真机整屏偏紫的根因）')
+try:
+    _cap31 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                               'autoexplore', 'CaptureService.java'),
+                  encoding='utf-8').read()
+    _dev31 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                               'autoexplore', 'DeviceApi.java'), encoding='utf-8').read()
+    check('v1.31 ① 慢路径不再自己拼 int（旧代码那两行必须消失 ✗）',
+          'ByteBuffer rb = ByteBuffer.wrap(row);' not in _cap31
+          and 'bmp.setPixels(pixels, 0, w, 0, 0, w, h);' not in _cap31)
+    check('v1.31 ② 慢路径改成"去填充 + `copyPixelsFromBuffer()`"（与快路径同源 ✓）',
+          'byte[] tight = new byte[w * h * 4];' in _cap31
+          and 'bmp.copyPixelsFromBuffer(ByteBuffer.wrap(tight));' in _cap31)
+    check('v1.31 ③ 走哪条路 + 行距**暴露出来**（`CaptureService.slowPath()` / `slowRowStride()` ✓）',
+          'public static boolean slowPath()' in _cap31
+          and 'public static int slowRowStride()' in _cap31
+          and 'public static int[] capturePath()' in _dev31)
+    check('v1.31 ④ 慢路径会**记一行日志**（w / rowStride / 期望值 ⇒ 反馈包能一眼看出 ✓）',
+          '取帧走**慢路径**（行距填充）' in _cap31)
+except Exception as _e31:       # noqa: BLE001
+    check('v1.31 取帧通道序守门可运行（%r）' % (_e31,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊺ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。

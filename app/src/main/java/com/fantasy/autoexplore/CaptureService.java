@@ -131,6 +131,24 @@ public class CaptureService extends Service {
     private static final long STALE_MS = 8000;
     private int staleRescues = 0;
 
+    // ⭐⭐⭐ 2026-10-02 v1.31：**取帧慢路径诊断**（真机整屏偏紫的现场证据）
+    //   1264 宽这类机型 rowStride 会被补到 64 对齐 ⇒ `rowStride != w*4` ⇒ 走慢路径。
+    //   旧慢路径把 RGBA 当 ARGB 用 ⇒ **R↔B 互换**（暖色棋盘→蓝紫）✗ 现已修；
+    //   这两个值暴露给 Python，反馈包里能直接看到"这台机走的哪条路 + 行距多少" ✓
+    private static volatile boolean sloPath = false;
+    private static volatile int sloRowStride = 0;
+    private int sloRowStrideLogs = 0;
+
+    /** 给 `DeviceApi` 读：本机取帧是否走"行距填充"慢路径 */
+    public static boolean slowPath() {
+        return sloPath;
+    }
+
+    /** 给 `DeviceApi` 读：实际行距（0 = 还没取到帧） */
+    public static int slowRowStride() {
+        return sloRowStride;
+    }
+
     private final Runnable watchdog = new Runnable() {
         @Override
         public void run() {
@@ -216,18 +234,37 @@ public class CaptureService extends Service {
 
             Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             if (pixelStride == 4 && rowStride == w * 4) {
+                sloPath = false;
                 bmp.copyPixelsFromBuffer(buf);
             } else {
-                int[] pixels = new int[w * h];
-                byte[] row = new byte[rowStride];
-                for (int y = 0; y < h; y++) {
-                    buf.position(y * rowStride);
-                    int n = Math.min(rowStride, buf.remaining());
-                    buf.get(row, 0, n);
-                    ByteBuffer rb = ByteBuffer.wrap(row);
-                    rb.asIntBuffer().get(pixels, y * w, w);
+                // ⭐⭐⭐ 2026-10-02 v1.31 修【真机整屏偏紫的根因】
+                //   旧写法：`rb.asIntBuffer().get(pixels)` 把 **RGBA** 字节当 int 读（= ABGR），
+                //   再交给 `setPixels()`（要 **ARGB**）⇒ **R↔B 互换** ✗✗
+                //   触发条件：`rowStride != w*4` —— 真机 realme RMX3800 是 **1264 宽**
+                //   （1264*4=5056，GPU 行距按 64 对齐 ⇒ 实际 5120）⇒ **只有它走这条慢路径** ⇒
+                //   暖色棋盘被换成**蓝紫**、金色图标变紫 ⇒ 标记形状 0.765/配色 0.466 全在闸门下 ⇒
+                //   用户报的「**人看和截图都正常，就反馈包里的不正常**」「啥都没识别出来」✓✓
+                //   （1280 宽的 Redmi 走快路径 ⇒ 颜色正常 ✓ 与"另一台设备正常"完全对上）
+                //   修法：**去掉行距填充后交给 `copyPixelsFromBuffer()`** —— 与快路径同一套转换
+                //   （快路径在 Redmi 上已验证颜色正确 ✓），不再自己拼 int ✗
+                sloPath = true;
+                sloRowStride = rowStride;
+                if (sloRowStrideLogs < 3) {
+                    sloRowStrideLogs++;
+                    AppLog.i("取帧走**慢路径**（行距填充）：w=" + w + " rowStride=" + rowStride
+                            + " 期望=" + (w * 4) + " ⇒ 已按同源转换（v1.31 修 R↔B 互换）");
                 }
-                bmp.setPixels(pixels, 0, w, 0, 0, w, h);
+                byte[] tight = new byte[w * h * 4];
+                for (int y = 0; y < h; y++) {
+                    int pos = y * rowStride;
+                    if (pos >= buf.limit()) {
+                        break;
+                    }
+                    buf.position(pos);
+                    int n = Math.min(w * 4, buf.limit() - pos);
+                    buf.get(tight, y * w * 4, n);
+                }
+                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(tight));
             }
             FrameStore.set(bmp);
         } catch (Throwable t) {

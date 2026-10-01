@@ -70,6 +70,21 @@ public final class DeviceApi {
         }
     }
 
+    /**
+     * ⭐ v1.31：取帧是否走"行距填充"慢路径（真机 1264 宽会走 ⇒ 历史上正是它 R↔B 互换 ✗）
+     *
+     * @return `[走慢路径? 1/0, 行距, 宽度*4]`；拿不到返回 `[0,0,0]`
+     */
+    public static int[] capturePath() {
+        try {
+            int w = FrameStore.has() ? FrameStore.get().getWidth() : 0;
+            return new int[]{CaptureService.slowPath() ? 1 : 0,
+                    CaptureService.slowRowStride(), w * 4};
+        } catch (Throwable t) {
+            return new int[]{0, 0, 0};
+        }
+    }
+
     /** 测试/手动复位用（一般不用调；wait 检测到中断会自动清回 false） */
     public static void clearInterrupt() {
         INTERRUPT_WAIT = false;
