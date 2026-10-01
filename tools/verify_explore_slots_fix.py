@@ -484,6 +484,15 @@ _ALLOWED_DRIFT = {
     'buypanels': 'v1.20 宝库 BAND 1560→1720（修 1200×1920 宽屏上购买钮/价格 OCR 不到，'
                  '症状「幸运草识别不出/整层不买」）。手机侧独有修复，未回流 PC：'
                  'PC 端锁 720×1280 纯 9:16，该 bug 在 PC 上不触发 ⇒ 无需回流。',
+    # ⭐ 2026-10-02 登记：PC 端把**自己的参考分辨率**从 1080×1920 换成了 720×1280
+    #   （PC 端提速层的前提，见 `mapbot_pc/README.md` §1 与本仓 `AGENTS.md` §1b：
+    #    「PC 端锁定 720×1280 追求速度；能点固定位置的就用固定位置」）。
+    #   手机端**必须**保持 1080×1920 —— 端上是归一化参考系（RefMapper 两段拼接），
+    #   棋盘 GRID=36/1002/144 与 APK 里跑的那份源码绑死，跟着 PC 换基准会全盘错位 ✗。
+    #   ⇒ 这是**有意的分叉**，不是"忘了同步"：别拿 PC 的 layout.py 覆盖手机端那份。
+    'layout': 'v1.21 登记：PC 端 2026-10-02 把自己的参考分辨率改成 720×1280（PC 提速层'
+              '前提，AGENTS.md §1b）。手机端是归一化 1080×1920 参考系（RefMapper 两段'
+              '拼接），GRID=36/1002/144 与之绑死 ⇒ 手机端**不跟**。有意分叉，勿覆盖。',
 }
 # ⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓不存在时整组跳过**（不是失败）。
 #   以前这条强制"生成物必须与 PC 逐字节一致" ⇒ 天然要求 PC 仓在场，
@@ -1505,9 +1514,14 @@ except Exception as _e8:      # noqa: BLE001
 try:
     _el11 = os.path.join(MAPBOT, 'explore_loop.py')
     _src11 = open(_el11, encoding='utf-8').read()
-    check('v1.11 ① `board_hidden` 用**本帧最亮格**做基准（绝对阈值→相对阈值 ✓）',
-          '_mx = max([float((v or {}).get(\'ratio\') or 0)' in _src11
-          and '_thr = 0.55 * _mx if _mx > 0 else 0.55' in _src11)
+    # ⚠ 2026-10-02 v1.21：① 原本断言的是「基准 = 本帧最亮格 + 系数 0.55」——
+    #   那条在新机型（nubia NX809J）上又翻车了（见 v1.21 段）⇒ 断言随实现更新，
+    #   **它要守的性质没变**：判据必须是"相对本帧自身的口径"，不能退回绝对阈值 ✓
+    check('v1.11 ① `board_hidden` 用**本帧自身的亮度基准**（绝对阈值→相对阈值 ✓；'
+          'v1.21 起基准=已揭示格中位）',
+          ('_mx, _lit = 0.0, []' in _src11
+           and '_ref = float(np.median(_lit)) if _lit else _mx' in _src11
+           and '_thr = DIM_RATIO_MAX * _ref if _ref > 0 else DIM_RATIO_MAX' in _src11))
     check('v1.11 ② 全盘判据只在**最亮格也 < 0.40** 时才成立（设备偏暗 ≠ 面板遮 ✓）',
           'and _mx < 0.40:' in _src11)
     check('v1.11 ③ 首次判"被挡"就**存诊断帧**（我们手上没有别的机型的帧 ✗）',
@@ -1977,6 +1991,129 @@ try:
               'BAND = (300, 1720)' in _bp50 and 'BAND = (300, 1560)' not in _bp50)
 except Exception as _e50:
     check('v1.20 面板搜索带审计守门可运行（%r）' % (_e50,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉞ v1.21 又一台真机翻车：**棋盘好端端地全在，却被判「面板挡住了棋盘」**
+#   反馈包（`MGAS反馈_20261002_003748.zip` / nubia NX809J 1216×2688 / Android 16 / v1.20）
+#   里有 `board_hidden_r2.png`，但那一帧：35 格全识别、8 格已揭示、营地/海边小屋清清楚楚，
+#   「结束冒险」面板在棋盘**上方**、涂平压条在棋盘**下方**（y=1722 起，正好是棋盘下沿）
+#   ⇒ **没有任何东西盖住棋盘**。
+#   根因：判据②基准取「本帧**最亮**格」—— 该帧最亮格是「海边小屋」1.196（比模板还亮）
+#     ⇒ 旧阈值 0.55×1.196 = 0.658，而**雾格恒在 0.650** ⇒ 18 格被判"被压暗" ⇒ 误判 ✗
+#   实测（`tools/fb_calib_boardhidden.py`）：
+#     雾格/已揭示 = 0.487(realme) ~ 0.61(nubia)；真面板/已揭示 = 0.25~0.35(doc m0_r008)
+#     ⇒ 基准改「已揭示格**中位**亮度」（免疫单格过亮）+ 系数 0.42（缝中点）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉞ v1.21 修「面板挡住了棋盘」在**新机型**上的误判（nubia NX809J 1216×2688）')
+try:
+    # ⚠ 本段一律读**手机端自己的**源码（两端平行 ⇒ 不跟着 `MGAS_PC_SRC` 走）
+    _el21p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src21 = open(_el21p, encoding='utf-8').read()
+    check('v1.21 ① 判据②基准 = **已揭示格的中位亮度**（不是最亮那一格 ⇒ 免疫单格过亮 ✓）',
+          '_ref = float(np.median(_lit)) if _lit else _mx' in _src21
+          and '_lit.append(_r)' in _src21)
+    _sp21 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
+                 encoding='utf-8').read()
+    check('v1.21 ② "已揭示"口径与 `spots.py` 的 `revealed` 同源（0.75 ✓）',
+          'REVEAL_RATIO_MIN = 0.75' in _src21 and 'ratio >= 0.75' in _sp21
+          and '_r >= REVEAL_RATIO_MIN' in _src21)
+    check('v1.21 ③ 系数 = 实测缝中点 0.42（雾格 0.487~0.61 vs 真面板 0.25~0.35）',
+          'DIM_RATIO_MAX = 0.42' in _src21
+          and '_thr = DIM_RATIO_MAX * _ref if _ref > 0 else DIM_RATIO_MAX' in _src21)
+    check('v1.21 ④ 旧的「最亮格 × 0.55」口径已无残留（防改回去 ✗）',
+          '_thr = 0.55 * _mx' not in _src21)
+
+    import importlib.util as _ilu21
+    _spec21 = _ilu21.spec_from_file_location('el_v121', _el21p)
+    _el21m = _ilu21.module_from_spec(_spec21)
+    _spec21.loader.exec_module(_el21m)
+
+    def _old21(st, light, gray):
+        """v1.11~v1.20 的**旧实现**（照抄在案）—— 用来证明"改的是真 bug" ✓"""
+        _mx = max([float((v or {}).get('ratio') or 0) for v in st.values()] or [0.0])
+        if len(light) == 0 and len(gray) >= 25 and _mx < 0.40:
+            return True
+        _thr = 0.55 * _mx if _mx > 0 else 0.55
+        return sum(1 for v in st.values()
+                   if float((v or {}).get('ratio') or 1.0) < _thr) >= 15
+
+    def _mk21(n_fog, n_rev, k=1.0, covered=0, hot=None):
+        st = {}
+        for i in range(n_fog):
+            st[('f', i)] = {'ratio': 0.65 * k, 'anchor': ('f', i)}
+        for i in range(n_rev):
+            st[('r', i)] = {'ratio': 1.00 * k, 'anchor': ('r', i)}
+        for i in range(covered):
+            st[('c', i)] = {'ratio': 0.30, 'anchor': ('c', i)}
+        if hot:
+            st[('h', 0)] = {'ratio': hot, 'anchor': ('h', 0)}
+        return st
+
+    def _bh21(st, light, gray):
+        return _el21m.board_hidden({'st': st, 'light': [1] * light, 'gray': [1] * gray})
+
+    # ⚠ 最后两条是**新机型翻车的形态**：雾格盘 + 一格过亮 —— 旧实现必判 True（真 bug），
+    #   新实现必须 False（修好了）；并且"真面板盖中间"那条**不许**被放松掉 ✓
+    _cases21 = [
+        ('正常盘（雾29+亮6）', _mk21(29, 6), 0, 29, False, False),
+        ('暗设备 k=0.7', _mk21(29, 6, 0.7), 0, 35, False, False),
+        ('暗设备 k=0.5', _mk21(29, 6, 0.5), 0, 35, False, False),
+        ('面板盖中间（只露 3 格）', _mk21(2, 3, 1.0, 30), 3, 32, True, True),
+        ('全盘被遮罩', _mk21(0, 0, 1.0, 35), 0, 35, True, True),
+        ('雾格盘 + 过亮格 1.196（nubia 形态）', _mk21(29, 6, 1.0, 0, hot=1.196), 0, 29,
+         False, True),
+        ('雾格盘 + 过亮格 + 真面板', _mk21(2, 3, 1.0, 30, hot=1.196), 3, 32, True, True),
+    ]
+    _bad21, _oldok21 = [], []
+    for (tag, st, li, gr, want, old_want) in _cases21:
+        got = _bh21(st, li, gr)
+        if got != want:
+            _bad21.append('%s:新的=%s(要%s)' % (tag, got, want))
+        if _old21(st, [1] * li, [1] * gr) != old_want:
+            _oldok21.append('%s:旧的=%s(预期%s)' % (tag, _old21(st, [1] * li, [1] * gr),
+                                                old_want))
+    check('v1.21 ⑤ 新判据 7 种画面全对（含 nubia 形态 ✓、"盖中间"不回归 ✓）',
+          not _bad21, 'bad=%s' % (_bad21,))
+    check('v1.21 ⑥ 旧实现在"雾格盘+过亮格"上**确实误判**（证明修的是真 bug，不是空改 ✓）',
+          not _oldok21, 'bad=%s' % (_oldok21,))
+
+    # ⭐ 真机帧（归一化 1080×1920）执行级：全部走真 `cells_of` + 真 `board_hidden`
+    import cv2 as _cv21
+    import numpy as _np21
+    _frames21 = [
+        ('nubia NX809J（新反馈·棋盘正常）',
+         os.path.join(PROJ, '_verify', 'phone_friend_nubia_nx809j', 'board_hidden_r2.png'),
+         False, True),
+        ('realme RMX3800（旧反馈·棋盘正常）',
+         os.path.join(PROJ, '_verify', 'phone_friend_rmx3800', 'board_hidden_r0.png'),
+         False, True),
+        ('dlg16（真·全盘被遮罩，不许放松）',
+         os.path.join(PROJ, '_verify', 'dlg16.png'), True, None),
+    ]
+    _fb21, _shape21 = [], []
+    for (tag, p, want, old_want) in _frames21:
+        if not os.path.exists(p):
+            _fb21.append('%s: 缺 fixture' % tag)
+            continue
+        _im21 = _cv21.imdecode(_np21.fromfile(p, dtype=_np21.uint8), _cv21.IMREAD_COLOR)
+        if _im21 is None or _im21.shape[:2] != (1920, 1080):
+            _shape21.append('%s: %s' % (tag, None if _im21 is None else _im21.shape))
+            continue
+        _c21 = _el21m.cells_of(_im21, mapname='夏日海滩')
+        _got21 = _el21m.board_hidden(_c21)
+        _oldv21 = _old21(_c21.get('st') or {}, _c21['light'], _c21['gray'])
+        if _got21 != want:
+            _fb21.append('%s: 新的=%s(要%s)' % (tag, _got21, want))
+        if old_want is not None and _oldv21 != old_want:
+            _fb21.append('%s: 旧的=%s(预期%s)' % (tag, _oldv21, old_want))
+    check('v1.21 ⑦ 两帧真机反馈帧 + dlg16 都是**归一化 1080×1920**（喂错帧就当场红 ✓）',
+          not _shape21, 'bad=%s' % (_shape21,))
+    check('v1.21 ⑧ 执行级：两帧真机"棋盘正常"判 **False**（旧实现判 True ✗）、'
+          'dlg16 真遮罩仍判 **True** ✓',
+          not _fb21, 'bad=%s' % (_fb21,))
+except Exception as _e21:       # noqa: BLE001
+    check('v1.21 board_hidden 标定守门可运行（%r）' % (_e21,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
 # ㊱ PC 端提速层（fixed.py）—— **已移出本门禁**
