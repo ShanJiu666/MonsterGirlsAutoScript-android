@@ -2773,12 +2773,37 @@ def handle_dice(b, log, items, tries=3):
         if btn is not None:
             btn_pos = (btn['cx'], btn['cy'])
         if btn_pos is None:
-            _cand = [it for it in items
-                     if it['cx'] < LAYOUT.sx(340) and _by0 <= it['cy'] <= _by1]
-            log.append({'dice': 'no_btn', 'rolls': rolls, 'band': (_by0, _by1),
-                        'cand': [{'t': (i.get('text') or '')[:10], 'cx': i['cx'], 'cy': i['cy']}
-                                 for i in _cand][:12]})
-            break
+            # ⭐⭐⭐ 2026-10-02 v1.24【真机实测：重投按钮**没有文字**】
+            #   真机 v1.23 跑图日志：`{'dice':'no_btn', 'cand':[...'16'@(111,906), '1'@(118,979)...]}`
+            #   ⇒ 面板上 OCR 只能读到「剩余骰子数」和「🍀 消耗数」，**没有任何骰/重投/命运字样**
+            #   ⇒ 按文字找按钮是死路。游戏面板原图实测：那个按钮就是**奖励行左边的「🍀 + 数字」
+            #      图标按钮**（上面大数字=剩余骰子数，下面 `🍀 1`=重投消耗 1 个幸运草）
+            #      参考系 (114,979)，与「关闭」(y1441/1445) 固定差 **466** ✓
+            #   ⇒ 兜底：先试结构定位（`clover_btn()`，优先用 OCR 到的那个数字条目 ✓）
+            #   ⚠ 安全性：点完**照旧**走下面的「确认框必须弹出」校验 ——
+            #     没弹出确认框就不执行、两次即放弃（`_no_confirm`）⇒ 不会乱点/不会白花幸运草 ✓
+            _cb = clover_btn(items) if rolls == 0 else None
+            if _cb is not None:
+                btn_pos = _cb
+                log.append({'dice': 'clover_btn_fallback', 'at': _cb,
+                            'band': (_by0, _by1)})
+                say('       · 找不到文字的骰子按钮 ⇒ 按「🍀 重投按钮」结构定位点一下试 ✓')
+            else:
+                _cand = [it for it in items
+                         if it['cx'] < LAYOUT.sx(340) and _by0 <= it['cy'] <= _by1]
+                log.append({'dice': 'no_btn', 'rolls': rolls, 'band': (_by0, _by1),
+                            'cand': [{'t': (i.get('text') or '')[:10],
+                                      'cx': i['cx'], 'cy': i['cy']}
+                                     for i in _cand][:12]})
+                # ⭐ v1.24：把这块面板**存成诊断帧**（反馈包会自动带上它 ✓）
+                #   —— 下次再出现"没摇成"，我们手里就有真机面板图，不用再靠猜位置
+                try:
+                    _dp = _pub_dump('dice_nobtn', b.img())
+                    if _dp:
+                        log.append({'dice_dump': _dp})
+                except Exception as _edp:      # noqa: BLE001
+                    log.append({'dice_dump_fail': repr(_edp)[:60]})
+                break
         btn = {'cx': btn_pos[0], 'cy': btn_pos[1]}
         log.append({'dice': 'panel', 'rolls': rolls,
                     'items': [{'t': x['text'], 'cx': x['cx'], 'cy': x['cy']}
@@ -2845,6 +2870,47 @@ def dice_gate(marks, exact, win_streak, result_streak, on_result, diced=False):
     if win_streak >= 2 and not on_result:
         return 'roll', 'win_only'
     return None, 'waiting_result_panel'
+
+
+def clover_btn(items, close_y=None):
+    """找「重投命运之骰」按钮 —— ⭐ 真机上它**没有文字**，是「🍀 + 数字」图标按钮
+
+    ⭐⭐ 2026-10-02 v1.24 实测（Redmi 1280×2772 真机 v1.23 跑图 + 游戏面板原图）：
+      结算面板奖励行**左边**有个按钮：上面一个大数字（剩余骰子数），下面一条
+      「🍀 1」= **重投消耗 1 个幸运草** —— 它才是重投按钮 ✗ 不是文字按钮。
+      手机端 OCR 在那块面板上只能读到 `'16' @ (111,906)` 和 `'1' @ (118,979)`，
+      **读不到任何「骰/重投/命运」字样** ⇒ `handle_dice` 只按文字找 ⇒ 恒 `no_btn`
+      ⇒ 一次都不摇、一个幸运草都不花 = 用户报的「不摇色子」✗✗
+
+    参考系实测（1080×1920 归一化帧，面板是**锚底系** ⇒ 用「关闭」当锚点最稳）：
+        关闭 y = 1445（PC 帧）/ 1441（真机） ；重投按钮 ≈ (114, 979) ⇒ **偏移 −466**
+      ⇒ 本函数优先用**OCR 条目**（跨分辨率自适应 ✓），找不到再退回「关闭上方 466」的推算坐标。
+
+    返回 `(x, y)` 或 `None`（连「关闭」都认不到 ⇒ 不敢点，交回调用方记 no_btn ✓）
+    """
+    try:
+        _cy = close_y
+        if _cy is None:
+            _cl = bottom_close(items)
+            _cy = _cl['cy'] if _cl else None
+        if _cy is None:
+            return None
+        _ty = float(_cy) - 466.0
+        _best, _bd = None, 1e9
+        for it in items:
+            _t = str(it.get('text') or '').strip()
+            if not _t or len(_t) > 4 or not _t.isdigit():
+                continue                      # 那一行是「🍀 1」这种纯数字（骰子数/消耗数）
+            if it['cx'] > LAYOUT.sx(300):
+                continue
+            _d = abs(float(it['cy']) - _ty)
+            if _d < _bd and _d <= 160:        # 允许 ±160（面板纵向压缩随分辨率变 ✓）
+                _best, _bd = it, _d
+        if _best is not None:
+            return (int(_best['cx']), int(_best['cy']))
+        return (int(LAYOUT.sx(114)), int(_ty))     # 兜底：按锚点推算（x 用参考值缩一下 ✓）
+    except Exception:       # noqa: BLE001
+        return None
 
 
 def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None):

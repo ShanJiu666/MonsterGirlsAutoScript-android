@@ -2314,7 +2314,66 @@ except Exception as _e23:       # noqa: BLE001
     check('v1.23 结算面板摇色子守门可运行（%r）' % (_e23,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊲ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊲ v1.24 ⭐⭐⭐「不摇色子」第二刀：**重投按钮根本没有文字**
+#   真机 v1.23 跑图（Redmi 1280×2772）反馈包 `不摇色子.zip`：
+#     {"popup":"result_dice","rc":[3,4],"marks":["boss","recommend"]}   ← v1.23 分支生效 ✓
+#     {"dice":"no_btn","rolls":0,"band":[520,1020],
+#      "cand":[{"t":"1/84",...},{"t":"422 596 96",...},
+#              {"t":"16","cx":111,"cy":906},{"t":"1","cx":118,"cy":979}]} ← 只有数字，没有按钮文字 ✗
+#   游戏面板原图实测：重投按钮 = 奖励行左边那个「🍀 + 数字」图标按钮
+#     （上面大数字=剩余骰子数，下面 `🍀 1`=重投消耗 1 个幸运草）
+#     参考系 ≈ (114,979)；「关闭」y=1441(真机)/1445(PC) ⇒ 固定偏移 **−466** ✓
+#   修法：`clover_btn()` 结构定位兜底（优先用 OCR 到的那个数字条目 ⇒ 跨分辨率自适应），
+#     点完**照旧**要求「是否重掷？」确认框弹出才算数（没弹就放弃 ✓ 不会乱点）。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊲ v1.24 修「不摇色子」第二刀：重投按钮没有文字 ⇒ 结构定位兜底')
+try:
+    _el24p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src24 = open(_el24p, encoding='utf-8').read()
+    check('v1.24 ① 新增 `clover_btn()` 结构定位（重投按钮没有文字 ✓）',
+          'def clover_btn(' in _src24 and '_ty = float(_cy) - 466.0' in _src24)
+    check('v1.24 ② 兜底接在 `no_btn` 之前，且**确认框校验原样保留**'
+          '（点完必须弹「是否重掷？」才算数 ✓）',
+          "'dice': 'clover_btn_fallback'" in _src24
+          and _src24.index("'dice': 'clover_btn_fallback'")
+          < _src24.index("'dice': 'no_btn', 'rolls': rolls")
+          and "_no_confirm >= 2" in _src24)
+    check('v1.24 ③ 判不出来时**存面板诊断帧**（`dice_nobtn` ⇒ 反馈包自带真机面板 ✓）',
+          "_pub_dump('dice_nobtn'" in _src24 and "'dice_dump'" in _src24)
+
+    import importlib.util as _ilu24
+    _spec24 = _ilu24.spec_from_file_location('el_v124', _el24p)
+    _el24m = _ilu24.module_from_spec(_spec24)
+    _spec24.loader.exec_module(_el24m)
+
+    _items24 = [{'text': '战斗胜利', 'cx': 540, 'cy': 200},
+                {'text': '1/84', 'cx': 261, 'cy': 634},
+                {'text': '16', 'cx': 111, 'cy': 906},
+                {'text': '1', 'cx': 118, 'cy': 979},
+                {'text': '240', 'cx': 802, 'cy': 993},
+                {'text': '回放战斗', 'cx': 577, 'cy': 1224},
+                {'text': '关闭', 'cx': 576, 'cy': 1441}]
+    _cb24 = _el24m.clover_btn(_items24)
+    check('v1.24 ④ 执行级：真机那份面板条目 ⇒ 选中「🍀 1」按钮 (118,979)'
+          '（不是 16、不是 240、不是 关闭 ✓）',
+          _cb24 == (118, 979), 'got=%s' % (_cb24,))
+    _cb24b = _el24m.clover_btn([{'text': '关闭', 'cx': 576, 'cy': 1441}])
+    check('v1.24 ⑤ 执行级：只有「关闭」⇒ 退回**锚点推算** (114*k, 1441−466)',
+          _cb24b is not None and abs(_cb24b[1] - 975) <= 2,
+          'got=%s' % (_cb24b,))
+    check('v1.24 ⑥ 执行级：连「关闭」都认不到 ⇒ **返回 None**（不敢乱点 ✓）',
+          _el24m.clover_btn([{'text': '战斗胜利', 'cx': 540, 'cy': 200}]) is None)
+    _cb24c = _el24m.clover_btn([{'text': '关闭', 'cx': 576, 'cy': 1441},
+                                {'text': '7', 'cx': 120, 'cy': 300},
+                                {'text': '9', 'cx': 120, 'cy': 1600}])
+    check('v1.24 ⑦ 执行级：离锚点太远的数字（±160 之外）**不选** ⇒ 仍走推算',
+          _cb24c is not None and abs(_cb24c[1] - 975) <= 2, 'got=%s' % (_cb24c,))
+except Exception as _e24:       # noqa: BLE001
+    check('v1.24 重投按钮结构定位守门可运行（%r）' % (_e24,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊳ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
