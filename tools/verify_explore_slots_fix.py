@@ -1556,6 +1556,212 @@ try:
 except Exception as _e17:
     check('v1.17 几何对拍守门可运行（%r）' % (_e17,), False)
 
+# ─────────────────────────────────────────────────────────────────────────
+# ㉘ v1.18 修「地图界面被当成已开打」（2026-10-01 全分辨率 1264×2780 实跑暴露的真 bug）
+#   现场：`★首领战斗不超过8回合` / `首领战斗胜利` 是《遗忘之海》地图 HUD 的**常驻文案**，
+#   旧判据用宽子串（'回合' in t / L['win'] in t）⇒ 点完「战斗」一 OCR 就假判"已开打"
+#   ⇒ wait_end 空等 20 秒 → back_in_map ⇒ 格子没清 ⇒ 下一轮原样再来（连打 4 轮死循环）。
+#   证据帧：`_verify/fr1264_map_boss_banner.png`（设备归一化帧，1080×1920 存档）
+#   真·战斗结算帧对照：`mapbot_pc/runs/bw2.json`（真机全量 OCR ✓）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉘ v1.18 battle_started 不许把「地图自身的任务横幅」当成已开打')
+_FR_SRC = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+import inspect as _insp                                  # noqa: E402
+_FR_FN = _insp.getsource(EL.battle_started)              # ⚠ 只看函数体：教训写在**函数外**的注释里
+check('v1.18 ① 旧的宽子串判据已删除（函数体里没有 `\'回合\' in t`）', "'回合' in t" not in _FR_FN)
+check('v1.18 ② 旧的宽子串判据已删除（函数体里没有 `L[\'win\'] in t`）', "L['win'] in t" not in _FR_FN)
+check('v1.18 ③ 新增整条回合正则 _ROUND_RE（"第1/10回合"）', '_ROUND_RE = re.compile' in _FR_SRC)
+
+# 负样本 = 1264×2780 真机地图帧的 OCR 条目（含两条常驻横幅）⇒ 必须 False
+_MAP_FRAME = [
+    item('PID:162332', 226, 37), item('Ver:1.2.2.7', 404, 38),
+    item('2079/2100', 338, 93),
+    item('首领战斗胜利', 135, 167),            # ← 旧判据的受害者①（任务达成状态）
+    item('遗忘之海[100]', 539, 183), item('帮助', 809, 211), item('2471%', 972, 219),
+    item('首领战斗2人存活', 153, 225),
+    item('当前难度60', 975, 277),
+    item('★首领战斗不超过8回合', 160, 283),     # ← 旧判据的受害者②（任务条件）
+    item('友方行动回魔-20。', 161, 658),
+    item('敌方行动开始前获得20层滋润。', 221, 721),
+    item('配队', 976, 767), item('结束冒险', 540, 773),
+    item('空闲', 473, 899), item('已完成', 241, 940), item('已完成', 350, 940),
+    item('背包', 978, 942),
+]
+check('v1.18 ④ 地图帧（首领横幅）不再被判"已开打"', EL.battle_started(_MAP_FRAME) is False,
+      EL.battle_started(_MAP_FRAME))
+for _t in ('首领战斗胜利', '★首领战斗不超过8回合', '首领战斗2人存活'):
+    check('v1.18 ⑤ 单条地图横幅也不许命中：%s' % _t,
+          EL.battle_started([item(_t, 300, 300)]) is False)
+
+# 正样本①：真机战斗结算帧（runs/bw2.json 全量 OCR）⇒ 必须 True（别过度收紧 ✗）
+_bw_p = os.path.join(MAPBOT, 'runs', 'bw2.json')
+if os.path.exists(_bw_p):
+    _bw = json.load(io.open(_bw_p, encoding='utf-8'))
+    _bitems = _bw['items'] if isinstance(_bw, dict) else _bw
+    check('v1.18 ⑥ 真机战斗结算帧仍判"已开打"（不过度收紧 ✓）',
+          EL.battle_started(_bitems) is True)
+    check('v1.18 ⑦ 结算帧靠的是整条「战斗胜利」+「第1/10回合」',
+          any(i['text'].strip() == '战斗胜利' for i in _bitems)
+          and any(i['text'].strip() == '第1/10回合' for i in _bitems))
+else:
+    skip('v1.18 ⑥ 真机战斗结算帧 runs/bw2.json 缺失 ⇒ 正样本没验')
+
+# 正样本②：战斗界面各特征词逐个单测
+for _txt, _want in (('战斗胜利', True), ('战斗失败', True), ('第1/10回合', True),
+                    ('第3回合', True), ('第12／20回合', True),
+                    ('加速', True), ('自动跳过', True), ('回放战斗', True)):
+    check('v1.18 ⑧ 单条 %r ⇒ %s' % (_txt, '已开打' if _want else '不算开打'),
+          bool(EL.battle_started([item(_txt, 540, 400)])) is _want)
+
+# 边界：第*、回合、加速 出现在**地图任务文案**里一律不算（防"暂时加速"这类增益名误命中）
+check('v1.18 ⑨ 带 ★ / 不超过 的句子算地图文案（不算开打）',
+      EL.battle_started([item('★首领战斗不超过8回合', 160, 283)]) is False
+      and EL.battle_started([item('不超过8回合', 160, 283)]) is False)
+check('v1.18 ⑩ 空 items / 无战斗特征 ⇒ False（不误判）',
+      EL.battle_started([]) is False
+      and EL.battle_started([item('星界秘境', 860, 1405)]) is False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉙ v1.19 修「奖励行/骰子按钮搜索带是写死绝对 y」——1264×2780 真帧实测根因
+#   实测（设备帧 OCR → 换算回参考系 1080×1920）：
+#       PC 9:16 : 奖励行数字 907 / 994~1001 ｜ 回放 1223 ｜ 关闭 1440 ｜ 自动跳过 1563
+#       真机    : 奖励行数字 636 / 752       ｜ 回放 1224 ｜ 关闭 1441 ｜ 自动跳过 1563
+#   ⇒ 面板**底部三键两机一致**（锚定模型成立 ✓），但**奖励行在真机高 271px**（战斗 UI 纵向压缩）
+#   ⇒ 旧 `sy(700)~sy(1180)`（文字带）/ `box=(40,840+C,1020,1140+C)`（图标框）
+#      在真机上**完全盖不到奖励行** ⇒ `{'dice':'no_btn'}` + 图标三路全 None（真机复现 ✓）
+#   证据帧：`_verify/fr1264_result_panel.png`（设备原帧，含 战斗胜利/第4-10回合/关闭/自动跳过）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉙ v1.19 奖励行/骰子搜索带必须锚定「关闭」按钮（不得写死绝对 y）')
+_K1, _S1 = 1264 / 1080.0, 2780 - 1920 * (1264 / 1080.0)
+
+
+def _dev2ref(y):
+    """1264×2780 设备 y → 参考系 y（RefMapper 锚定模型：y<=300 锚顶，其余锚底）"""
+    return y / _K1 if y <= 300 * _K1 else (y - _S1) / _K1
+
+
+_DEV_PANEL = [('1/3', 224, 1277), ('1/16', 468, 1277), ('5/5', 715, 1277),
+              ('133114', 229, 1375), ('220 46 184', 449, 1413),
+              ('10', 130, 1595), ('1', 150, 1680),
+              ('回放战斗', 677, 1966), ('关闭', 675, 2219), ('自动跳过', 673, 2362)]
+_panel_items = [item(t, x, int(round(_dev2ref(y)))) for t, x, y in _DEV_PANEL]
+_bx0, _by0, _by1 = EL._reward_band(_panel_items)
+check('v1.19 ① 传入真机结算帧 items ⇒ band 收紧到 (%d, %d, %d)' % (_bx0, _by0, _by1),
+      _by1 < EL.REWARD_CLOSE_UP_MAX + 1)
+_cov = [t for t, x, y in _DEV_PANEL
+        if _by0 <= _dev2ref(y) <= _by1 and x < EL.REWARD_X1]
+check('v1.19 ② 真机奖励行左区**被覆盖**（6 条数字）',
+      len(_cov) >= 5, _cov)
+for _t in ('回放战斗', '关闭', '自动跳过'):
+    _ry = _dev2ref(dict((a, c) for a, b, c in _DEV_PANEL)[_t])
+    check('v1.19 ③ 底部按钮 %r 不得落进奖励行带（y=%.0f）' % (_t, _ry),
+          not (_by0 <= _ry <= _by1))
+check('v1.19 ④ 旧写死带 sy(700)~sy(1180) 在真机**盖不到**奖励行（= 本 bug 根因）',
+      700 > _dev2ref(1277) and 1180 < _dev2ref(1413) - 0 or
+      not (700 <= _dev2ref(1277) <= 1180),
+      '旧带 700~1180 vs 奖励行 %.0f~%.0f' % (_dev2ref(1277), _dev2ref(1680)))
+check('v1.19 ⑤ 无 items 时退回默认常量（不崩）',
+      EL._reward_band(None) == (20, EL.REWARD_CLOSE_UP_MIN, EL.REWARD_CLOSE_UP_MAX),
+      EL._reward_band(None))
+check('v1.19 ⑥ 上界锚定方向正确（必须 min(常量, 关闭-260)，反了会失效）',
+      _by1 == max(EL.REWARD_CLOSE_UP_MIN,
+                  min(EL.REWARD_CLOSE_UP_MAX,
+                      int(round(_dev2ref(2219))) - 260)),
+      'by1=%d' % _by1)
+# 源码级：旧硬编码必须已消失
+_FR_SRC2 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+check('v1.19 ⑦ 旧硬编码 `box=(40, 840 + c` 已消失', '(40, 840 + c' not in _FR_SRC2)
+check('v1.19 ⑧ 旧硬编码 `LAYOUT.sy(700) <= it[\'cy\'] <= LAYOUT.sy(1180)` 已消失',
+      "LAYOUT.sy(700) <= it['cy'] <= LAYOUT.sy(1180)" not in _FR_SRC2)
+# PC 基线帧（runs/bw2.json）仍覆盖到奖励行 ⇒ 没把 9:16 弄坏
+_bw2 = os.path.join(MAPBOT, 'runs', 'bw2.json')
+if os.path.exists(_bw2):
+    _b2 = json.load(io.open(_bw2, encoding='utf-8'))
+    _b2i = _b2['items'] if isinstance(_b2, dict) else _b2
+    _bx0b, _by0b, _by1b = EL._reward_band(_b2i)
+    _pc_cov = [i['text'] for i in _b2i
+               if _by0b <= i['cy'] <= _by1b and i['cx'] < EL.REWARD_X1]
+    check('v1.19 ⑨ PC 9:16 结算帧仍覆盖到奖励行（没弄坏基线 ✓）',
+          len(_pc_cov) >= 4, _pc_cov[:6])
+    check('v1.19 ⑩ PC 帧的「关闭/自动跳过」也排除在外',
+          not (_by0b <= 1440 <= _by1b) and not (_by0b <= 1563 <= _by1b),
+          'band=(%d,%d,%d)' % (_bx0b, _by0b, _by1b))
+else:
+    skip('v1.19 ⑨⑩ PC 基线帧 runs/bw2.json 缺失 ⇒ 没验 9:16 未回归')
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉚ v1.20 面板层「全分辨率」自检（把「到底有没有做全分辨率」变成可执行的门禁）
+#   起因：2026-10-01 用户追问「换个分辨率问题又出来，到底有没有做全分辨率适配」
+#     结论：**棋盘层做了（逐格全等），面板层没做**（全是逐设备标定的常数，失败还是静默的）
+#     ⇒ v1.18 / v1.19 都是这一类 ⇒ 必须有工具在换分辨率**之前**就报警
+#   工具：`tools/verify_panels_allres.py`（A 几何 / B 搜索带覆盖 / C 判据重放 × 9 个分辨率）
+# ⚠ **清单即契约**：新面板常数必须登记进 `PANEL_CONSTS`，否则等于没测
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉚ v1.20 面板层全分辨率自检（几何/搜索带/判据 × 9 分辨率）')
+try:
+    import subprocess as _sp20
+    _gp20 = os.path.join(HERE, 'verify_panels_allres.py')
+    if not os.path.exists(_gp20):
+        check('v1.20 面板自检脚本存在', False, _gp20)
+    else:
+        _r20 = _sp20.run([sys.executable, _gp20], stdout=_sp20.PIPE,
+                          stderr=_sp20.STDOUT, timeout=180)
+        _o20 = (_r20.stdout or b'').decode('utf-8', 'replace')
+        check('v1.20 面板层自检可运行且全过（exit=%d）' % _r20.returncode,
+              _r20.returncode == 0, _o20.strip().split('\n')[-1][:90])
+        check('v1.20 ① 覆盖 ≥9 个分辨率', '9 个分辨率' in _o20)
+        check('v1.20 ② 几何段存在（面板常数→设备坐标）', 'A. 几何' in _o20)
+        check('v1.20 ③ 搜索带段存在（真机实测坐标覆盖断言）', 'B. 搜索带覆盖' in _o20)
+        check('v1.20 ④ 判据重放段存在（地图帧负/PC帧正）', 'C. 判据重放' in _o20)
+        check('v1.20 ⑤ 地图帧不得判成结算面板（2026-09-26 旧坑）',
+              '地图帧 is_battle_panel = False  OK' in _o20)
+        check('v1.20 ⑥ 地图帧不得判成已开打（v1.18 修的那个）',
+              '地图帧 battle_started  = False  OK' in _o20)
+        check('v1.20 ⑦ PC 结算帧仍认得出（没过度收紧）',
+              'PC结算帧 is_battle_panel = True  OK' in _o20
+              and 'PC结算帧 battle_started  = True  OK' in _o20)
+        check('v1.20 ⑧ 清单即契约的提示在位',
+              '清单即契约' in _o20)
+except Exception as _e20:
+    check('v1.20 面板自检守门可运行（%r）' % (_e20,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉛ v1.19 奖励行「锚定关闭」双分辨率审计（2026-10-01 20:4x 补）
+#   背景：v1.19 把骰子/大拇指搜索框从「写死 y」改成「相对关闭按钮锚定」，
+#   但当时的离线验收只跑了一张**首领战**帧（奖励行里没有大拇指 ⇒ 结果全空），
+#   **等于没验**。本组把「band 覆盖 / 不误伤底部三键 / 旧 box 必然漏 /
+#   PC 帧不过度收紧 / 阈值标定」全部变成断言，钉死这个修法。
+print()
+print('㉛ v1.19 奖励行锚定「关闭」· 双分辨率审计')
+try:
+    import subprocess as _sp30
+    _gp30 = os.path.join(HERE, 'verify_reward_band_allres.py')
+    if not os.path.exists(_gp30):
+        check('v1.19 奖励行审计脚本存在', False, _gp30)
+    else:
+        _r30 = _sp30.run([sys.executable, _gp30], stdout=_sp30.PIPE,
+                          stderr=_sp30.STDOUT, timeout=180)
+        _o30 = (_r30.stdout or b'').decode('utf-8', 'replace')
+        check('v1.19 奖励行审计可运行且全过（exit=%d）' % _r30.returncode,
+              _r30.returncode == 0, _o30.strip().split('\n')[-1][:90])
+        check('v1.19 ⓐ 真机 1264×2780 奖励行左半区被 band 覆盖',
+              '奖励行左区条目被 band 覆盖' in _o30 and '[FAIL]' not in _o30)
+        check('v1.19 ⓑ 面板底部三键不落进 band',
+              '面板底部三键**不**落进 band' in _o30)
+        check('v1.19 ⓒ 旧写死 box 确实盖不全（证明修的是真 bug）',
+              '旧 box 确实盖不全' in _o30)
+        check('v1.19 ⓓ 新 box 覆盖左半区全部奖励行条目',
+              '新 box 覆盖**左半区全部**奖励行条目' in _o30)
+        check('v1.19 ⓔ PC 9:16 帧不过度收紧（正/负同时成立）',
+              'PC 帧奖励条目被覆盖' in _o30 and 'PC 帧底部按钮被排除' in _o30)
+        check('v1.19 ⓕ 徽章阈值 0.70/0.70 与尺度带 4.1~4.9 未被动过',
+              '形状阈值 = 0.70' in _o30 and '配色阈值 = 0.70' in _o30)
+except Exception as _e30:
+    check('v1.19 奖励行审计守门可运行（%r）' % (_e30,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

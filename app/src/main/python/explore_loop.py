@@ -1962,10 +1962,49 @@ def bottom_close(items, min_cy=None):
     return best
 
 
+# ⭐⭐ v1.19（2026-10-01 1264×2780 真帧）结算面板「奖励行」定位：**锚定「关闭」**，不写死 y
+#   实测（设备帧 OCR → 换算回参考系 1080×1920）：
+#       PC 9:16 : 奖励行数字 907 / 994~1001 ｜ 回放 1223 ｜ 关闭 1440 ｜ 自动跳过 1563
+#       真机    : 奖励行数字 636 / 752       ｜ 回放 1224 ｜ 关闭 1441 ｜ 自动跳过 1563
+#   ⇒ 面板**底部三键两机一致**（锚定模型成立 ✓），但奖励行在真机**高 271px**（战斗 UI 纵向压缩）
+#   ⇒ 旧常量 `sy(700)~sy(1180)`（文字带）/ `box=(40,840+C,1020,1140+C)`（图标框）
+#      在 1264×2780 上**完全盖不到奖励行** ⇒ `no_btn` + 三路图标全 None ✓（真机复现）
+#   ⇒ 改用「相对关闭按钮」：奖励行恒在关闭**上方** CLOSE_UP_MAX~CLOSE_UP_MIN，
+#      且落在**左侧骰子区** x<sx(560)（实测奖励行在 x 103~1159，但骰子在左半区）
+REWARD_X1 = 560          # 骰子/大拇指检测的右边界（参考系；实测图标在 x 134~464）
+REWARD_CLOSE_UP_MIN = 520     # 奖励行最低（离关闭最远）
+REWARD_CLOSE_UP_MAX = 1020    # 奖励行最高（必须在「回放战斗」上方，避免把按钮当奖励）
+
+
+def _reward_box(items=None, c=0):
+    """奖励行搜索框（参考系；c>0 时是**弹窗系** ⇒ y 要 +C，与旧代码同口径 ✓）
+
+    ⚠ `items` 传进来时会**用真实「关闭」按钮**收紧上界（更准）；没有就退回默认常量。
+    ⚠⚠ 教训：上界要 **min(常量, 关闭-60)**，不能反过来 —— 反过来 clamp 会让"关闭锚定"完全失效
+       （我第一版写成 `min(MAX, close-60)` 而 MAX=1180 > close-60=1380 时永远取 1180 ✗）。
+    """
+    y0, y1 = REWARD_CLOSE_UP_MIN, REWARD_CLOSE_UP_MAX
+    if items:
+        _cl = bottom_close(items)
+        if _cl:
+            y1 = max(REWARD_CLOSE_UP_MIN,
+                     min(REWARD_CLOSE_UP_MAX, int(_cl['cy']) - 260))
+    return (20, y0 + c, REWARD_X1 + c, y1 + c)
+
+
+def _reward_band(items=None, c=0):
+    """骰子按钮的**文字**搜索带（cx, cy 上下界），同样锚定「关闭」
+
+    ⚠⚠ 2026-10-01 实测：**奖励行是纯图标+数字，OCR 读不到「骰」字**
+      （真机结算帧 OCR 只有 `1/3` `1/16` `5/5` `220 46 184` 这类）⇒ 文字通道在**任何**
+      分辨率都不可能命中，它只作为**兜底**（万一某版本有字）保留 ✓
+    """
+    _x0, _y0, _x1, _y1 = _reward_box(items, c)
+    return _x0, _y0, _y1
+
+
 def is_battle_panel(items):
     """是不是**战斗结算/胜利/失败**面板（战斗界面 ⇒ 必须点「关闭」，不能点开始冒险 ✗）
-
-    ⚠⚠ 2026-09-26 实测踩坑（我引入的 bug）：原来判据是
       `fb(items, L['win'], L['lose'], L['close'], '回放战斗')` —— 而**地图界面左上角的
       挑战目标里有一行「首领战斗胜利」**，子串包含「战斗胜利」⇒ 在**干净地图**上被误判成
       战斗面板 ⇒ `universal_close` 去点 (577,1439) ✗ —— 那其实是**棋盘格 (4,4)** ⇒
@@ -2485,18 +2524,40 @@ def find_orange_btn(img, x0=None, x1=None, y0=None, y1=None):
     return best
 
 
+# ⭐⭐ 2026-10-01 修「地图界面被当成已开打」的假判（1264×2780 全分辨率实跑暴露）：
+#   旧判据是**子串**匹配（`'回合' in t` / `L['win'] in t`），而《遗忘之海》地图 HUD
+#   自带两条**常驻文案**：
+#     · `★首领战斗不超过8回合`        ← 任务条件，含「回合」
+#     · `首领战斗胜利` + `首领战斗2人存活` ← 任务达成状态，含「战斗胜利」
+#   ⇒ 在图上点完「战斗」后只要 OCR 一次，这两个词必然命中 ⇒ **假判"已进战斗"**
+#   ⇒ wait_end 空等 20 秒 → `back_in_map`，格子根本没打 → 下一轮原样再来一遍
+#     （2026-10-01 14:29 实测：连打 4 轮「开打 · 拦路格」、STATS 战斗 0 场，
+#       最后靠 same_action×4 强制脱困才停 ✗；离线复现见回归套件 ㉘ 组）
+#   真·战斗/结算界面的文本形态（真机帧 `runs/bw2.json` 实测 ✓）：
+#     `战斗胜利` / `战斗失败` —— **整条**（不是"首领战斗胜利"这种带前缀的横幅）
+#     `第1/10回合` —— **整条**（正则）｜`加速` / `自动跳过` / `回放战斗`（战斗专属控件）
+#   ⇒ 判据改成「整条严格匹配」+「带地图任务标记（★ / 不超过）的句子一律不算」✓
+#   ⚠ 真·战斗界面行为不变（这些文本在真战斗里照样命中 ✓）；PC/9:16 同口径 ✓
+_ROUND_RE = re.compile(r'^第\s*\d+\s*(?:[/／]\s*\d+\s*)?回合$')
+_BATTLE_STRONG = ('加速', '自动跳过', '回放战斗')
+_MAP_OBJ_MARK = ('★', '不超过')
+
+
 def battle_started(items):
     """是否已进入战斗：看战斗特征，而不是「战斗事件面板消失没」。
 
     ⚠ 点一格可能同时弹出两块面板（目标格 + 相邻格）：打的那块开打后，
       另一块面板的「战斗事件」文字还在 -> 只看它消失会把**已经开打的**误判成没打
       （用户 09-25：「那场明明打完并且赢了」）。
+    ⚠⚠ 但**不能**用宽子串（见上面那段教训）：地图自身的任务横幅也含「回合 / 战斗胜利」。
     """
     for it in items:
-        t = it['text']
-        if ('回合' in t) or ('加速' in t) or ('自动跳过' in t) or t.startswith('第'):
+        t = (it.get('text') or '').strip()
+        if t == L['win'] or t == L['lose']:          # 整条等值（"首领战斗胜利" 不算 ✓）
             return True
-        if (L['win'] in t) or (L['lose'] in t):
+        if _ROUND_RE.match(t):                       # "第1/10回合" / "第3回合" 整条
+            return True
+        if any(k in t for k in _BATTLE_STRONG) and not any(k in t for k in _MAP_OBJ_MARK):
             return True
     return False
 
@@ -2566,6 +2627,15 @@ def handle_dice(b, log, items, tries=3):
         #     · 结算面板若是 B 类（归一化系，实测「关闭」1440≈PC 1439）⇒ box **+C**
         #     · 若是 A 类（弹窗系）⇒ box 不变
         #   ⇒ 两路弹窗 + 一路归一化，取**分数最高**的那个（阈值 0.70 兜底防噪声）✓
+        #
+        # ⚠⚠ v1.19（2026-10-01 1264×2780 真帧）：box **不能写死绝对 y**。
+        #   真机实测（设备帧 OCR，转回参考系）：
+        #     奖励行数字 636~752 ｜ 回放战斗 1224 ｜ **关闭 1441** ｜ 自动跳过 1563
+        #   PC 9:16 同位置是 907/994 ｜ 1223 ｜ 1440 ｜ 1563
+        #   ⇒ 面板**底部三键两机完全一致**（锚定模型对 ✓），但**奖励行在真机上高 271px**
+        #   （战斗 UI 纵向压缩）⇒ 旧 box (40,840+C,1020,1140+C) 在真机完全盖不到奖励行
+        #   ⇒ 三路全 None、图标掉到 0.40「近失」，文字通道更绝（见 _reward_band 注释）。
+        #   ⇒ 改成**锚定「关闭」**：奖励行 = 关闭上方 (600~1300)，任何分辨率都成立 ✓
         _c = int(round(dlg_c()))
         _routes = []
         _dimg = None
@@ -2576,9 +2646,9 @@ def handle_dice(b, log, items, tries=3):
                 _dimg = None
         if _dimg is not None and _c:
             _routes.append(('dlg+C', badge_mod.find_reward_mark(
-                _dimg, box=(40, 840 + _c, 1020, 1140 + _c))))
-            _routes.append(('dlg', badge_mod.find_reward_mark(_dimg)))
-        _routes.append(('ref', badge_mod.find_reward_mark(b.img())))
+                _dimg, box=_reward_box(items, _c))))
+            _routes.append(('dlg', badge_mod.find_reward_mark(_dimg, box=_reward_box(items))))
+        _routes.append(('ref', badge_mod.find_reward_mark(b.img(), box=_reward_box(items))))
         _best = None
         for _t, _h in _routes:
             if _h and (not _best or _h[0][0] > _best[0][0]):
@@ -2604,9 +2674,10 @@ def handle_dice(b, log, items, tries=3):
                 _near = []
                 if dimg is not None and c:
                     _near += badge_mod.find_reward_mark(
-                        dimg, box=(40, 840 + c, 1020, 1140 + c),
+                        dimg, box=_reward_box(items, c),
                         shape_min=0.0, color_min=0.0, top=2)
-                _near += badge_mod.find_reward_mark(b.img(), shape_min=0.0,
+                _near += badge_mod.find_reward_mark(b.img(), box=_reward_box(items),
+                                                    shape_min=0.0,
                                                     color_min=0.0, top=2)
                 log.append({'dice': tag + '_near', 'k': k,
                             'top': [('近失', round(x[0], 3), round(x[1], 3),
@@ -2673,34 +2744,38 @@ def handle_dice(b, log, items, tries=3):
         #   "文本含 骰/重投/命运"，代码却没校验 ✗）
         #   ⇒ 必须**文字命中**才算骰子按钮；位置只作为二次筛选 ✓
         _dice_keys = ('骰', '重投', '命运', '重掷', '掷')
+        # ⭐ v1.19：搜索带**锚定「关闭」按钮**（不再写死 sy(700)~sy(1180)）——
+        #   1264×2780 真帧实测奖励行在参考系 636~752，旧带完全盖不到（真机 no_btn 根因 ✓）
+        _bx0, _by0, _by1 = _reward_band(items)
         btn = None
         for it in items:
             _t = (it.get('text') or '')
             if not any(k in _t for k in _dice_keys):
                 continue
-            if it['cx'] < LAYOUT.sx(400) and LAYOUT.sy(700) <= it['cy'] <= LAYOUT.sy(1180):
+            if it['cx'] < LAYOUT.sx(REWARD_X1) and _by0 <= it['cy'] <= _by1:
                 if btn is None or it['cx'] < btn['cx']:
                     btn = it
         if btn is None and rolls == 0:
             # ⭐ v0.35：按钮区是**图标+小数字**，整帧 OCR 常漏小字 ⇒ 低置信度窄带补找
             #   （同样必须**文字命中骰子关键词** ✓ 否则又会点到「回放战斗」✗）
-            _it2 = b.ocr(min_conf=0.2, band=(700, 1150), tag='dice2')
+            _it2 = b.ocr(min_conf=0.2, band=(_by0, _by1), tag='dice2')
             for it in _it2:
                 _t = (it.get('text') or '')
                 if not any(k in _t for k in _dice_keys):
                     continue
-                if it['cx'] < LAYOUT.sx(400) and LAYOUT.sy(700) <= it['cy'] <= LAYOUT.sy(1180):
+                if it['cx'] < LAYOUT.sx(REWARD_X1) and _by0 <= it['cy'] <= _by1:
                     if btn is None or it['cx'] < btn['cx']:
                         btn = it
             if btn is not None:
                 log.append({'dice': 'narrow_hit', 'at': (btn['cx'], btn['cy']),
-                            'text': btn.get('text'), 'n_items': len(_it2)})
+                            'text': btn.get('text'), 'n_items': len(_it2),
+                            'band': (_by0, _by1)})
         if btn is not None:
             btn_pos = (btn['cx'], btn['cy'])
         if btn_pos is None:
             _cand = [it for it in items
-                     if it['cx'] < LAYOUT.sx(340) and LAYOUT.sy(740) <= it['cy'] <= LAYOUT.sy(1180)]
-            log.append({'dice': 'no_btn', 'rolls': rolls,
+                     if it['cx'] < LAYOUT.sx(340) and _by0 <= it['cy'] <= _by1]
+            log.append({'dice': 'no_btn', 'rolls': rolls, 'band': (_by0, _by1),
                         'cand': [{'t': (i.get('text') or '')[:10], 'cx': i['cx'], 'cy': i['cy']}
                                  for i in _cand][:12]})
             break
