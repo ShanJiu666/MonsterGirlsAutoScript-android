@@ -1523,6 +1523,39 @@ else:
     check('v1.16 ⑦ build.gradle 开了 buildConfig（AGP 8.x 默认不生成 BuildConfig ✗）',
           'buildConfig true' in _BG)
 
+# ─────────────────────────────────────────────────────────────────────────
+# v1.17 朋友真机（realme RMX3800 1264×2780）锚定模型几何对拍
+#   起因：用户要求「把模拟器分辨率换成朋友真机的分辨率来测」——实测**模拟器做不到**：
+#     `wm size 1264x2780` 后 RefMapper 仍读到 720×1280（getMaximumWindowMetrics
+#     在模拟器返回**物理屏**，不认 override），screencap 出的 PNG 也仍是 720×1280。
+#     ⇒ 改用「真机留下的现场数据」离线对拍几何模型（不依赖任何设备）。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉗ v1.17 朋友真机 1264x2780 的锚定模型几何对拍（模拟器改分辨率走不通 ⇒ 离线对拍）')
+
+try:
+    import subprocess as _sp17
+    _gp = os.path.join(ROOT, 'android_autoexplore', 'tools', 'verify_friend_phone_geometry.py')
+    _r17 = _sp17.run([sys.executable, _gp], stdout=_sp17.PIPE,
+                      stderr=_sp17.STDOUT, timeout=120)
+    _o17 = (_r17.stdout or b'').decode('utf-8', 'replace')
+    _n17 = _o17.count('[ok]')
+    if not os.path.exists(_gp):
+        check('v1.17 几何对拍脚本存在', False, _gp)
+    else:
+        check('v1.17 几何对拍脚本可运行（%d 项通过 / exit=%d）' % (_n17, _r17.returncode),
+              _r17.returncode == 0, _o17.strip().split('\n')[-1][:90])
+        # 关键结论直接进主门禁：模型在该分辨率成立（顶/底边吻合到 1px 内）
+        check('v1.17 ① k 复算 == 1.1704（真机实测值 ✓）', 'k == 1.1704' in _o17)
+        check('v1.17 ② 悬浮条顶/底边与真机实测吻合（2548/2661 ✓）',
+              'blankRect 上边 2548' in _o17 and 'blankRect 下边 2661' in _o17)
+        check('v1.17 ③ C(dialogShift)≈227.7 ≠ 0 ⇒ 两系必须分开走 ✓',
+              'C=227.7' in _o17)
+        check('v1.17 ④ 弹性带非空 ⇒ 面板标题/背包页签只能走弹窗系 ✓',
+              '必须走弹窗系' in _o17)
+except Exception as _e17:
+    check('v1.17 几何对拍守门可运行（%r）' % (_e17,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
