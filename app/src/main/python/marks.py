@@ -291,6 +291,49 @@ def scan_board(img, thr=None, scales=None, region=None, use_color=True):
     return out
 
 
+def probe_top(img, top=1, scales=None, region=None):
+    """⭐ 2026-10-02 v1.22 诊断用：**每个标记模板各自最好的那处**（不设闸门，给裸分）
+
+    用途：反馈包里出现 `marks_scan: none` 时，一眼分清两件完全不同的事 ——
+        · **棋盘上真没有标记**（每个模板的最好分都很低）
+        · **有标记，但被机身偏暗/偏色压到闸门之下**（形状 0.74 / 配色 0.84 这种"近失"）
+      （2026-10-02 两个 nubia 包的疑问正是后者：真机帧 boss 形状分只有 0.741@(2,4)，
+       而 boss 闸门要 0.90 —— **肉眼看得见图标、代码扫不到** ✗）
+
+    ⚠ **只做诊断，不参与任何判定**（返回裸分；调用方别拿它当命中用 ✗）
+    ⚠ 必须**按模板分别取最好**（不是全局 top-N）—— 全局 top-N 会被别的类型刷屏，
+      "boss 到底差多少"这个最关键的信息反而看不见 ✗（2026-10-02 踩过一次）
+    """
+    if img is None:
+        return []
+    scales = scales or GLYPH_SCALES      # ⚠ 必须与 scan_board 同口径（否则"近失"看不到）
+    if region is None:
+        region = (0, int(GRID['y0']) - 10, img.shape[1],
+                  int(GRID['y0'] + 5 * GRID['cy']) + 10)
+    x0, y0, x1, y1 = region
+    sub = img[y0:y1, x0:x1]
+    rows = []
+    for key, tpl in load_tpls().items():
+        if isinstance(tpl, list):
+            tpl = tpl[0]
+        best = None
+        for sc, s, cx, cy, w, h in match_at_scales(sub, tpl, scales):
+            gx, gy = cx + x0, cy + y0
+            r = int((gy - GRID['y0']) // GRID['cy']) + 1
+            c = int((gx - GRID['x0']) // GRID['cx']) + 1
+            if not (1 <= r <= 5 and 1 <= c <= 7):
+                continue
+            if best is None or sc > best[0]:
+                best = (sc, s, gx, gy, key, r, c)
+        if best is not None:
+            sc, s, gx, gy, key, r, c = best
+            rows.append({'tpl': key, 'shape': round(sc, 3),
+                         'color': round(color_score(img, tpl, gx, gy, s), 3),
+                         'rc': '%d,%d' % (r, c), 'scale': round(s, 2)})
+    rows.sort(key=lambda d: -d['shape'])
+    return rows
+
+
 def cell_center(row, col):
     return (int(GRID['x0'] + (col - 0.5) * GRID['cx']),
             int(GRID['y0'] + (row - 0.5) * GRID['cy']))

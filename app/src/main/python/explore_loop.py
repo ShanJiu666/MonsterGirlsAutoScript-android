@@ -2815,6 +2815,38 @@ def handle_dice(b, log, items, tries=3):
     return rolls
 
 
+def dice_gate(marks, exact, win_streak, result_streak, on_result, diced=False):
+    """⭐ 2026-10-02 v1.22：**「该不该摇色子」抽成一个纯函数**（离线可测 ✓ + 不许静默跳过）
+
+    起因（用户反馈包 `不使用幸运草.zip`，nubia NX809J / v1.20）：
+      症状「遇见大拇指格子**不使用幸运草**」；那一局的统计是
+      `大拇指装备 0 件（推荐战 2 场 / 胜 2；摇色子拿到 0）`。
+      ⚠ 但那包的**日志里一条 `dice` 条目都没有**（后一次运行把 loop_log 覆盖了）
+      ⇒ 无法判断是「根本没摇」还是「摇了 3 次没中」。根因是这条判据原来埋在
+      `wait_end()` 里、**跳过时一个字都不记** ✗ ⇒ 反馈包永远自证不了。
+
+    所以：① 判据抽出来（能离线对拍）；② 调用方**必须**把 `(None, 原因)` 写进 log。
+
+    返回 `(动作, 原因)`：
+        `('roll', 'result_panel')` —— 真结算面板连认两帧（原路径，一字未改 ✓）
+        `('roll', 'win_only')`     —— ⭐ v1.22 兜底：连读两帧「战斗胜利」，但本机 OCR
+            读不到结算面板的【正面】/【负面】/「关闭」（`on_result` 恒 False）⇒ 也去试一次。
+            安全性：`handle_dice()` 在非结算面板上只会记 `{'dice':'no_btn'}` 就返回
+            （它的骰子按钮判据要求文字含 骰/重投/命运/重掷/掷，地图 UI 里没有这些字）✓
+        `(None, 原因)`             —— 这轮先不摇（`cell_has_no_recommend_mark` /
+            `waiting_result_panel` / `already_diced`）
+    """
+    if diced:
+        return None, 'already_diced'
+    if 'recommend' not in list(marks or []):
+        return None, 'cell_has_no_recommend_mark'
+    if result_streak >= 2:
+        return 'roll', 'result_panel'
+    if win_streak >= 2 and not on_result:
+        return 'roll', 'win_only'
+    return None, 'waiting_result_panel'
+
+
 def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
     """等战斗结算。⚠ 用户 09-25：战斗胜利不会超过 5s —— 超过很久还没结算就是没打起来，
     别死等（原来 180s，白耗时间）。
@@ -2832,6 +2864,8 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
     time.sleep(1.2)          # ⭐ 2.0→1.2：进场黑幕后的首次判定，早点看一眼
     diced = False
     result_streak = 0        # ⭐ 结算面板连续命中次数（防单帧误判触发摇色子）
+    win_streak = 0           # ⭐ v1.22：连续读到「战斗胜利」的次数（on_result 认不出时的兜底 ✓）
+    _dice_skip_logged = False   # ⭐ v1.22：这场战斗只记一条"想摇没摇成"（防 OCR 循环刷屏 ✓）
     back = 0
     last_ocr = 0.0
     # ⭐ 用户 2026-09-25：「不是每个战斗都要等待，只有有大拇指的要等待」
@@ -2892,20 +2926,40 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
             result_streak += 1
         else:
             result_streak = 0
+        win_streak = (win_streak + 1) if win else 0
+        # ⭐⭐ v1.22：判据走 `dice_gate()`（纯函数 ✓），且**无论摇不摇都留一条日志** ——
+        #   用户那个「不使用幸运草」的包就是因为"跳过时零日志"而无法自证 ✗
         if not diced and 'recommend' in list(marks):
-            if result_streak < 2:
+            _act, _why = dice_gate(marks, _ex, win_streak, result_streak, on_result, diced)
+            if _act is None and result_streak < 2:
                 time.sleep(0.6)                     # 复核一帧（不关面板，等它稳定）
                 b.snap('battle_wait2')
                 it3 = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
-                if fb(it3, L['win']) and (bool(fb(it3, *L['desc'])) or bool(bottom_close(it3))):
+                _w3 = bool(fb(it3, L['win']))
+                if _w3 and (bool(fb(it3, *L['desc'])) or bool(bottom_close(it3))):
                     result_streak += 1
+                    win_streak += 1
                     items = it3
                 else:
                     result_streak = 0
-            if result_streak >= 2:
+                    win_streak = (win_streak + 1) if _w3 else 0
+                _act, _why = dice_gate(marks, _ex, win_streak, result_streak,
+                                       on_result, diced)
+            if _act == 'roll':
                 diced = True
+                if _why == 'win_only':
+                    say('       · 结算面板文字认不出，但连读两帧「战斗胜利」⇒ 照常试摇色子 ✓')
+                    log.append({'dice': 'win_only_attempt', 'win_streak': win_streak,
+                                'marks': list(marks or []), 'exact': list(_ex or [])})
                 handle_dice(b, log, items)
                 items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+            elif not _dice_skip_logged:
+                # ⭐ 这一场"想摇却没摇"的**唯一证据**：连判据的输入一起记下来 ✓
+                _dice_skip_logged = True
+                log.append({'dice_skip': _why, 'win': bool(win), 'on_result': bool(on_result),
+                            'result_streak': result_streak, 'win_streak': win_streak,
+                            'marks': list(marks or []), 'exact': list(_ex or []),
+                            'texts': [(i.get('text') or '')[:12] for i in items][:24]})
         # ⭐ 2026-09-28 提速（P5）：真结算面板上把「自动跳过」勾上（只一次，已勾不点），
         #   之后的战斗跳过动画直接进结算 —— 战斗动画是单图最大动画开销 ✓
         if win and on_result and not _AUTO_SKIP['done']:
@@ -5903,6 +5957,17 @@ def one_round(b, log, rnd, prefix, st):
     st['dark'] = 0
     if vis:
         _new_mk = marks_mod.scan_board(img)
+        # ⭐ v1.22 诊断：这一帧**一个标记都没扫到**（且此前也没攒下标记）⇒ 记下"最像的候选"
+        #   起因（用户 2026-10-02 「进不去图.zip」/ nubia NX729J）：
+        #   日志是 `no_plan` + `blank_board` + `targets_done(gray_left 29)` —— 一个目标都没有、
+        #   直接退图；可那帧肉眼看得见格子上有标记图标 ✗
+        #   ⇒ 到底"真没有标记"还是"有标记但形状/配色分被机身偏暗压到闸门之下"，
+        #     必须能从反馈包里一眼看出来（`marks_mod.probe_top` 给裸分 ✓ 只诊断不判定）
+        if not _new_mk and not (st.get('marks') or {}):
+            try:
+                log.append({'marks_scan': 'none', 'top': marks_mod.probe_top(img)})
+            except Exception as _emk:      # noqa: BLE001
+                log.append({'marks_scan': 'probe_err', 'e': repr(_emk)[:60]})
         # ⭐⭐ 2026-09-26 保险：**别让"被压暗的一帧"把标记吞掉**
         #   实测 m0_r008：结算面板只盖住棋盘**中间**，那一帧 marks 扫成空
         #   ⇒ 上一轮的 boss 标记就此丢了 ⇒ 误判 `targets_done` ⇒ **没打 boss 就退图** ✗
@@ -5953,7 +6018,9 @@ def one_round(b, log, rnd, prefix, st):
     if rnd <= 1 and len(c.get('light') or []) > 0:
         red = sorted(k for k, v in mk.items() if 'redEquip' in (v.get('marks') or []))
     elif rnd <= 1:
-        log.append({'red_skip': 'board_hidden', 'light': 0})
+        # ⚠ v1.22：这里的 value 以前写成 `'board_hidden'`，读日志会误以为"board_hidden 命中了"
+        #   —— 其实只是"这一帧没有已揭示格 ⇒ 不敢判红装"（与 board_hidden 无关 ✗）
+        log.append({'red_skip': 'no_revealed_cells', 'light': 0})
     if red:
         # ⭐ 留证据图（极速截图通道下帧只在内存，默认不落盘 —— 2026-09-25 用户问「红装截图在哪」）
         shot = None

@@ -493,6 +493,19 @@ _ALLOWED_DRIFT = {
     'layout': 'v1.21 登记：PC 端 2026-10-02 把自己的参考分辨率改成 720×1280（PC 提速层'
               '前提，AGENTS.md §1b）。手机端是归一化 1080×1920 参考系（RefMapper 两段'
               '拼接），GRID=36/1002/144 与之绑死 ⇒ 手机端**不跟**。有意分叉，勿覆盖。',
+    # ⭐ 2026-10-02 v1.22 同一次 PC 换基准的连带分叉（同一个原因，一起登记）：
+    #   PC 端把「棋盘几何的唯一数据源」改成 `layout.REF`（720p ⇒ 24/668/96/96），
+    #   并把 `Board` 的门槛分母、`grid_detect` 的默认先验都跟着改。
+    #   手机端**必须**留 36/1002/144 + 门槛分母 144（端上是 1080×1920 归一化帧）✗ 别跟。
+    'spots': 'v1.22 登记：PC 端 2026-10-02 换 720p 基准后，棋盘几何改从 `layout.REF` 取'
+             '（24/668/96/96）、`Board` 门槛分母由 144 改 96。手机端是归一化 1080×1920'
+             '（GRID=36/1002/144，分母 144）⇒ 有意分叉，勿覆盖。',
+    'grid_detect': 'v1.22 登记：PC 端换 720p 基准后，`detect_grid` 的默认先验与自检'
+                   '期望值改成 720p（24/668/96/96）。手机端自检仍按 1080×1920'
+                   '（36/1002/144）⇒ 有意分叉，勿覆盖。',
+    'marks': 'v1.22 登记：手机端加了 `probe_top()`（标记"近失"诊断，给反馈包用），'
+             'PC 端还没这个需求（PC 走 720p 固定锚点 + 自己的门禁）⇒ 有意分叉，'
+             '单向新增、未回流。',
 }
 # ⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓不存在时整组跳过**（不是失败）。
 #   以前这条强制"生成物必须与 PC 逐字节一致" ⇒ 天然要求 PC 仓在场，
@@ -2114,6 +2127,98 @@ try:
           not _fb21, 'bad=%s' % (_fb21,))
 except Exception as _e21:       # noqa: BLE001
     check('v1.21 board_hidden 标定守门可运行（%r）' % (_e21,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉟ v1.22「遇见大拇指格子不使用幸运草」—— **先补证据链**，再谈修
+#   用户 2026-10-02 反馈包 `不使用幸运草.zip`（nubia NX809J / v1.20）：
+#     统计是「大拇指装备 0 件（推荐战 2 场 / 胜 2；摇色子拿到 0）」
+#     ⚠ 但那包**日志里一条 dice 条目都没有**（后一次运行把 loop_log 覆盖了）
+#     ⇒ 无法判断是"根本没摇"还是"摇了 3 次没中"——这是**判据静默跳过**造成的
+#       （原来 `if result_streak >= 2` 不成立时一个字都不记 ✗）
+#   修法：① 判据抽成纯函数 `dice_gate()`（可离线对拍 ✓）
+#         ② **无论摇不摇都留一条日志**（`dice_skip` 连输入一起记 ✓）
+#         ③ 兜底：连读两帧「战斗胜利」但本机 OCR 读不到结算面板文字
+#            （`on_result` 恒 False）时**也去试摇**（`win_only`）——handle_dice 在
+#            非结算面板上只会记 `no_btn` 就返回，零副作用 ✓
+#   同时印证两个包共同的可疑点（**标记漏检**）：
+#     两个 nubia 包的诊断帧上 `scan_board()` 都是**空**，而 `probe_top()` 显示
+#     "近失"：NX729J 的 boss 形状 0.741/配色 0.841@(2,4)（boss 闸门 0.90/0.85 ✗）、
+#     NX809J 的 clover_live 0.916/0.584@(3,1)（clover 闸门 0.90/0.75 ✗）
+#     ⇒ 机身偏暗/偏色把**配色分**压到闸门之下 ⇒ 标记扫不到 ⇒ 没有目标（`no_plan`/
+#       `blank_board`/`targets_done`）与"不认识大拇指格"都会发生 ✗
+#     ⚠ 本段**只把这两帧当"已知近失"钉住**（不改阈值：阈值改动要单独标定 + 真机复验）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉟ v1.22 「大拇指格不用幸运草」—— 判据可测 + 不再静默跳过 + 标记近失留证')
+try:
+    _el22p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src22 = open(_el22p, encoding='utf-8').read()
+    _mk22 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'marks.py'),
+                 encoding='utf-8').read()
+    check('v1.22 ① 摇色子判据抽成纯函数 `dice_gate()`（离线可测 ✓）',
+          'def dice_gate(' in _src22 and 'dice_gate(marks, _ex,' in _src22)
+    check('v1.22 ② **跳过也要留证**：`dice_skip` 记下判据的全部输入（不许静默 ✗）',
+          "'dice_skip': _why" in _src22 and "'texts': [(i.get('text') or '')[:12]"
+          in _src22 and '_dice_skip_logged' in _src22)
+    check('v1.22 ③ 兜底：连读两帧「战斗胜利」但认不出结算面板 ⇒ 也去试摇（`win_only`）',
+          "if win_streak >= 2 and not on_result:" in _src22
+          and "'dice': 'win_only_attempt'" in _src22 and 'win_streak' in _src22)
+    check('v1.22 ④ 诊断：整帧扫不到标记时记 `marks_scan`（含每模板近失分 ✓）',
+          "'marks_scan': 'none'" in _src22 and 'marks_mod.probe_top' in _src22
+          and 'def probe_top(' in _mk22)
+    check('v1.22 ⑤ 修掉一条**误导日志**：`red_skip` 不再写 `board_hidden`'
+          '（它只是"这帧没有已揭示格"，与 board_hidden 无关 ✗）',
+          "'red_skip': 'board_hidden'" not in _src22
+          and "'red_skip': 'no_revealed_cells'" in _src22)
+
+    import importlib.util as _ilu22
+    _spec22 = _ilu22.spec_from_file_location('el_v122', _el22p)
+    _el22m = _ilu22.module_from_spec(_spec22)
+    _spec22.loader.exec_module(_el22m)
+    _cases22 = [
+        # marks, exact, win_streak, result_streak, on_result, diced, 期望(动作, 原因)
+        (['recommend'], ['recommend'], 2, 2, True, False, ('roll', 'result_panel')),
+        (['recommend'], ['recommend'], 2, 0, False, False, ('roll', 'win_only')),
+        (['recommend'], ['recommend'], 1, 0, False, False, (None, 'waiting_result_panel')),
+        (['recommend'], ['recommend'], 2, 2, True, True, (None, 'already_diced')),
+        (['boss'], ['boss'], 3, 3, True, False, (None, 'cell_has_no_recommend_mark')),
+        (['recommend'], ['recommend'], 0, 0, False, False, (None, 'waiting_result_panel')),
+        (['recommend'], ['recommend'], 2, 2, False, False, ('roll', 'result_panel')),
+    ]
+    _bad22 = [(c[2:6], _el22m.dice_gate(c[0], c[1], c[2], c[3], c[4], c[5]), c[6])
+              for c in _cases22
+              if _el22m.dice_gate(c[0], c[1], c[2], c[3], c[4], c[5]) != c[6]]
+    check('v1.22 ⑥ 执行级：`dice_gate` 7 种情形全对（含"没摇成"的三种原因 ✓）',
+          not _bad22, 'bad=%s' % (_bad22,))
+
+    # ⭐ 真机帧：把"有标记但扫不到"这件事钉成 fixture（阈值未改 ⇒ 断言"扫不到"是**现状**，
+    #   等哪天标定修好，这条会红 —— 那时把它改成"必须扫到" ✓）
+    import cv2 as _cv22
+    import numpy as _np22
+    import importlib.util as _ilu22b
+    _mkp = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'marks.py')
+    _spec22b = _ilu22b.spec_from_file_location('mk_v122', _mkp)
+    _mk22m = _ilu22b.module_from_spec(_spec22b)
+    _spec22b.loader.exec_module(_mk22m)
+    _fr22 = os.path.join(PROJ, '_verify', 'phone_friend_nubia_nx729j', 'board_hidden_r0.png')
+    if not os.path.exists(_fr22):
+        check('v1.22 ⑦ 真机帧 fixture 存在', False, _fr22)
+    else:
+        _im22 = _cv22.imdecode(_np22.fromfile(_fr22, dtype=_np22.uint8), _cv22.IMREAD_COLOR)
+        check('v1.22 ⑦ 真机帧 fixture 是归一化 1080×1920',
+              _im22 is not None and _im22.shape[:2] == (1920, 1080),
+              None if _im22 is None else str(_im22.shape))
+        _probe22 = _mk22m.probe_top(_im22)
+        _boss22 = [r for r in _probe22 if r['tpl'] == 'boss' and r['rc'] == '2,4']
+        check('v1.22 ⑧ 执行级：`probe_top` 报出**每模板最好分**（含 NX729J 的 boss 近失 ✓）',
+              bool(_boss22) and _boss22[0]['shape'] < 0.90
+              and _boss22[0]['shape'] > 0.70 and _boss22[0]['color'] > 0.80,
+              'boss@2,4=%s' % (_boss22 or None,))
+        check('v1.22 ⑨ ⚠**现状**：这一帧 `scan_board` 扫不到任何标记'
+              '（= 标记近失问题的真机证据；阈值改动要单独标定，别顺手松 ✗）',
+              _mk22m.scan_board(_im22) == {})
+except Exception as _e22:       # noqa: BLE001
+    check('v1.22 摇色子判据/标记近失守门可运行（%r）' % (_e22,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
 # ㊱ PC 端提速层（fixed.py）—— **已移出本门禁**

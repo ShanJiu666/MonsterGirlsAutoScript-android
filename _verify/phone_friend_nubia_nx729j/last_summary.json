@@ -1,0 +1,32 @@
+{
+ "stats": {
+  "clovers": 0,
+  "maps": 0,
+  "shots": 0,
+  "map_secs": [],
+  "boss_fights": 0,
+  "boss_wins": 0,
+  "recommend_fights": 0,
+  "recommend_wins": 0,
+  "dice_got": 0,
+  "merchants": 0,
+  "vaults": 0,
+  "battles": 0,
+  "battle_wins": 0,
+  "stopped": "",
+  "current_map": 1,
+  "current_secs": 0,
+  "stamina_entries": [
+   [
+    1290,
+    1790874288.6445863
+   ]
+  ],
+  "running": true,
+  "classify": 3.1049633026123047,
+  "classify_n": 5
+ },
+ "text": "\n════════ 本次统计 ════════\n  消耗体力   ：—\n  平均每图   ：—\n  刷完地图   ：0 张\n  平均耗时   ：0 秒/张（合计 0 秒）\n  首领关     ：0 场（胜 0）\n  全部战斗   ：0 场（胜 0）\n  大拇指装备 ：0 件（推荐战 0 场 / 胜 0；摇色子拿到 0）\n  幸运草地块 ：0 个\n  旅行商人   ：买完 0 个\n  黄金宝库   ：买完 0 个\n══════════════════════════\n  ⏱ 耗时分布：截图 4.6s(极速)｜OCR 15.6s/11次｜棋盘识别 3.1s（5次）｜点击等待 4.3s(3次)\n               （以上合计 28 秒；其余为游戏动画/面板本身的响应时间）\n              OCR 分账：round 5.7s/5次｜pre 5.4s/3次｜rec0_ 3.8s/2次｜popup_none_dlg 0.7s/1次",
+ "tag": "",
+ "device": "android"
+}
