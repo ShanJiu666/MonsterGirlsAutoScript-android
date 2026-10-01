@@ -2750,6 +2750,12 @@ try:
           and 'public static int[] capturePath()' in _dev31)
     check('v1.31 ④ 慢路径会**记一行日志**（w / rowStride / 期望值 ⇒ 反馈包能一眼看出 ✓）',
           '取帧走**慢路径**（行距填充）' in _cap31)
+    _src31 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                  encoding='utf-8').read()
+    check('v1.31 ⑤ Python 侧每局记 `capture_path`（`[慢路径?, 行距, w*4]` ⇒ 自带通道序证据 ✓）',
+          "log.append({'capture_path': {'slow': bool(_cp[0]), 'row_stride': _cp[1],"
+          in _src31
+          and 'def capture_path():' in _src31)
 except Exception as _e31:       # noqa: BLE001
     check('v1.31 取帧通道序守门可运行（%r）' % (_e31,), False)
 

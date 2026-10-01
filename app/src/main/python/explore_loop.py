@@ -4930,6 +4930,24 @@ def frame_age_ms():
         return None
 
 
+def capture_path():
+    """⭐ v1.31：本机取帧走的是**快路径**还是"行距填充"慢路径 —— `None` = 拿不到（PC 端）
+
+    为什么要记它：真机 realme RMX3800（屏宽 1264，行距 5056→补 5120）**只有它走慢路径**，
+    而旧慢路径把 RGBA 当 ARGB 用 ⇒ **R↔B 互换** ⇒ 整屏偏紫、标记全漏 ✗（v1.31 已修）。
+    把 `[慢路径?, 实际行距, 宽度*4]` 记进每局的日志 ⇒ 反馈包**自带通道序证据** ✓
+    """
+    try:
+        from java import jclass        # Chaquopy
+    except Exception:       # noqa: BLE001
+        return None
+    try:
+        _v = jclass('com.fantasy.autoexplore.DeviceApi').capturePath()
+        return [int(x) for x in _v]
+    except Exception:       # noqa: BLE001
+        return None
+
+
 def run_one_map(b, log, max_round=45, prefix='', deadline=900):
     t0 = time.time()
     st = {'cold': {}, 'done': set(), 'last': None, 'err': 0, 'stuck': 0,
@@ -4942,6 +4960,19 @@ def run_one_map(b, log, max_round=45, prefix='', deadline=900):
     #   （本图内一旦判满，`st['slots_free']=0` 会把后面的紫/橙格全部送去开打，不会反复点 ✓）
     if EXPLORE_DISPATCH:
         _PANEL_STUCK['expl'] = 0
+    # ⭐⭐⭐ v1.31：每局记一次**取帧通道序证据**（真机整屏偏紫的现场 = 走了"行距填充"慢路径 ✓）
+    #   起因：realme RMX3800 屏宽 1264（行距 5056→补 5120）只有它走慢路径，而旧慢路径
+    #   R↔B 互换 ⇒ 标记全漏。日志里有这条，反馈包就能自证"是不是这条路"✓
+    try:
+        _cp = capture_path()
+        if _cp:
+            log.append({'capture_path': {'slow': bool(_cp[0]), 'row_stride': _cp[1],
+                                         'w4': _cp[2]}})
+            if _cp[0]:
+                say('       · 取帧走**慢路径**（行距填充 rowStride=%d 期望=%d）'
+                    % (_cp[1], _cp[2]))
+    except Exception:       # noqa: BLE001
+        pass
     for rnd in range(max_round):
         # ⭐ 立即停止（2026-09-29 用户口径）：**每轮开头先查**，不等这张图打完
         if stop_checked(log, '轮首 r%d' % rnd):
