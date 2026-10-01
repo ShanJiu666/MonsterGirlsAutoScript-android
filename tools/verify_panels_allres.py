@@ -42,19 +42,42 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
 # ⚠ 手机端自己的 Python 目录（本脚本要验的就是这份代码）
 PYD = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main', 'python'))
-# PC 端独立仓：只用来取 runs/bw2.json（9:16 基准帧）
-MAPBOT = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(ROOT, 'mapbot_pc')
+# ⭐ 2026-10-01 晚「两端完全平行」：PC 仓**完全可选**（拿不到也不影响本脚本）。
+#   它以前只用来取 runs/bw2.json 这个 9:16 基准帧 —— 该 fixture 已随本仓
+#   `_verify/bw2_pc_result_panel.json` 入库 ⇒ 不再需要 PC 仓。
+MAPBOT = os.environ.get('MGAS_PC_SRC') or os.path.join(ROOT, 'mapbot_pc')
+HAS_PC = os.path.isdir(MAPBOT)
 if not os.path.isdir(PYD):
     raise SystemExit('找不到手机端 Python 目录：%s' % PYD)
 
 # 端上 shim 的环境变量：未设时模块回退到 PC 行为（不改变任何判定逻辑）
-os.environ.setdefault('MAPBOT_ROOT', PYD)
-os.environ.setdefault('MAPBOT_RUNS', os.path.join(MAPBOT, 'runs'))
+# ⚠ 资源根要指向**真正有模板**的地方（app/src/main/python/templates 是空目录）
+_ASSETS = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main',
+                                       'assets', 'mapbot_pack'))
+def _has_files(d, minimum=2):
+    try:
+        n = 0
+        for _r, _ds, fs in os.walk(d):
+            n += len(fs)
+            if n >= minimum:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+if _has_files(os.path.join(PYD, 'templates')):
+    os.environ.setdefault('MAPBOT_ROOT', PYD)
+elif _has_files(os.path.join(_ASSETS, 'templates')):
+    os.environ.setdefault('MAPBOT_ROOT', _ASSETS)
+else:
+    os.environ.setdefault('MAPBOT_ROOT', PYD)
+os.environ.setdefault('MAPBOT_RUNS', os.path.abspath(os.path.join(HERE, '..', '_verify')))
 os.environ.setdefault('MAPBOT_DT', os.path.join(ROOT, 'data', 'server_datatable.json'))
 
-sys.path.insert(0, PYD)          # ⭐ 手机端优先
-if os.path.isdir(MAPBOT):
-    sys.path.append(MAPBOT)      # PC 仓只作补充（bw2.json 等 fixture）
+sys.path.insert(0, PYD)          # ⭐ 手机端优先（唯一必需）
+if HAS_PC:
+    sys.path.append(MAPBOT)      # PC 仓存在时仅作补充（可选）
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import explore_loop as EL          # noqa: E402
@@ -287,9 +310,13 @@ def part_c_predicates():
     else:
         print('   （缺 fixture %s，跳过）' % mp)
 
-    # ② 结算帧（PC 基线）：必须判成结算面板
-    bw = os.path.join(MAPBOT, 'runs', 'bw2.json')
-    if os.path.exists(bw):
+    # ② 结算帧（9:16 基线）：必须判成结算面板
+    #    ⭐ 基准帧**随本仓走**（`_verify/bw2_pc_result_panel.json`），
+    #      不再从 PC 仓的 `runs/` 取（那个目录被 gitignore 了，且 PC 仓现在可选）。
+    _bw_cands = [os.path.join(HERE, '..', '_verify', 'bw2_pc_result_panel.json'),
+                 os.path.join(MAPBOT, 'runs', 'bw2.json')]
+    bw = next((c for c in _bw_cands if os.path.exists(c)), None)
+    if bw:
         d = json.load(io.open(bw, encoding='utf-8'))
         bi = d['items'] if isinstance(d, dict) else d
         r = EL.is_battle_panel(bi)
@@ -301,7 +328,7 @@ def part_c_predicates():
         if not r2:
             bad.append('C: PC结算帧未被认成已开打')
     else:
-        print('   （缺 %s，跳过）' % bw)
+        print('   （缺 9:16 基准帧，跳过：%s）' % ' / '.join(_bw_cands))
     return bad
 
 

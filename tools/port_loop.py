@@ -49,12 +49,18 @@ _MGAS = os.path.dirname(_PROJ)                                   # …（MGAS �
 _SRC_DIR = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(_MGAS, 'mapbot_pc')
 if not os.path.isdir(_SRC_DIR):
     _old = os.path.join(_MGAS, 'tools', 'mapbot')                # 分离前老布局兜底
-    if os.path.isdir(_old):
-        _SRC_DIR = _old
-    else:
-        raise SystemExit('找不到 mapbot PC 源：%s（可用环境变量 MGAS_MAPBOT_SRC 指定）' % _SRC_DIR)
+    _SRC_DIR = _old if os.path.isdir(_old) else None
+# ⭐ 2026-10-01 晚「两端完全平行」：**PC 仓对本仓是可选的**。
+#   本脚本只是「想把 PC 上的某个改动/修复搬到手机时」跑一次的**搬运工具**，
+#   **不是**手机端构建/测试的前置条件 ⇒ import 本模块绝不能因找不到 PC 源而崩
+#   （旧写法 `raise SystemExit` 会让任何 import 它的工具直接挂掉）。
+if _SRC_DIR is None:
+    print('[port_loop] ⚠ 找不到 PC 端源码 —— **本脚本是可选搬运工具**，'
+          '不影响手机端构建与测试。\n'
+          '            要用它请设 MGAS_MAPBOT_SRC 指向 PC checkout，'
+          '或把 PC 仓 clone 到 <MGAS>\\mapbot_pc。')
 _PY_DIR = os.environ.get('MGAS_PY_DST') or os.path.join(_PROJ, 'app', 'src', 'main', 'python')
-SRC = os.path.join(_SRC_DIR, 'explore_loop.py')
+SRC = os.path.join(_SRC_DIR, 'explore_loop.py') if _SRC_DIR else None
 DST = os.path.join(_PY_DIR, 'explore_loop.py')
 
 SHIM = '''
@@ -231,6 +237,12 @@ def _guard_overwrite():
 
 
 def main():
+    if not SRC:
+        raise SystemExit(
+            '找不到 PC 端 explore_loop.py，无法搬运。\n'
+            '   本脚本是**可选**搬运工具（手机端不依赖它），要跑就：\n'
+            '   ① 设环境变量 MGAS_MAPBOT_SRC 指向 PC checkout，或\n'
+            '   ② 把 PC 仓 clone 到 <MGAS>\\mapbot_pc')
     _guard_overwrite()
     txt = open(SRC, encoding='utf-8').read()
     if 'Android 适配补丁' in txt:

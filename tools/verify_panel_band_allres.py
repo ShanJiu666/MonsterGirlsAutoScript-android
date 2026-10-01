@@ -31,9 +31,30 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
 PYD = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main', 'python'))
+# ⭐ 2026-10-01 晚「两端完全平行」：这里只验**手机端**的 buypanels，
+#   不再指向 PC 仓的 runs/（PC 仓对本仓完全可选）。
+_ASSETS = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main',
+                                       'assets', 'mapbot_pack'))
+
+
+def _has_files(d, minimum=2):
+    try:
+        n = 0
+        for _r, _ds, fs in os.walk(d):
+            n += len(fs)
+            if n >= minimum:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 sys.path.insert(0, PYD)
-os.environ.setdefault('MAPBOT_ROOT', PYD)
-os.environ.setdefault('MAPBOT_RUNS', os.path.join(ROOT, 'mapbot_pc', 'runs'))
+# ⚠ 资源根：手机端 `app/src/main/python/templates` 是空目录，模板真身
+#   在 `assets/mapbot_pack/templates`（见 build_pack.py）。
+os.environ.setdefault('MAPBOT_ROOT',
+                      PYD if _has_files(os.path.join(PYD, 'templates')) else _ASSETS)
+os.environ.setdefault('MAPBOT_RUNS', os.path.abspath(os.path.join(HERE, '..', '_verify')))
 os.environ.setdefault('MAPBOT_DT', os.path.join(ROOT, 'data', 'server_datatable.json'))
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 

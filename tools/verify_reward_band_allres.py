@@ -30,15 +30,34 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
-# ⚠ PC 端是**独立仓**（2026-10-01 拆分），路径可被环境变量覆盖：
-#   MGAS_MAPBOT_SRC —— 指到别的 checkout（或两端已分叉时，指到别的 PC 副本）
-MAPBOT = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(ROOT, 'mapbot_pc')
+# ⭐ 2026-10-01 晚「两端完全平行」：默认用**本仓自己的**源码
+#   （app/src/main/python —— 与 APK 里跑的是同一份 ✓），PC 仓**完全可选**。
+#   想拿 PC 端做对拍：设 MGAS_PC_SRC 指向 PC checkout。
+MAPBOT = os.environ.get('MGAS_PC_SRC') or os.path.abspath(
+    os.path.join(HERE, '..', 'app', 'src', 'main', 'python'))
 if not os.path.isdir(MAPBOT):
-    raise SystemExit(
-        '找不到 PC 端源码：%s\n'
-        '   PC 端已拆成独立仓（§6.44），本脚本要 import 它的 explore_loop/badge。\n'
-        '   处置：① clone PC 仓到 <MGAS>\\mapbot_pc，或 ② 设环境变量 '
-        'MGAS_MAPBOT_SRC 指向已有 checkout。' % MAPBOT)
+    raise SystemExit('找不到可用的源码目录：%s' % MAPBOT)
+# ⚠ 资源根：手机端 `app/src/main/python/templates` 是**空目录**，
+#   模板真身在 `assets/mapbot_pack/templates`（见 build_pack.py）。
+_ASSETS = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main',
+                                       'assets', 'mapbot_pack'))
+
+
+def _has_files(d, minimum=2):
+    try:
+        n = 0
+        for _r, _ds, fs in os.walk(d):
+            n += len(fs)
+            if n >= minimum:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+os.environ.setdefault('MAPBOT_ROOT',
+                      MAPBOT if _has_files(os.path.join(MAPBOT, 'templates'))
+                      else _ASSETS)
 sys.path.insert(0, MAPBOT)
 os.chdir(MAPBOT)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')

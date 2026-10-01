@@ -23,18 +23,55 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# ⭐⭐⭐ 2026-10-01 **MGAS 已从「幻想少女公会」仓库分离**（搬到 D:\MGAS）：
-#   `HERE` 现在是 `<MGAS>/android_autoexplore/tools` ⇒ 旧写法 `HERE/../..` 会指到仓库根 ✗
-#   新布局：ROOT = <MGAS>；PC 端源 = <MGAS>/mapbot_pc；fixture = <MGAS>/android_autoexplore/_verify
+# ⭐⭐⭐ 2026-10-01 晚：**手机端完全自洽**（两端平行，不再需要 PC 仓在场）
+#   门禁 import 的 `explore_loop` 取**本仓自己的**源码 `app/src/main/python/explore_loop.py`
+#   —— 与 APK 里跑的是同一份 ✓ ⇒ 单独 clone 手机端仓也能跑通全部门禁。
+#   旧做法（已废）：`MAPBOT = <MGAS>/mapbot_pc` ⇒ 没 clone PC 仓就直接崩。
+#   ⚠ 想拿 PC 端源码跑同一套门禁做对拍：设 `MGAS_PC_SRC` 指向 PC checkout（可选）。
+#
+# ⭐ 资源根（模板/数据表）也必须是**本仓的**，否则"自洽"是假的：
+#   - 代码根 = `app/src/main/python`（模块在這）
+#   - 资源根 = `app/src/main/assets/mapbot_pack`（**模板真身在这**，见 build_pack.py）
+#   ⚠ 曾踩：以为 `app/src/main/python/templates` 里有模板 —— 那个目录是**空的**，
+#     结果所有要模板的用例 FileNotFoundError（"地块分类失败"）。
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
-MAPBOT = os.path.join(ROOT, 'mapbot_pc')
-if not os.path.isdir(MAPBOT):                     # 分离前老布局兜底（还在仓库里跑时 ✓）
-    MAPBOT = os.path.join(MAPBOT)
+PROJ = os.path.abspath(os.path.join(HERE, '..'))   # ⭐ 本仓根（仓内路径一律用它）
+_PY_SELF = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main', 'python'))
+_ASSETS = os.path.abspath(os.path.join(HERE, '..', 'app', 'src', 'main',
+                                       'assets', 'mapbot_pack'))
+PC_SRC = os.environ.get('MGAS_PC_SRC')          # 可选：显式指到 PC 端做对拍
+MAPBOT = _PY_SELF
+# 资源根：PC 模式下（门禁跑的就是 PC 口径 C=0）资源跟着**代码根**走；
+# 若代码根下没有 templates/（手机端的常态），回退到 assets/mapbot_pack。
+_ASSET_TPL = os.path.join(_ASSETS, 'templates')
+# ⚠ 不能只看 `templates/` 目录**存在** —— 手机端 `app/src/main/python/templates/ui`
+#   是个**空目录**（历史遗留），判存在会误判成"有模板" ⇒ 所有要模板的用例
+#   FileNotFoundError。必须**递归数一下文件**。
+def _has_files(d, minimum=2):
+    try:
+        n = 0
+        for _r, _ds, fs in os.walk(d):
+            n += len(fs)
+            if n >= minimum:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+if not _has_files(os.path.join(_PY_SELF, 'templates')) and _has_files(_ASSET_TPL):
+    MAPBOT_ROOT_DIR = _ASSETS
+else:
+    MAPBOT_ROOT_DIR = _PY_SELF
+if PC_SRC and os.path.isdir(PC_SRC):
+    MAPBOT = PC_SRC
+    MAPBOT_ROOT_DIR = PC_SRC
+    sys.stderr.write('[verify] ⚠ 用 PC 端源码做对拍：%s\n' % PC_SRC)
 FIXTURE = os.path.join(HERE, '..', '_verify', 'phone_slots_full_0930.json')
 FIXTURE = os.path.abspath(FIXTURE)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.path.insert(0, MAPBOT)
-os.environ.setdefault('MAPBOT_ROOT', MAPBOT)
+os.environ.setdefault('MAPBOT_ROOT', MAPBOT_ROOT_DIR)
 os.environ.pop('MAPBOT_ANDROID', None)          # PC 口径（C=0）
 
 # ⚠ v1.20：所有**子进程**统一带 UTF-8 环境。
@@ -78,6 +115,24 @@ except Exception:                      # noqa: BLE001
     _stub('airtest.core.api', connect_device=_noop, snapshot=_noop, touch=_noop,
           swipe=_noop, keyevent=_noop, exists=_noop, Template=_Template)
     _stub('airtest.core.cv', Template=_Template)
+
+# ⭐ 2026-10-01：门禁改用**本仓**源码后，手机端 `mapbot.py` 会被 import，
+#   而它在模块顶层 `import java`（Chaquopy 的 JVM 桥）—— 本机没有 `java` 模块。
+#   ⇒ 打桩，否则**所有**碰 mapbot 的用例直接 ModuleNotFoundError（不是代码错）。
+#   ⚠ 这属于「Android 运行时专有依赖」：桩只保证 import 过得去，真实 JVM 行为
+#     只能在真机验（那部分由 verify_panels_allres / 设备侧 selftest 覆盖）。
+try:
+    import java                     # noqa: F401
+except Exception:                    # noqa: BLE001
+    _java = _stub('java')
+    _java.android = _stub('java.android')
+    _java.lang = _stub('java.lang')
+    # Chaquopy 的 jclass/jmethod 代理：手机端 mapbot/OCR 路径会 import 它
+    def _jclass(name):
+        return type('JClass', (), {'__getattr__': lambda s, a: _noop})()
+    _java.jclass = _jclass
+    _java.jmethod = lambda *a, **k: _noop
+    _stub('jnius')                  # Chaquopy 老名字，部分代码路径会 import 它
 
 import explore_loop as EL      # noqa: E402
 import numpy as np             # noqa: E402
@@ -322,7 +377,10 @@ check('双通道④：多关键词任一命中即可', bool(_h4), _h4)
 import cv2 as _cv2        # noqa: E402
 import numpy as _np       # noqa: E402
 
-_tpl_dir = os.path.join(MAPBOT, 'templates', 'ui')
+# ⚠ 模板目录必须与**资源根 MAPBOT_ROOT** 一致（_tpl_hit 按它读）。
+#   手机端资源根 = assets/mapbot_pack（`app/src/main/python/templates` 是空目录），
+#   写这边、读那边 ⇒ 必然读不到自己刚写的模板 ⇒ 假红。
+_tpl_dir = os.path.join(MAPBOT_ROOT_DIR, 'templates', 'ui')
 os.makedirs(_tpl_dir, exist_ok=True)
 _tpl_name = '_selftest_tpl.png'
 _pat = _np.zeros((48, 64, 3), _np.uint8)
@@ -358,7 +416,7 @@ print()
 print('⑧ 进图体力门限（用户报「体力不够 50 怎么还去点进入地图」）')
 _java = ''
 try:
-    _java = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main', 'java',
+    _java = open(os.path.join(PROJ, 'app', 'src', 'main', 'java',
                               'com', 'fantasy', 'autoexplore', 'OverlayService.java'),
                  encoding='utf-8').read()
 except Exception:       # noqa: BLE001
@@ -427,41 +485,61 @@ _ALLOWED_DRIFT = {
                  '症状「幸运草识别不出/整层不买」）。手机侧独有修复，未回流 PC：'
                  'PC 端锁 720×1280 纯 9:16，该 bug 在 PC 上不触发 ⇒ 无需回流。',
 }
+# ⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓不存在时整组跳过**（不是失败）。
+#   以前这条强制"生成物必须与 PC 逐字节一致" ⇒ 天然要求 PC 仓在场，
+#   那是「强制同步」时代的遗留。两端既然平行，**没装 PC 仓就不该红**。
+#   ⇒ 保留它的唯一目的：PC 仓**在场**时，把已知的合法分叉登记住（防止被人
+#     当成"忘了同步的 bug"覆盖掉）。PC 仓不在 ⇒ 这件事无从谈起，跳过。
+_pc_src = _gen_src = None
 try:
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location(
         'port_android_gen',
-        os.path.join(ROOT, 'android_autoexplore', 'tools', 'port_android.py'))
+        os.path.join(PROJ, 'tools', 'port_android.py'))
     _gen = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_gen)
-    _drift = []
-    for _m in _gen.MODULES:
-        _disk = os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main',
-                             'python', _m + '.py')
-        _want = _gen.patch(open(os.path.join(_gen.SRC, _m + '.py'), encoding='utf-8').read(), _m)
-        for _old, _new in _gen.EXACT.get(_m + '.py', []):
-            _want = _want.replace(_old, _new)
-        _have = open(_disk, encoding='utf-8').read() if os.path.exists(_disk) else ''
-        if _want != _have:
-            _drift.append(_m)
-    _undeclared = [m for m in _drift if m not in _ALLOWED_DRIFT]
-    check('所有漂移模块都**已登记理由**（未登记: %s）'
-          % (','.join(_undeclared) if _undeclared else '无'), not _undeclared,
-          '漂移合计 %d 个：%s' % (len(_drift), ','.join(_drift) or '无'))
-    for _m in sorted(_drift):
-        if _m in _ALLOWED_DRIFT:
-            check('已登记漂移 %s 有明确理由' % _m, bool(_ALLOWED_DRIFT[_m].strip()))
-    # 宝库图标尺度必须由 pitch 推出（防再写死 4.5 ✗）—— 只看**代码**，不看注释 ✓
-    _bp = open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
-    _bp_code = '\n'.join(l.split('#')[0] for l in _bp.splitlines()
-                         if not l.strip().startswith('#'))
-    check('宝库图标尺度由格子间距推出（不再写死 ICON_SCALE）',
-          '_icon_scales' in _bp_code
-          and not _re.search(r'^\s*ICON_SCALE\s*=', _bp_code, _re.M))
-    check('宝库图标认不出时有**宽尺度兜底** + 分数落日志',
-          'icon_hit_wide' in _bp and "'vault_debug'" in _bp)
-except Exception as _e:      # noqa: BLE001
-    check('两端漂移登记校验可运行（%r）' % (_e,), False)
+    if not getattr(_gen, 'SRC', None) or not os.path.isdir(_gen.SRC):
+        raise SystemExit('no PC source')
+    _pc_src = _gen.SRC
+except SystemExit:
+    _pc_src = None
+except Exception:       # noqa: BLE001
+    _pc_src = None
+
+if _pc_src is None:
+    print('  (PC 仓不在 ⇒ 两端漂移登记**不适用**（两端已平行，谁都不依赖谁）) ⚠')
+    skip('两端漂移登记（PC 仓不在，无法比对；这是平行独立下的正常状态）⚠')
+else:
+    try:
+        _drift = []
+        for _m in _gen.MODULES:
+            _disk = os.path.join(PROJ, 'app', 'src', 'main', 'python', _m + '.py')
+            _want = _gen.patch(open(os.path.join(_gen.SRC, _m + '.py'),
+                                    encoding='utf-8').read(), _m)
+            for _old, _new in _gen.EXACT.get(_m + '.py', []):
+                _want = _want.replace(_old, _new)
+            _have = open(_disk, encoding='utf-8').read() if os.path.exists(_disk) else ''
+            if _want != _have:
+                _drift.append(_m)
+        _undeclared = [m for m in _drift if m not in _ALLOWED_DRIFT]
+        check('所有漂移模块都**已登记理由**（未登记: %s）'
+              % (','.join(_undeclared) if _undeclared else '无'), not _undeclared,
+              '漂移合计 %d 个：%s' % (len(_drift), ','.join(_drift) or '无'))
+        for _m in sorted(_drift):
+            if _m in _ALLOWED_DRIFT:
+                check('已登记漂移 %s 有明确理由' % _m, bool(_ALLOWED_DRIFT[_m].strip()))
+    except Exception as _e:      # noqa: BLE001
+        check('两端漂移登记校验可运行（%r）' % (_e,), False)
+
+# 宝库图标尺度必须由 pitch 推出（防再写死 4.5 ✗）—— 只看**代码**，不看注释 ✓
+_bp = open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+_bp_code = '\n'.join(l.split('#')[0] for l in _bp.splitlines()
+                     if not l.strip().startswith('#'))
+check('宝库图标尺度由格子间距推出（不再写死 ICON_SCALE）',
+      '_icon_scales' in _bp_code
+      and not _re.search(r'^\s*ICON_SCALE\s*=', _bp_code, _re.M))
+check('宝库图标认不出时有**宽尺度兜底** + 分数落日志',
+      'icon_hit_wide' in _bp and "'vault_debug'" in _bp)
 
 print()
 print('⑪ 观测累积（防「规划很差劲」：脏帧不许抹掉已知格 ✗）')
@@ -516,7 +594,7 @@ check('点击循环用**弹窗帧**判宝库（防"下一击关掉面板"✗）'
 check('panel_seen 也走真·弹窗帧 OCR（不是 dlg_items 换算 ✓）',
       "dlg_ocr(b, tag='panel_seen_dlg')" in src)
 # ⭐ 用**真机帧**离线复核（有帧才跑；没帧跳过 ✓）
-_vf = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+_vf = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                    'bagdbg', 'vault4_dlg_items.json')
 try:
     import json as _json
@@ -637,7 +715,7 @@ print()
 print('⑱ 宝库点击常量按**真机像素**核对（用户报：点了左上角格子/关了宝库界面）')
 # 真机帧 vault4_dlg.png 实测：blank/back 必须落在**平坦空白**（std<20），
 # buy 必须落在按钮上（std 高 = 有文字），x 落在右上角关闭符
-_v4 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+_v4 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                    'bagdbg', 'vault4_dlg.png')
 try:
     import cv2 as _cv2
@@ -691,7 +769,7 @@ try:
     _spec2.loader.exec_module(_bp3)
     _bp3.read_qty = lambda bot, cx, cy: 50      # 桩：数量读作 50
 
-    _v4 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _v4 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'vault4_dlg.png')
     if os.path.exists(_v4):
         import cv2 as _c3
@@ -751,9 +829,17 @@ check('派遣分支保持原样（用户明确「要点一键派遣」，不许�
 print()
 print('㉑ 停止按钮「立即停」（用户报：点 ■ 后还要运行一会 ✗）')
 _mb = open(os.path.join(MAPBOT, 'mapbot.py'), encoding='utf-8').read()
-check('等待循环可被停止打断（wait_change ✓）',
-      'def _stop_flag()' in _mb and 'if _stop_flag():' in _mb)
-check('wait_stable 同样可打断', _mb.count('if _stop_flag():') >= 2)
+# ⚠ 手机端与 PC 端**实现不同但语义相同**，两边都要有「等待循环可被停止打断」：
+#   PC  ：`def _stop_flag()` + 每次轮询 `if _stop_flag():`
+#   手机：原实现把 waitChange **一次性**整段阻塞在 Kotlin 里 ⇒ Python 侧没机会看停止位
+#         （用户报「点 ■ 后还要运行一会」）⇒ 2026-10-01 改成**切片调用**（SLICE=0.3s）
+check('等待循环可被停止打断（wait_change 切片 ✓）',
+      ('def _stop_flag' in _mb) and _mb.count('if self._stop_flag():') >= 3)
+check('wait_change 按小片调用（不是整段阻塞在 Kotlin 里）',
+      'SLICE = 0.30' in _mb and _mb.count('self.api.waitChange') >= 1
+      and _mb.count('self.api.waitStable') >= 1)
+check('等待循环真的在循环里问停止位',
+      _mb.count('if self._stop_flag():') >= 3)
 check('战斗等待 wait_end 收到停止立刻退出（不再 continue ✗）',
       "'wait_end': 'stopped_by_user'" in src and 'if stop_requested():' in src)
 check('_stop_flag 在 PC 上恒 False（零回归 ✓）',
@@ -762,6 +848,7 @@ check('_stop_flag 在 PC 上恒 False（零回归 ✓）',
 try:
     import threading as _th
     import time as _tm
+    import time                     # ← _Api3 的替身要用 time.sleep（不是 _tm）
     import importlib.util as _ilu3
     import sys as _sys3
     import types as _ty3
@@ -780,6 +867,24 @@ try:
         def grab(self):
             return _np3.zeros((1920, 1080, 3), dtype=_np3.uint8)
 
+    class _Api3(object):
+        """手机端 Bot 的 `api` 替身：模拟 Kotlin 的 waitChange/waitStable（阻塞语义）"""
+        def __init__(self):
+            self.calls = 0
+
+        def waitChange(self, sec, y0, y1, thr, min_sec, ax, ay, radius):
+            self.calls += 1
+            time.sleep(max(0.0, float(sec)))
+            return False
+
+        def waitStable(self, sec, thr, need, y0, y1):
+            self.calls += 1
+            time.sleep(max(0.0, float(sec)))
+            return False
+
+        def lastDim(self):
+            return 1.0
+
     def _nb3():
         _b = _mb3.Bot.__new__(_mb3.Bot)
         _b.fast_ok = True
@@ -788,6 +893,10 @@ try:
         _b._img_path = None
         _b.last_change = {}
         _b.t = {'wait': 0.0, 'wait_n': 0}
+        # ⭐ 两端 Bot 接口不同：PC 用 `fast.grab` 自己轮询，手机端用阻塞的
+        #   `api.waitChange`（这正是"要切片才能被停止打断"的原因）。
+        #   ⇒ 两个都挂上，测试对**两端**都成立 ✓
+        _b.api = _Api3()
         return _b
 
     def _with_stop(_fn):
@@ -814,7 +923,7 @@ except Exception as _e:      # noqa: BLE001
 
 print()
 print('㉒ 手机端等待也可中断（PC 改了还不够 —— Android mapbot 是独立副本 ⚠）')
-_amb = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main',
+_amb = open(os.path.join(PROJ, 'app', 'src', 'main',
                          'python', 'mapbot.py'), encoding='utf-8').read()
 check('Android mapbot 有可中断的 _sleep（Java requestInterrupt 管不到纯 Python sleep ✗）',
       'def _sleep(self, sec)' in _amb and 'self._sleep(' in _amb)
@@ -918,7 +1027,7 @@ try:
         'el_disambig', os.path.join(MAPBOT, 'explore_loop.py'))
     _el5 = _ilu5.module_from_spec(_spec5)
     _spec5.loader.exec_module(_el5)
-    _v5 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _v5 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'board_now_ref.png')
     if os.path.exists(_v5):
         import cv2 as _c5
@@ -1000,7 +1109,7 @@ try:
         'el_vault', os.path.join(MAPBOT, 'explore_loop.py'))
     _el6 = _ilu6.module_from_spec(_spec6)
     _spec6.loader.exec_module(_el6)
-    _v6 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _v6 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'board_now_ref.png')
     if os.path.exists(_v6):
         import cv2 as _c6
@@ -1076,7 +1185,7 @@ try:
         check('v0.97 执行级：`say` 调用不抛 NameError ✓', True)
     except Exception as _e7:      # noqa: BLE001
         check('v0.97 执行级：`say` 调用不抛 NameError（%r）' % (_e7,), False)
-    _j7 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _j7 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'vault_ret_dlg_now_dlg.json')
     if os.path.exists(_j7):
         import json as _js7
@@ -1162,7 +1271,7 @@ try:
     _spec8 = _ilu8.spec_from_file_location('bp_v098', _bp2)
     _bp8 = _ilu8.module_from_spec(_spec8)
     _spec8.loader.exec_module(_bp8)
-    _f8 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _f8 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'fixture_vault_all_rings.png')
     if os.path.exists(_f8) and hasattr(_bp8, 'vault_tiles'):
         import cv2 as _c8
@@ -1258,7 +1367,7 @@ try:
           and "row['fog_sil'] = max(_sils)" in _src6)
     check('v1.06 ④ 保守口径已彻底移除（用户：「不优雅」✗）',
           'fog_unknown' not in _src6)
-    _f6 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
+    _f6 = os.path.join(PROJ, '_verify', 'phone_stamina_0930',
                        'bagdbg', 'iron_highland_fog_dev.png')
     if os.path.exists(_f6):
         _sys6b = __import__('sys')
@@ -1314,7 +1423,7 @@ try:
           and "'补给没吃够，请手动补一次'" in _src7)
     check('v1.07 ③ 体力**读不到**也说明白（原来只写「体力读不到 · 先不进图」✗）',
           "status('体力读不到（要 ≥%d）· 先不进图，请看一眼体力'" in _src7)
-    _pl7 = os.path.join(ROOT, 'android_autoexplore', 'tools', 'port_loop.py')
+    _pl7 = os.path.join(PROJ, 'tools', 'port_loop.py')
     _src7b = open(_pl7, encoding='utf-8').read()
     check('v1.07 ④ 启动瞬间就在悬浮条报「下限 + 自动补给开/关」（体感"点了没反应"的直接解药 ✓）',
           "status('已启动 · 体力下限 %d ｜ 自动补给%s'" in _src7b)
@@ -1472,7 +1581,7 @@ except Exception as _e12:      # noqa: BLE001
 #   报"面板挡住了棋盘 · 正在收起"、一直卡住 ✗✗
 # =====================================================================================
 try:
-    _el15 = os.path.join(ROOT, 'mapbot_pc', 'explore_loop.py')
+    _el15 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
     _src15 = open(_el15, encoding='utf-8').read()
     check('v1.15 ① `in_map` 补"选图界面专属文字"否定证据（深渊NN / 星界秘境 ✓）',
           "if any(('深渊' in it['text']) or ('星界秘境' in it['text'])" in _src15)
@@ -1482,7 +1591,7 @@ try:
     _spec15 = _ilu15.spec_from_file_location('el_v115', _el15)
     _el15m = _ilu15.module_from_spec(_spec15)
     _spec15.loader.exec_module(_el15m)
-    _f15 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_friend_rmx3800',
+    _f15 = os.path.join(PROJ, '_verify', 'phone_friend_rmx3800',
                         'select_screen_ref.png')
     if os.path.exists(_f15):
         import cv2 as _c15
@@ -1521,10 +1630,10 @@ print('㉕ v1.16 广播命令安全门（防 release 被广播 exec 任意 Pytho
 
 _CRJ = None
 try:
-    _CRJ = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main', 'java',
+    _CRJ = open(os.path.join(PROJ, 'app', 'src', 'main', 'java',
                               'com', 'fantasy', 'autoexplore', 'CommandReceiver.java'),
                 encoding='utf-8').read()
-    _BG = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'build.gradle'),
+    _BG = open(os.path.join(PROJ, 'app', 'build.gradle'),
                encoding='utf-8').read()
 except Exception as _e16:
     _CRJ, _BG = None, None
@@ -1560,7 +1669,7 @@ print('㉗ v1.17 朋友真机 1264x2780 的锚定模型几何对拍（模拟器�
 
 try:
     import subprocess as _sp17
-    _gp = os.path.join(ROOT, 'android_autoexplore', 'tools', 'verify_friend_phone_geometry.py')
+    _gp = os.path.join(PROJ, 'tools', 'verify_friend_phone_geometry.py')
     _r17 = _sp17.run([sys.executable, _gp], stdout=_sp17.PIPE,
                       stderr=_sp17.STDOUT, timeout=120, env=_ENV())
     _o17 = (_r17.stdout or b'').decode('utf-8', 'replace')
@@ -1620,7 +1729,7 @@ for _t in ('首领战斗胜利', '★首领战斗不超过8回合', '首领战�
           EL.battle_started([item(_t, 300, 300)]) is False)
 
 # 正样本①：真机战斗结算帧（runs/bw2.json 全量 OCR）⇒ 必须 True（别过度收紧 ✗）
-_bw_p = os.path.join(MAPBOT, 'runs', 'bw2.json')
+_bw_p = os.path.join(PROJ, '_verify', 'bw2_pc_result_panel.json')
 if os.path.exists(_bw_p):
     _bw = json.load(io.open(_bw_p, encoding='utf-8'))
     _bitems = _bw['items'] if isinstance(_bw, dict) else _bw
@@ -1701,7 +1810,7 @@ check('v1.19 ⑦ 旧硬编码 `box=(40, 840 + c` 已消失', '(40, 840 + c' not 
 check('v1.19 ⑧ 旧硬编码 `LAYOUT.sy(700) <= it[\'cy\'] <= LAYOUT.sy(1180)` 已消失',
       "LAYOUT.sy(700) <= it['cy'] <= LAYOUT.sy(1180)" not in _FR_SRC2)
 # PC 基线帧（runs/bw2.json）仍覆盖到奖励行 ⇒ 没把 9:16 弄坏
-_bw2 = os.path.join(MAPBOT, 'runs', 'bw2.json')
+_bw2 = os.path.join(PROJ, '_verify', 'bw2_pc_result_panel.json')
 if os.path.exists(_bw2):
     _b2 = json.load(io.open(_bw2, encoding='utf-8'))
     _b2i = _b2['items'] if isinstance(_b2, dict) else _b2
@@ -1870,56 +1979,15 @@ except Exception as _e50:
     check('v1.20 面板搜索带审计守门可运行（%r）' % (_e50,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊱ PC 端提速层（2026-10-01）：固定锚点 + 模板快查
-#   用户定：「PC 端锁 720×1280 换速度；能点固定位置的就用固定位置，
-#            只能 OCR 的才 OCR」。本组守住这条约定不被悄悄破坏。
+# ㊱ PC 端提速层（fixed.py）—— **已移出本门禁**
+#   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
+#   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
+#   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
+#   手机端这边只留一句指针，提醒改 PC 提速约定要去 PC 仓跑。
 print()
-print('㊱ PC 端提速层（fixed.py 固定锚点 + 模板快查）')
-try:
-    import subprocess as _sp51
-    _fx = os.path.join(MAPBOT, 'fixed.py')
-    if not os.path.exists(_fx):
-        check('PC 端 fixed.py 存在', False, _fx)
-    else:
-        # ⚠ v1.20 修一个**假失败**：子进程没继承 UTF-8 stdout 时，fixed.py 打印
-        #   '✓' 会在 GBK 控制台抛 UnicodeEncodeError ⇒ exit≠0 ⇒ 主门禁 4 项假红，
-        #   而 fixed.py 逻辑本身完全正常（直接跑 exit=0）。
-        #   这正是《错误教训》B2 的「回归红了先分清代码错还是环境错」——
-        #   根因在**门禁 harness**，不在被测代码 ⇒ 这里显式传 env。
-        _r51 = _sp51.run([sys.executable, _fx], stdout=_sp51.PIPE,
-                         stderr=_sp51.STDOUT, timeout=120, cwd=MAPBOT,
-                         env=_ENV())
-        _o51 = (_r51.stdout or b'').decode('utf-8', 'replace')
-        check('fixed.py 自检可运行且全过（exit=%d）' % _r51.returncode,
-              _r51.returncode == 0, _o51.strip().split('\n')[-1][:90])
-        check('① 全部锚点在屏内', '全部锚点都在屏内' in _o51)
-        check('② band 全部合法（y0<y1，防静默永不命中）',
-              '个 band 全部合法' in _o51)
-        check('③ 与 layout.LAYOUT(720×1280) 逐条对拍一致',
-              '与 LAYOUT 完全一致' in _o51)
-        _fxv = os.path.join(MAPBOT, 'verify_fastpath.py')
-        if not os.path.exists(_fxv):
-            check('PC 端 verify_fastpath.py 存在', False, _fxv)
-        else:
-            _r52 = _sp51.run([sys.executable, _fxv], stdout=_sp51.PIPE,
-                             stderr=_sp51.STDOUT, timeout=300, cwd=MAPBOT)
-            _o52 = (_r52.stdout or b'').decode('utf-8', 'replace')
-            check('快查验收可运行且全过（exit=%d）' % _r52.returncode,
-                  _r52.returncode == 0, _o52.strip().split('\n')[-1][:90])
-            check('④ 正样本：固定模板在图里必须命中', '命中 5/5' in _o52)
-            check('⑤ 负样本：涂掉后必须不命中（防到处乱跳）',
-                  '涂掉后全部不命中' in _o52)
-            check('⑥ 实测比 OCR 快 100 倍以上', '快 100 倍以上' in _o52)
-    # 提速约定进源码（防"改了 fixed.py 却把热路径退回 OCR"）
-    _el = open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
-    check('⑦ 大厅离开用固定坐标（不再从 OCR 文字猜 4 个偏移）',
-          "fx_anchor('start_adv_icon')" in _el)
-    check('⑧ 进入地图用固定锚点点，但仍保留体力安全门',
-          "fx_anchor('enter_map')" in _el and 'skip_low_stamina' in _el)
-    check('⑨ 提速层封装了 fx_has/fx_at/fx_tap 三个业务入口',
-          all(('def %s(' % f) in _el for f in ('fx_has', 'fx_at', 'fx_tap')))
-except Exception as _e51:
-    check('PC 提速层守门可运行（%r）' % (_e51,), False)
+print('㊱ PC 端提速层（fixed.py）不在本门禁 —— 属 PC 端自己的门禁（mapbot_pc/verify_gate.py）')
+check('手机端仓**不含** fixed.py（平行：PC 的东西不进本仓）',
+      not os.path.exists(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'fixed.py')))
 
 print()
 print('=' * 78)

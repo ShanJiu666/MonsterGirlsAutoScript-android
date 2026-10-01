@@ -338,18 +338,13 @@ class Bot(object):
           **管不到**的（那只踹 wait 循环）⇒ 用户点 ■ 后还要干等 1~3 秒 ✗
           这里把长 sleep 切成 0.1 秒一片，每片查一次停止位 ✓
         """
-        try:
-            import sys as _sys
-            _el = _sys.modules.get('explore_loop')
-        except Exception:       # noqa: BLE001
-            _el = None
-        _stop = bool(getattr(_el, '_ANDROID_STOP', False)) if _el is not None else False
+        _stop = self._stop_flag()
         if not _stop and sec <= 0.15:
             time.sleep(sec)
             return
         _end = time.time() + max(0.0, sec)
         while True:
-            if _el is not None and getattr(_el, '_ANDROID_STOP', False):
+            if self._stop_flag():
                 return
             _left = _end - time.time()
             if _left <= 0:
@@ -403,25 +398,78 @@ class Bot(object):
             self._sleep(wait)          # ⭐ 可中断 ✓
 
     # ---------- 等画面变化 / 稳定（走 Kotlin，避免 PNG 编解码开销） ----------
+    def _stop_flag(self):
+        """外部停止标志（点 ■ / 广播 cmd=stop ⇒ explore_loop._ANDROID_STOP=True）"""
+        import sys as _sys
+        _el = _sys.modules.get('explore_loop')
+        return bool(getattr(_el, '_ANDROID_STOP', False)) if _el is not None else False
+
     def wait_change(self, max_sec=1.5, band=None, thr=3.0, interval=0.06,
                     min_sec=0.22, around=None, radius=260):
+        """等画面变化。⭐ 2026-10-01：切成**小片**调用，使停止可中断。
+
+        ⚠ 原来一次性 `api.waitChange(max_sec, ...)` 整段阻塞在 Kotlin 里 ⇒
+          Python 侧**没有任何机会**看停止位 ⇒ 用户报「点 ■ 后还要运行一会」
+          （PC 端 v0.98 早已修：切成轮询并在每次轮询问 `_stop_flag()`）。
+        ⇒ 这里把总时长拆成 ≤SLICE 秒的小片，每片之间问一次停止位。
+          代价：Kotlin 调用次数变多（每次 ~8ms，可接受）；收益：停止延迟 ≤SLICE。
+        """
+        SLICE = 0.30                       # 每片最长 0.3s ⇒ 停止最坏延迟 0.3s
         y0, y1 = (band if band else (130, 1700))
         ax = int(around[0]) if around else -1
         ay = int(around[1]) if around else -1
         _t0 = time.time()
-        changed = bool(self.api.waitChange(float(max_sec), int(y0), int(y1),
-                                           float(thr), float(min_sec),
-                                           ax, ay, int(radius)))
+        t_end = _t0 + max(0.0, max_sec)
+        changed = False
+        while True:
+            now = time.time()
+            left = t_end - now
+            if left <= 0:
+                break
+            if self._stop_flag():           # ⭐ 被停止 ⇒ 立即返回（视为"有变化"以跳出调用方循环）
+                self.t['wait'] += time.time() - _t0
+                self.t['wait_n'] += 1
+                self.last_change = {'changed': True, 'dim': 1.0, 'stopped': True}
+                return True
+            chunk = min(SLICE, left)
+            # min_sec 只在**第一片**生效（保证至少观察 min_sec 再判"没变"）
+            _min = min_sec if (now - _t0) < 1e-6 else 0.0
+            changed = bool(self.api.waitChange(float(chunk), int(y0), int(y1),
+                                               float(thr), float(_min),
+                                               ax, ay, int(radius)))
+            if changed:
+                break
         self.t['wait'] += time.time() - _t0
         self.t['wait_n'] += 1
-        self.last_change = {'changed': changed, 'dim': float(self.api.lastDim())}
+        try:
+            self.last_change = {'changed': changed, 'dim': float(self.api.lastDim())}
+        except Exception:       # noqa: BLE001
+            self.last_change = {'changed': changed, 'dim': 1.0}
         return changed
 
     def wait_stable(self, max_sec=3.0, interval=0.08, thr=1.6, need=2, band=(130, 1800)):
+        """等画面稳定。⭐ 同样切片，使停止可中断（理由同 `wait_change`）"""
+        SLICE = 0.30
         y0, y1 = band
         _t0 = time.time()
-        ok = bool(self.api.waitStable(float(max_sec), float(thr), int(need),
-                                      int(y0), int(y1)))
+        t_end = _t0 + max(0.0, max_sec)
+        ok = False
+        while True:
+            now = time.time()
+            left = t_end - now
+            if left <= 0:
+                break
+            if self._stop_flag():
+                self.t['wait'] += time.time() - _t0
+                self.t['wait_n'] += 1
+                return True               # 停止 ⇒ 直接返回，别让调用方继续等
+            chunk = min(SLICE, left)
+            # need 只在第一片用；后续片沿用 1（稳定判定已由第一片累计）
+            _need = need if (now - _t0) < 1e-6 else 1
+            ok = bool(self.api.waitStable(float(chunk), float(thr), int(_need),
+                                          int(y0), int(y1)))
+            if ok:
+                break
         self.t['wait'] += time.time() - _t0
         self.t['wait_n'] += 1
         return ok

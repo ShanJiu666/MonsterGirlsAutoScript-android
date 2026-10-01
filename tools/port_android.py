@@ -33,22 +33,29 @@
 import os
 import re
 
-# ⭐⭐⭐ 2026-10-01 **MGAS 已从「幻想少女公会」仓库分离**（搬到 D:\MGAS）：
-#   ⇒ 这里的源/目标**不能再写死仓库绝对路径** ✗（原来是 D:\幻想少女公会\...）
-#   现在按**本脚本自身位置**推算（MGAS 里 `android_autoexplore/tools/` 与 `mapbot_pc/` 同级），
-#   并允许环境变量覆盖（想把 PC 源指回旧仓库做对拍时：设 MGAS_MAPBOT_SRC 即可 ✓）
+# ⭐⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓对本仓是可选的**
+#   本脚本只是「想把 PC 上的某个改动/修复搬到手机时」跑一次的**搬运工具**，
+#   而**不是**手机端的构建/测试前置条件 ⇒ import 本模块**绝不能**因为找不到 PC 源就崩。
+#   旧做法是 `raise SystemExit(...)` ⇒ 任何 `import port_android` 的工具
+#     （包括主门禁）都会**直接挂掉** ⇒ 手机端仓就变成了"必须先有 PC 仓"。
+#   ⇒ 现在改成：找不到就 `SRC = None` + 打印提示，调用 `main()` 时才报错。
+#   仍可用环境变量覆盖：`MGAS_MAPBOT_SRC`。
 _HERE = os.path.dirname(os.path.abspath(__file__))              # …/android_autoexplore/tools
 PROJ = os.path.dirname(_HERE)                                    # …/android_autoexplore
 MGAS_ROOT = os.path.dirname(PROJ)                                # …（MGAS 根）
-SRC = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(MGAS_ROOT, 'mapbot_pc')
 DST = os.environ.get('MGAS_PY_DST') or os.path.join(PROJ, 'app', 'src', 'main', 'python')
+
+SRC = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(MGAS_ROOT, 'mapbot_pc')
 if not os.path.isdir(SRC):
-    # 兜底：分离前的老布局（脚本还在仓库里、PC 源在 tools/mapbot）
+    # 兜底：分离前的老布局（脚本还在旧仓库里、PC 源在 tools/mapbot）
     _old = os.path.join(MGAS_ROOT, 'tools', 'mapbot')
-    if os.path.isdir(_old):
-        SRC = _old
-    else:
-        raise SystemExit('找不到 mapbot PC 源：%s（可用环境变量 MGAS_MAPBOT_SRC 指定）' % SRC)
+    SRC = _old if os.path.isdir(_old) else None
+if SRC is None:
+    print('[port_android] ⚠ 找不到 PC 端源码（%s）—— **本脚本是可选搬运工具**，'
+          '不影响手机端构建与测试。\n'
+          '            要用它把 PC 的改动搬过来时：设 MGAS_MAPBOT_SRC 指向 PC checkout，'
+          '或把 PC 仓 clone 到 <MGAS>\\mapbot_pc。'
+          % os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(MGAS_ROOT, 'mapbot_pc'))
 
 # 需要移植的纯逻辑模块（依赖只有 cv2 / numpy / 标准库）
 MODULES = [
@@ -153,6 +160,12 @@ def _guard_overwrite(names):
 
 
 def main():
+    if not SRC:
+        raise SystemExit(
+            '找不到 PC 端源码，无法搬运。\n'
+            '   本脚本是**可选**搬运工具（手机端不依赖它），要跑就：\n'
+            '   ① 设环境变量 MGAS_MAPBOT_SRC 指向 PC checkout，或\n'
+            '   ② 把 PC 仓 clone 到 <MGAS>\\mapbot_pc')
     os.makedirs(DST, exist_ok=True)
     _guard_overwrite([m + '.py' for m in MODULES])
     report = []
