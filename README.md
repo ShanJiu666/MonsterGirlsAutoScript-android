@@ -1537,6 +1537,15 @@ v1.04（又上保守）/v1.05（再撤保守）都是与用户来回定案的过
 ⇒ **211 → 218 项，通过 218 / 失败 0 / 跳过 1**（跳过的 1 项是 v0.98 颜色认种，
 那帧里没草/果，与本改动无关）。
 
+**真机/模拟器实测**（MuMu 16384 / Android 15 / x86_64，release 包，`flags` 无 `DEBUGGABLE`）：
+```
+$ am broadcast -n …/.CommandReceiver -a com.fantasy.autoexplore.CMD --es cmd py --es code 'print(1+1)'
+  ⛔ 命令 py 仅调试包可用（当前是 release 构建）⇒ 已拒绝      ← RCE 通道已封 ✓
+$ 同上逐条：pyinfo / explore_status / overlay_dump   ⇒  正常执行 ✓（日常运维不受影响）
+$ 同上逐条：mask_check / classify                    ⇒  ⛔ 已拒绝 ✓
+```
+⇒ **同设备任意 app 发的广播在 release 包上不再能执行任意 Python**。要调试请出 `assembleArm64Debug`。
+
 **顺带把 v1.11~v1.15 补提交并推上 Gitee**：此前 HEAD 停在 `3051601`(v1.10)，
 而**远端 `master` 还停在 `fb6d12c` = v0.38 初始入库**（落后 15 个版本）⇒ 现已推到 `5d8492e`。
 ⚠ 本次一并**恢复了被 `b178afe` 那次全量 revert 顺带删掉的 `_verify/` 真机 fixture**
