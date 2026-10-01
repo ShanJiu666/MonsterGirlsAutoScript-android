@@ -2373,7 +2373,72 @@ except Exception as _e24:       # noqa: BLE001
     check('v1.24 重投按钮结构定位守门可运行（%r）' % (_e24,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊳ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊳ v1.25「不摇色子」第三刀：**确认框认不出（OCR 把「确定」读成「石确定」）+ 弹框挂着还去点正文**
+#   真机 v1.24 跑图（Redmi 1280×2772）日志（`bagdbg/mgas_log.txt`，adb 直接拉，无需反馈包）：
+#     {"dice":"clover_btn_fallback","at":[118,979]}      ← v1.24 兜底命中 ✓
+#     {"dice":"reroll_confirm","at":[774,802],"rolls":1} ← 弹框弹出+点确定 ⇒ **真摇了 1 次** ✓
+#     {"dice":"after","rolls":1,"reward_mark_hits":0}    ← 摇完没出大拇指（该继续摇）
+#     {"dice":"panel","rolls":1,"items":[…"命运之骰"…"是否继续重掷？"…
+#              {"t":"取消","cx":304,"cy":803},{"t":"石确定","cx":774,"cy":802}]}
+#     {"dice":"no_confirm_popup","rolls":1,"streak":1} → streak=2 → abort  ← 只摇 1 次就放弃 ✗✗
+#   根因：① 判据 `exb()`（**整条等值**）⇒ `'石确定' != '确定'` ⇒ 认不出弹框；
+#         ② 弹框挂着时 B 路（找骰子按钮）会把**弹框正文**「每次重掷必定高于当前点数…」
+#            （含「重掷」）当按钮点掉 ⇒ 用户看到的"乱点" ✗✗
+#   修法：`dice_dialog()` 宽容识别（标题词 + 包含匹配 + 标签长度 ≤6）；
+#         弹框挂着时**只走 A**（`dialog_still_up`），认到弹框但找不出确定就**停**（`dialog_unparsed`），
+#         绝不走 B ⇒ 不会再点正文 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊳ v1.25 修「不摇色子」第三刀：确认框宽容识别 + 弹框挂着不许点正文')
+try:
+    _el25p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src25 = open(_el25p, encoding='utf-8').read()
+    check('v1.25 ① 新增 `dice_dialog()` 宽容识别（标题词 + 包含匹配 + 标签长度 ≤6 ✓）',
+          'def dice_dialog(' in _src25 and 'DICE_DLG_TITLES' in _src25
+          and 'DICE_OK_KEYS' in _src25 and 'len(_t) > 6' in _src25)
+    check('v1.25 ② A 段改用 `dice_dialog()`（不再只认整条等于「确定」✗）',
+          '_dlg = dice_dialog(items)' in _src25
+          and "_ok = exb(items, L['ok'])" not in _src25)
+    check('v1.25 ③ 弹框还挂着 ⇒ **回 A 继续摇**，不走 B（防点弹框正文 ✗）',
+          "'dice': 'dialog_still_up'" in _src25 and "'dice': 'dialog_unparsed'" in _src25)
+    check('v1.25 ④ 收尾「取消」也走宽容识别',
+          "_dlg2 = dice_dialog(items)" in _src25)
+
+    import importlib.util as _ilu25
+    _spec25 = _ilu25.spec_from_file_location('el_v125', _el25p)
+    _el25m = _ilu25.module_from_spec(_spec25)
+    _spec25.loader.exec_module(_el25m)
+    # ⭐ 这一组条目是**真机日志里原样抄下来的**（不是编的）
+    _dlg_items = [{'text': '文', 'cx': 918, 'cy': 444},
+                  {'text': '命运之骰', 'cx': 539, 'cy': 448},
+                  {'text': '每次重掷必定高于当前点数，最高20点', 'cx': 539, 'cy': 548},
+                  {'text': '是否继续重掷？', 'cx': 530, 'cy': 602},
+                  {'text': '本次登录不再提示', 'cx': 570, 'cy': 678},
+                  {'text': '取消', 'cx': 304, 'cy': 803},
+                  {'text': '石确定', 'cx': 774, 'cy': 802}]
+    _d25 = _el25m.dice_dialog(_dlg_items)
+    check('v1.25 ⑤ 执行级：真机那份弹框条目 ⇒ 认出「石确定」@(774,802)（旧 `exb` 认不出 ✗）',
+          _d25 is not None and (_d25['yes']['cx'], _d25['yes']['cy']) == (774, 802)
+          and _d25['no'] is not None and _d25['no']['cx'] == 304,
+          'got=%s' % ({'yes': _d25['yes']['text'] if _d25 else None,
+                       'no': _d25['no']['text'] if _d25 else None},))
+    check('v1.25 ⑥ 执行级：弹框**正文**「每次重掷必定高于当前点数…」不许被当成按钮 ✓',
+          _d25 is not None and '重掷必定' not in str(_d25['yes'].get('text') or ''))
+    _panel_items = [{'text': '战斗胜利', 'cx': 540, 'cy': 200},
+                    {'text': '167/167', 'cx': 284, 'cy': 634},
+                    {'text': '16', 'cx': 111, 'cy': 906},
+                    {'text': '1', 'cx': 118, 'cy': 979},
+                    {'text': '关闭', 'cx': 576, 'cy': 1441}]
+    check('v1.25 ⑦ 执行级：普通结算面板 ⇒ **不是**弹框（返回 None ✓ 不会误点）',
+          _el25m.dice_dialog(_panel_items) is None)
+    check('v1.25 ⑧ 执行级：只有「确定」没有标题词 ⇒ 也不当弹框（防面板上的确定 ✗）',
+          _el25m.dice_dialog([{'text': '确定', 'cx': 774, 'cy': 802},
+                              {'text': '取消', 'cx': 304, 'cy': 803}]) is None)
+except Exception as _e25:       # noqa: BLE001
+    check('v1.25 重掷弹框宽容识别守门可运行（%r）' % (_e25,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊴ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。

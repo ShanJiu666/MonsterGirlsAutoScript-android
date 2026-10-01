@@ -2716,15 +2716,18 @@ def handle_dice(b, log, items, tries=3):
     _no_confirm = 0              # 连续「点了骰子却没弹确认框」次数（手势失效特征 ⇒ 防死循环）
     while rolls < tries:
         # A. 确认框挂着？⇒ 点「确定」= **执行摇**
-        _ok = exb(items, L['ok'])
-        _cc = exb(items, L['cancel'])
-        if _ok and _cc:
+        # ⭐⭐⭐ v1.25：判据换成 `dice_dialog()`（**宽容**识别）——
+        #   真机日志铁证：弹框明明在（`命运之骰 / 是否继续重掷？/ 取消 / 石确定`），
+        #   旧的 `exb(items,'确定')`（**整条等值**）认不出「石确定」⇒ `no_confirm_popup` ×2
+        #   ⇒ 只摇了 1 次就放弃（用户看到的是"摇了一次就不摇了"）✗✗
+        _dlg = dice_dialog(items)
+        if _dlg is not None:
+            _yes = _dlg['yes']
             _no_confirm = 0
-            _yes = _ok if _ok['cx'] >= _cc['cx'] else _cc
             b.tap(_yes['cx'], _yes['cy'], wait=2.5)
             rolls += 1
             log.append({'dice': 'reroll_confirm', 'at': (_yes['cx'], _yes['cy']),
-                        'rolls': rolls})
+                        'text': _yes.get('text'), 'rolls': rolls})
             b.wait_stable(1.5, interval=0.06, thr=1.6, need=6)
             items = b.ocr(min_conf=0.35, tag='dice')
             # ⭐ 决定性检测：摇完的奖励行（确认框已消费、等过动画）⇒ retry=2 保险
@@ -2737,6 +2740,16 @@ def handle_dice(b, log, items, tries=3):
             log.append({'dice': 'after', 'rolls': rolls, 'reward_mark_hits': len(got)})
             if _hit(got, rolls, rolls):
                 break
+            # ⭐ v1.25：弹框还挂着（真机上「是否继续重掷？」会一直在）⇒ 直接回 A 再点确定，
+            #   **不走 B**（B 会把弹框正文当按钮点掉 = 用户看到的"乱点" ✗✗）
+            if dice_dialog(items) is not None:
+                log.append({'dice': 'dialog_still_up', 'rolls': rolls})
+                continue
+        elif fb(items, *DICE_DLG_TITLES):
+            # ⭐ v1.25：认到"这是重掷弹框"却找不出「确定」⇒ **绝不走 B**（防点正文）
+            log.append({'dice': 'dialog_unparsed', 'rolls': rolls,
+                        'texts': [(i.get('text') or '')[:12] for i in items][:16]})
+            break
         # B. 找骰子按钮（触发下一轮确认框）
         # ⭐⭐⭐ 2026-10-01 用户报「刚刚那一张图怎么点了回放战斗」⇒ 修：
         #   原来**只按位置挑**（`cx < sx(230)` + y 820~1070 的**任意文字**）⇒ 真机结算面板
@@ -2830,12 +2843,13 @@ def handle_dice(b, log, items, tries=3):
         #   下一圈 A 段点「确定」执行摇后再检测 ✓
     # 收尾：确认框若还挂着（最后一次点骰子没来得及确定）⇒ 点「取消」= 不执行这次摇 ✓
     #   （不扣幸运草、奖励行保持最后一次摇的结果；也不会把弹窗留给关面板逻辑 ✗）
-    _ok = exb(items, L['ok'])
-    _cc = exb(items, L['cancel'])
-    if _ok and _cc:
-        _no = _cc if _ok['cx'] >= _cc['cx'] else _ok
+    # ⭐ v1.25：同样走 `dice_dialog()`（宽容识别 ⇒ 真机 OCR 多带字也认得出 ✓）
+    _dlg2 = dice_dialog(items)
+    if _dlg2 is not None:
+        _no = _dlg2.get('no') or _dlg2['yes']
         b.tap(_no['cx'], _no['cy'], wait=2.0)
-        log.append({'dice': 'reroll_cancel_tail', 'at': (_no['cx'], _no['cy'])})
+        log.append({'dice': 'reroll_cancel_tail', 'at': (_no['cx'], _no['cy']),
+                    'text': _no.get('text')})
     log.append({'dice': 'done', 'rolls': rolls})
     return rolls
 
@@ -2911,6 +2925,46 @@ def clover_btn(items, close_y=None):
         return (int(LAYOUT.sx(114)), int(_ty))     # 兜底：按锚点推算（x 用参考值缩一下 ✓）
     except Exception:       # noqa: BLE001
         return None
+
+
+# ⭐ 2026-10-02 v1.25：重掷确认框（「命运之骰 · 是否继续重掷？」）的**宽容**识别口径
+#   真机实测：弹框出来了，日志却是 `{"dice":"no_confirm_popup"}` ×2 ⇒ 只摇 1 次就放弃 ✗
+#   根因：判据用 `exb()`（**整条等值**），而本机 OCR 把它读成 **「石确定」**（多一个"石"字）
+#         ⇒ `'石确定' != '确定'` ✗ ；且弹框挂着时"找骰子按钮"那条路会把**弹框正文**
+#         「每次重掷必定高于当前点数…」（含「重掷」）当按钮点掉 ⇒ 用户看到"乱点" ✗✗
+DICE_DLG_TITLES = ('命运之骰', '是否继续重掷', '是否重掷', '重掷必定')
+DICE_OK_KEYS = ('确定', '确认')
+DICE_NO_KEYS = ('取消', '放弃')
+
+
+def dice_dialog(items):
+    """识别「命运之骰 · 是否继续重掷？」确认框 → `{'yes': item, 'no': item}`，否则 None
+
+    口径（v1.25 实测定）：
+      · **标题词**（命运之骰 / 是否继续重掷…）说明"弹框挂着" ⇒ 有它才认；
+      · 「确定 / 取消」用**包含**匹配（`fb` 语义）—— 真机 OCR 会多带字（「石确定」）✗；
+      · 标签长度限 ≤6（防把正文「每次重掷必定高于当前点数，最高20点」当成按钮 ✗）；
+      · 「确定」取最右、「取消」取最左（真机实测 取消(304,803) / 确定(774,802) ✓）。
+    """
+    _yes = _no = None
+    _title = False
+    for it in items:
+        _t = str(it.get('text') or '').strip()
+        if not _t:
+            continue
+        if any(k in _t for k in DICE_DLG_TITLES):
+            _title = True
+        if len(_t) > 6:
+            continue
+        if any(k in _t for k in DICE_OK_KEYS):
+            if _yes is None or it['cx'] > _yes['cx']:
+                _yes = it
+        elif any(k in _t for k in DICE_NO_KEYS):
+            if _no is None or it['cx'] < _no['cx']:
+                _no = it
+    if not _title or _yes is None:
+        return None
+    return {'yes': _yes, 'no': _no}
 
 
 def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None):
