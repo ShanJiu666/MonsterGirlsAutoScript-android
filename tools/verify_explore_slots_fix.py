@@ -2694,7 +2694,30 @@ except Exception as _e29:       # noqa: BLE001
     check('v1.29 探索模式守门可运行（%r）' % (_e29,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊸ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊸ v1.30【识别问题的取证闸】标记一个都没扫到时**把那一帧存下来**（反馈包自动带上）
+#   起因：用户真机（realme RMX3800）报「**啥都没识别出来**」（`进图发了会呆就退出了.zip`）：
+#   日志 `marks_scan: none`，近失分 recommend 0.769 / boss 0.734 **贴在闸门下面**（0.80 / 0.90）
+#   ⇒ 到底是 ①"这盘真没标记" 还是 ②"有标记但被机身偏暗压到闸门之下"，**必须有帧才能定** ✗
+#   （那包里带的 PNG 是更早一局留下的：海岸主题 vs 日志里的沙漠主题 ⇒ 不能用 ✗）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊸ v1.30 标记全漏时落帧取证（`marks_none_rN`）')
+try:
+    _el30p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src30 = open(_el30p, encoding='utf-8').read()
+    check('v1.30 ① `marks_scan: none` 那个状态里**落一帧**（`marks_none_rN` ✓）',
+          "_pub_dump('marks_none_r%d' % int(rnd), b.img())" in _src30
+          and "'marks_none_dump'" in _src30)
+    _i_scan = _src30.index("log.append({'marks_scan': 'none'")
+    _i_dump = _src30.index("_pub_dump('marks_none_r%d'")
+    check('v1.30 ② 落帧在"标记全漏"分支**内部**（不会每帧都写 ✓）', 0 < _i_scan < _i_dump)
+    check('v1.30 ③ 受总开关 `BAG_DUMP` 约束（用户可关 ✓）',
+          'if BAG_DUMP:' in _src30[_i_scan:_i_dump + 200])
+except Exception as _e30:       # noqa: BLE001
+    check('v1.30 取证闸守门可运行（%r）' % (_e30,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊹ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。

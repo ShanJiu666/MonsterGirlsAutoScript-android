@@ -6292,6 +6292,21 @@ def one_round(b, log, rnd, prefix, st):
         if not _new_mk and not (st.get('marks') or {}):
             try:
                 log.append({'marks_scan': 'none', 'top': marks_mod.probe_top(img)})
+                # ⭐⭐⭐ 2026-10-02 v1.30【识别问题的**铁证**：把这一帧存下来】
+                #   用户真机（realme RMX3800，`进图发了会呆就退出了.zip`）反馈：
+                #   「啥都没识别出来」；日志里 `marks_scan: none`，近失分 recommend 0.769 /
+                #   boss 0.734 **都贴在闸门下面**（闸门 0.80 / 0.90）⇒ 到底是
+                #   ①"这盘真没标记"还是 ②"有标记、被机身偏暗压到闸门之下"，**必须有帧才能定**
+                #   ✗ 之前那包里的 PNG 是更早一局留下的（海岸 vs 沙漠主题）⇒ 不能用
+                #   ⇒ 这个状态下**每次都落一帧**（`marks_none_rN`，反馈包自动带上 ✓）
+                #     + 存一份**该帧的裸分**（省得再靠日志里截断的 top 列表）
+                if BAG_DUMP:
+                    try:
+                        _mp = _pub_dump('marks_none_r%d' % int(rnd), b.img())
+                        if _mp:
+                            log.append({'marks_none_dump': _mp})
+                    except Exception:       # noqa: BLE001
+                        pass
             except Exception as _emk:      # noqa: BLE001
                 log.append({'marks_scan': 'probe_err', 'e': repr(_emk)[:60]})
         # ⭐⭐ 2026-09-26 保险：**别让"被压暗的一帧"把标记吞掉**
