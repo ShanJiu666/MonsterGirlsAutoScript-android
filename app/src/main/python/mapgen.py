@@ -81,7 +81,11 @@ def _range_random(spec):
 
 
 def load_tables(path=DATATABLE):
-    d = json.load(open(path, encoding='utf-8'))
+    # ⚠ v1.20：用 with 显式关闭。原来 `json.load(open(path))` 靠 GC 回收 ⇒ 端上每次
+    #   回收都打一条 `ResourceWarning: unclosed file server_datatable.json`（日志噪音，
+    #   还会淹没真正的异常堆栈）。
+    with open(path, encoding='utf-8') as f:
+        d = json.load(f)
     return {'spot': _rows(d['Area_Spot']),
             'event': _rows(d['Battle_Event']),
             'diff': _rows(d['Difficulty_Spec'])}

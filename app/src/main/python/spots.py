@@ -142,7 +142,8 @@ def _cached(fn):
 @_cached
 def spot_rows():
     """{IDs: Area_Spot 行}"""
-    d = json.load(open(DT, encoding='utf-8'))
+    with open(DT, encoding='utf-8') as f:    # ⚠ v1.20 显式关闭
+        d = json.load(f)
     out = {r['IDs']: r for r in d['Area_Spot'].values()}
     for _k, _v in NAME_FIX.items():      # 套用名字覆盖 ✓
         if _k in out:
@@ -153,7 +154,8 @@ def spot_rows():
 @_cached
 def map_table():
     """Area_Spot -> {图名: S码}（同一图名的多行取一致前缀）"""
-    d = json.load(open(DT, encoding='utf-8'))
+    with open(DT, encoding='utf-8') as f:    # ⚠ v1.20 显式关闭（端上靠 GC 回收会刷 ResourceWarning 噪音）
+        d = json.load(f)
     out = {}
     for r in d['Area_Spot'].values():
         ids = r.get('IDs') or ''
@@ -830,7 +832,8 @@ def target_cmd(a):
 
 def verify_cmd(a):
     """用 probe_spots.py 采到的「面板真值」回归分类器 -> 命中率 + 明细"""
-    d = json.load(open(a.probe, encoding='utf-8'))
+    with open(a.probe, encoding='utf-8') as f:    # ⚠ v1.20 显式关闭
+        d = json.load(f)
     code = a.code or d.get('code') or code_of(d.get('map'))
     rows = spot_rows()
     allnames = {r.get('Name') for r in rows.values()}

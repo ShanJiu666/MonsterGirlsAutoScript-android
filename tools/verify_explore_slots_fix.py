@@ -37,6 +37,14 @@ sys.path.insert(0, MAPBOT)
 os.environ.setdefault('MAPBOT_ROOT', MAPBOT)
 os.environ.pop('MAPBOT_ANDROID', None)          # PC 口径（C=0）
 
+# ⚠ v1.20：所有**子进程**统一带 UTF-8 环境。
+#   起因：门禁里 `fixed.py` 的自检打印 '✓'，在 GBK 控制台（PYTHONIOENCODING 未设）
+#   会抛 UnicodeEncodeError ⇒ exit≠0 ⇒ 主门禁 4 项**假红**，而被测代码完全正常。
+#   ⇒ 根因在 harness 不在被测代码（《错误教训》B2「回归红了先分清代码错还是环境错」），
+#     修法：所有 `subprocess.run` 一律走 `_ENV()`，避免同类假失败复发。
+def _ENV():
+    return dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1')
+
 # 本机 rapidocr / airtest 都是**残缺安装**（PC 上这里用不到它们，只测逻辑）⇒ 打桩
 import types        # noqa: E402
 
@@ -1554,7 +1562,7 @@ try:
     import subprocess as _sp17
     _gp = os.path.join(ROOT, 'android_autoexplore', 'tools', 'verify_friend_phone_geometry.py')
     _r17 = _sp17.run([sys.executable, _gp], stdout=_sp17.PIPE,
-                      stderr=_sp17.STDOUT, timeout=120)
+                      stderr=_sp17.STDOUT, timeout=120, env=_ENV())
     _o17 = (_r17.stdout or b'').decode('utf-8', 'replace')
     _n17 = _o17.count('[ok]')
     if not os.path.exists(_gp):
@@ -1725,7 +1733,7 @@ try:
         check('v1.20 面板自检脚本存在', False, _gp20)
     else:
         _r20 = _sp20.run([sys.executable, _gp20], stdout=_sp20.PIPE,
-                          stderr=_sp20.STDOUT, timeout=180)
+                          stderr=_sp20.STDOUT, timeout=180, env=_ENV())
         _o20 = (_r20.stdout or b'').decode('utf-8', 'replace')
         check('v1.20 面板层自检可运行且全过（exit=%d）' % _r20.returncode,
               _r20.returncode == 0, _o20.strip().split('\n')[-1][:90])
@@ -1770,7 +1778,7 @@ try:
         check('v1.20 漏检防呆扫描器存在', False, _gp40)
     else:
         _r40 = _sp40.run([sys.executable, _gp40], stdout=_sp40.PIPE,
-                          stderr=_sp40.STDOUT, timeout=120)
+                          stderr=_sp40.STDOUT, timeout=120, env=_ENV())
         _o40 = (_r40.stdout or b'').decode('utf-8', 'replace')
         check('v1.20 漏检防呆可运行且差集为空（exit=%d）' % _r40.returncode,
               _r40.returncode == 0, _o40.strip().split('\n')[-1][:90])
@@ -1801,7 +1809,7 @@ try:
         check('v1.19 奖励行审计脚本存在', False, _gp30)
     else:
         _r30 = _sp30.run([sys.executable, _gp30], stdout=_sp30.PIPE,
-                          stderr=_sp30.STDOUT, timeout=180)
+                          stderr=_sp30.STDOUT, timeout=180, env=_ENV())
         _o30 = (_r30.stdout or b'').decode('utf-8', 'replace')
         check('v1.19 奖励行审计可运行且全过（exit=%d）' % _r30.returncode,
               _r30.returncode == 0, _o30.strip().split('\n')[-1][:90])
@@ -1839,7 +1847,7 @@ try:
         check('v1.20 面板搜索带审计脚本存在', False, _gp50)
     else:
         _r50 = _sp50.run([sys.executable, _gp50], stdout=_sp50.PIPE,
-                          stderr=_sp50.STDOUT, timeout=120)
+                          stderr=_sp50.STDOUT, timeout=120, env=_ENV())
         _o50 = (_r50.stdout or b'').decode('utf-8', 'replace')
         check('v1.20 面板搜索带审计可运行且全过（exit=%d）' % _r50.returncode,
               _r50.returncode == 0, _o50.strip().split('\n')[-1][:90])
@@ -1873,8 +1881,14 @@ try:
     if not os.path.exists(_fx):
         check('PC 端 fixed.py 存在', False, _fx)
     else:
+        # ⚠ v1.20 修一个**假失败**：子进程没继承 UTF-8 stdout 时，fixed.py 打印
+        #   '✓' 会在 GBK 控制台抛 UnicodeEncodeError ⇒ exit≠0 ⇒ 主门禁 4 项假红，
+        #   而 fixed.py 逻辑本身完全正常（直接跑 exit=0）。
+        #   这正是《错误教训》B2 的「回归红了先分清代码错还是环境错」——
+        #   根因在**门禁 harness**，不在被测代码 ⇒ 这里显式传 env。
         _r51 = _sp51.run([sys.executable, _fx], stdout=_sp51.PIPE,
-                         stderr=_sp51.STDOUT, timeout=120, cwd=MAPBOT)
+                         stderr=_sp51.STDOUT, timeout=120, cwd=MAPBOT,
+                         env=_ENV())
         _o51 = (_r51.stdout or b'').decode('utf-8', 'replace')
         check('fixed.py 自检可运行且全过（exit=%d）' % _r51.returncode,
               _r51.returncode == 0, _o51.strip().split('\n')[-1][:90])
