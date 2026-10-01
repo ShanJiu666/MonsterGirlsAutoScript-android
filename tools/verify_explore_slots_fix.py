@@ -402,10 +402,23 @@ check('页签兜底不再用归一化系 EQUIP_TAB/ITEM_TAB 硬点',
       and 'b.tap(ITEM_TAB[0], ITEM_TAB[1]' not in src)
 
 print()
-print('⑩ Android 生成物一致性（防「PC 改了、手机没跟上」✗）')
-# ⚠ 2026-10-01 实锤：`buypanels.py` 在 Android 侧是**另一份手工副本**，已与 PC 漂移
-#   （宝库「幸运草识别不出」就是它带来的）⇒ 现在一律走 `port_android.py` 生成，
-#   并在这里**逐字节**校验生成物与磁盘文件一致 ✓
+print('⑩ 两端源码漂移登记（2026-10-01 起：两端**平行独立开发**，漂移本身合法）')
+# ⚠⚠ 这条以前是"生成物必须与 PC 逐字节一致"（防「PC 改了、手机没跟上」）。
+#   但 2026-10-01 用户定了**两端平行独立开发** ⇒ 漂移是**合法状态**，判据是各自行为，
+#   不是两边一致。所以现在改成：**漂移必须被登记**（有据可查），未登记才失败。
+#
+#   为什么不能直接删掉这条：`buypanels.py` 的漂移是**真修复**（宝库幸运草认不出，
+#   v1.20 把 BAND 从 1560 放宽到 1720 修的），手机侧独有、没回流 PC。
+#   ⇒ 登记它 = 承认"这是有意的分叉"，下一个人才不会当成"忘了同步的 bug"去覆盖掉。
+#
+#   新增登记方式：把模块名加进 `_ALLOWED_DRIFT` 并写清理由。
+#   ⚠ 若某个模块**本应**同步却漂了，往这里加会让真 bug 溜过去 ⇒
+#     加之前先跑 `git diff --no-index <PC>/<模块>.py <手机端>/<模块>.py` 看清楚是什么。
+_ALLOWED_DRIFT = {
+    'buypanels': 'v1.20 宝库 BAND 1560→1720（修 1200×1920 宽屏上购买钮/价格 OCR 不到，'
+                 '症状「幸运草识别不出/整层不买」）。手机侧独有修复，未回流 PC：'
+                 'PC 端锁 720×1280 纯 9:16，该 bug 在 PC 上不触发 ⇒ 无需回流。',
+}
 try:
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location(
@@ -413,19 +426,23 @@ try:
         os.path.join(ROOT, 'android_autoexplore', 'tools', 'port_android.py'))
     _gen = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_gen)
-    _bad = []
+    _drift = []
     for _m in _gen.MODULES:
         _disk = os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main',
                              'python', _m + '.py')
-        # ⚠ 必须复刻 main() 的**完整**变换：patch() + 该模块的 EXACT 精确替换 ✓
         _want = _gen.patch(open(os.path.join(_gen.SRC, _m + '.py'), encoding='utf-8').read(), _m)
         for _old, _new in _gen.EXACT.get(_m + '.py', []):
             _want = _want.replace(_old, _new)
         _have = open(_disk, encoding='utf-8').read() if os.path.exists(_disk) else ''
         if _want != _have:
-            _bad.append(_m)
-    check('port_android.py 的 %d 个模块生成物与手机侧一致（漂移: %s）'
-          % (len(_gen.MODULES), ','.join(_bad) if _bad else '无'), not _bad)
+            _drift.append(_m)
+    _undeclared = [m for m in _drift if m not in _ALLOWED_DRIFT]
+    check('所有漂移模块都**已登记理由**（未登记: %s）'
+          % (','.join(_undeclared) if _undeclared else '无'), not _undeclared,
+          '漂移合计 %d 个：%s' % (len(_drift), ','.join(_drift) or '无'))
+    for _m in sorted(_drift):
+        if _m in _ALLOWED_DRIFT:
+            check('已登记漂移 %s 有明确理由' % _m, bool(_ALLOWED_DRIFT[_m].strip()))
     # 宝库图标尺度必须由 pitch 推出（防再写死 4.5 ✗）—— 只看**代码**，不看注释 ✓
     _bp = open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
     _bp_code = '\n'.join(l.split('#')[0] for l in _bp.splitlines()
@@ -436,7 +453,7 @@ try:
     check('宝库图标认不出时有**宽尺度兜底** + 分数落日志',
           'icon_hit_wide' in _bp and "'vault_debug'" in _bp)
 except Exception as _e:      # noqa: BLE001
-    check('port_android.py 生成物校验可运行（%r）' % (_e,), False)
+    check('两端漂移登记校验可运行（%r）' % (_e,), False)
 
 print()
 print('⑪ 观测累积（防「规划很差劲」：脏帧不许抹掉已知格 ✗）')
@@ -1723,10 +1740,51 @@ try:
         check('v1.20 ⑦ PC 结算帧仍认得出（没过度收紧）',
               'PC结算帧 is_battle_panel = True  OK' in _o20
               and 'PC结算帧 battle_started  = True  OK' in _o20)
-        check('v1.20 ⑧ 清单即契约的提示在位',
-              '清单即契约' in _o20)
+        check('v1.20 ⑧ 清单单一维护的提示在位（不再手工维护第二份清单）',
+              'SCAN_SOURCES 单一维护' in _o20)
+        # ⚠ v1.20 新增：自检验的必须是**手机端自己的代码**（原先验的是 PC 仓，
+        #   而两端已平行独立开发、buypanels 差 2232 行 ⇒ 验的根本不是端上跑的那份）
+        _g20 = open(_gp20, encoding='utf-8').read()
+        check('v1.20 ⑨ 自检 import 的是手机端源码（不是 PC 仓）',
+              "sys.path.insert(0, PYD)" in _g20
+              and '手机端优先' in _g20
+              and "assert os.path.abspath(EL.__file__)" in _g20)
 except Exception as _e20:
     check('v1.20 面板自检守门可运行（%r）' % (_e20,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉜ v1.20 **漏检防呆**（本轮最关键的一条）：面板层坐标常数清单 vs 手机端源码
+#   起因：`verify_panels_allres.py` 的覆盖度**完全取决于 PANEL_CONSTS 这张手工清单**，
+#     工具自己都承认「新面板必须同时登记，否则等于没测」—— 而「漏登记」**没有任何人
+#     会发现** ⇒ 这正是「面板层没做全分辨率」的机制性根因。
+#   做法：AST 扫手机端所有模块级坐标常数，与清单求差集，**差集非空即红**。
+#   本组第一次跑就抓出 3 个此前无人验证的真坐标
+#   （BAG_FILTER_DLG / _AUTO_SKIP_BOX / _BAG_TPL_SCALES）。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉜ v1.20 面板层坐标常数「漏检防呆」（AST 扫手机端源码 vs 清单）')
+try:
+    import subprocess as _sp40
+    _gp40 = os.path.join(HERE, 'panel_consts.py')
+    if not os.path.exists(_gp40):
+        check('v1.20 漏检防呆扫描器存在', False, _gp40)
+    else:
+        _r40 = _sp40.run([sys.executable, _gp40], stdout=_sp40.PIPE,
+                          stderr=_sp40.STDOUT, timeout=120)
+        _o40 = (_r40.stdout or b'').decode('utf-8', 'replace')
+        check('v1.20 漏检防呆可运行且差集为空（exit=%d）' % _r40.returncode,
+              _r40.returncode == 0, _o40.strip().split('\n')[-1][:90])
+        check('v1.20 ⑩ 清单已覆盖 ≥30 项坐标常数',
+              _o40.count('   explore_loop.py') + _o40.count('   buypanels.py') >= 30)
+        # 守住「扫描器本身有效」：三个此前漏检的真坐标必须已在清单里
+        _pc40 = open(_gp40, encoding='utf-8').read()
+        for _n40 in ('BAG_FILTER_DLG', '_AUTO_SKIP_BOX', '_BAG_TPL_SCALES'):
+            check('v1.20 ⑪ 此前漏检的 %s 已登记' % _n40, _n40 in _pc40)
+        # ⚠ 守住「EXEMPT 不是垃圾桶」：每条豁免都必须写理由
+        check('v1.20 ⑫ 豁免项均带理由（无裸豁免）',
+              "STATS': '统计计数器" in _pc40)
+except Exception as _e40:
+    check('v1.20 漏检防呆守门可运行（%r）' % (_e40,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
 # ㉛ v1.19 奖励行「锚定关闭」双分辨率审计（2026-10-01 20:4x 补）
@@ -1761,6 +1819,47 @@ try:
               '形状阈值 = 0.70' in _o30 and '配色阈值 = 0.70' in _o30)
 except Exception as _e30:
     check('v1.19 奖励行审计守门可运行（%r）' % (_e30,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉝ v1.20 宝库/商人面板 **OCR 搜索带** 9 分辨率审计（本轮修的真 bug）
+#   根因：`buypanels.BAND = (300,1560)` 的上界按 9:16（C=0）定死，而面板内容
+#     **锚设备屏幕中心** ⇒ 元素在归一化系的位置 = dlg_y − C，C 随分辨率变。
+#     宽屏矮胖（C<0，元素下移）上购买钮落到 1594 / 价格 1637 ⇒ **全在带外**
+#     ⇒ `_btn` 恒 (None,None,None) ⇒ `no_select_btn` ⇒ **整层不买不选**（静默失效）
+#     —— 与 v1.19 摇色子同一族病。
+#   修法：上界 1560 → **1720**（锚定模型推导 + 83px 余量），下界 300 不动
+#     （再往上是被 toRef 丢弃的弹性区，取不到）。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉝ v1.20 宝库/商人面板搜索带 9 分辨率审计（修宽屏盖不住购买钮）')
+try:
+    import subprocess as _sp50
+    _gp50 = os.path.join(HERE, 'verify_panel_band_allres.py')
+    if not os.path.exists(_gp50):
+        check('v1.20 面板搜索带审计脚本存在', False, _gp50)
+    else:
+        _r50 = _sp50.run([sys.executable, _gp50], stdout=_sp50.PIPE,
+                          stderr=_sp50.STDOUT, timeout=120)
+        _o50 = (_r50.stdout or b'').decode('utf-8', 'replace')
+        check('v1.20 面板搜索带审计可运行且全过（exit=%d）' % _r50.returncode,
+              _r50.returncode == 0, _o50.strip().split('\n')[-1][:90])
+        check('v1.20 ⑬ 9 分辨率 × 判据元素全覆盖',
+              'ALL PASS (9 分辨率' in _o50)
+        check('v1.20 ⑭ 旧上界 1560 确实盖不住宽屏（证明修的是真 bug）',
+              '旧上界 1560 确实盖不住' in _o50)
+        check('v1.20 ⑮ BAND 下界不伸进被 toRef 丢弃的弹性区',
+              '不伸进被 toRef 丢弃的弹性区' in _o50)
+        check('v1.20 ⑯ 9:16 基线 C=0（改动不影响 PC 口径）',
+              '9:16 基线 C=0' in _o50)
+        check('v1.20 ⑰ 上界留有余量（文案行数浮动）',
+              '余量' in _o50 and '文案行数浮动' in _o50)
+        # 钉死常量本身，防止"改回去"（错误教训 A4：忘了删旧行）
+        _bp50 = open(os.path.join(HERE, '..', 'app', 'src', 'main', 'python',
+                                  'buypanels.py'), encoding='utf-8').read()
+        check('v1.20 ⑱ 旧上界 1560 已无残留（改成 1720）',
+              'BAND = (300, 1720)' in _bp50 and 'BAND = (300, 1560)' not in _bp50)
+except Exception as _e50:
+    check('v1.20 面板搜索带审计守门可运行（%r）' % (_e50,), False)
 
 print()
 print('=' * 78)
