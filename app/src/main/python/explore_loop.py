@@ -927,6 +927,53 @@ def eff_order(st, c, log=None, max_steps=20):
 #     不会像旧版那样死抱着一个走不通的计划 ✗
 PLAN_STUCK_ROUNDS = 3
 
+# ⭐⭐ 2026-10-02 v1.29【探索模式】用户报「进图发了会呆就退出了」（realme RMX3800，v1.28）：
+#   没认出标记（近失分都低于闸门）⇒ 点序为空 ⇒ 判"盘空白"发呆 → `targets_done`
+#   **24 个暗格一格没开就退图** ✗
+#   ⇒ 没目标但盘还没探开时**先探图**（沿已揭示的可点格往外开，逼出标记/宝库 ✓）：
+#       `EXPLORE_MIN_GRAY` = 还剩这么多暗格就算"没探开"（要探）
+#       `EXPLORE_MAX_CLICKS` = 探图预算（防止为了探图无限花体力 ✗）
+EXPLORE_MIN_GRAY = 8
+EXPLORE_MAX_CLICKS = 40
+
+
+def need_explore(marked, pending_buy, grays_n, clicks):
+    """⭐ v1.29 纯函数：**该不该"先探图"**（没有目标、但盘还没探开）✓
+
+    真机包 `进图发了会呆就退出了.zip` 那一局就是这条判据缺失导致的：
+    `marked=0 / pending_buy=0 / grays=24 / clicks=0` ⇒ 旧代码 `order=[]` ⇒ 判"盘空白"发呆 →
+    再按 `targets_done(gray_left 24)` 退图 ✗（24 个暗格一格没开）
+    ⇒ 现在返回 True ⇒ 走探索模式（沿已揭示的可点格往外开）✓
+    """
+    return (not marked and not pending_buy
+            and int(grays_n) >= EXPLORE_MIN_GRAY
+            and int(clicks) < EXPLORE_MAX_CLICKS)
+
+# ⭐⭐ 2026-10-02 v1.29：**规划口径开关**（用户 10-02 白天要"进图一次"、晚上又让"换回来" ⇒
+#   两条路都留代码，别再手改逻辑 ✗；环境变量 `MAPBOT_PLAN_ONCE=1` 可现场切）
+#     False（默认）= **每轮用最新观测重解** —— 省体力（离线 96 张对拍 +9.2%~+26.1% 的优势）
+#     True         = 进图只规划一次 + 走完/推不动切兜底 —— 可预期，但多花体力
+PLAN_ONCE = bool(int(os.environ.get('MAPBOT_PLAN_ONCE', '0') or 0))
+
+
+def plan_mode(st, rest_n, targets_left, once=None):
+    """规划口径决策（纯函数，`once` 可注入 ⇒ 两种模式都能离线对拍 ✓）
+
+    返回 `(动作, 原因)`：
+        `('plan', 'each_round')` —— **每轮重解**（默认口径：拿最新观测覆盖旧计划 ✓）
+        `('plan', 'first')`      —— `PLAN_ONCE=1`：还没规划过 ⇒ 现在算一次
+        `('keep', 'has_rest')`   —— `PLAN_ONCE=1`：计划还有没做完的步 ⇒ 继续照走
+        `('eff', 'stuck')`       —— `PLAN_ONCE=1`：连着 `PLAN_STUCK_ROUNDS` 轮没推进 ⇒ 切兜底
+        `('eff', 'exhausted')`   —— `PLAN_ONCE=1`：计划走完但还有目标 ⇒ 切兜底
+        `('none', 'no_targets')` —— `PLAN_ONCE=1`：计划走完、也没目标 ⇒ 不动
+    """
+    if once is None:
+        once = PLAN_ONCE
+    if not once:
+        return 'plan', 'each_round'
+    return plan_next(st, rest_n, targets_left)
+
+
 
 def plan_next(st, rest_n, targets_left):
     """进图只规划一次 + 走完切兜底（纯函数，可离线对拍 ✓）
@@ -6658,7 +6705,19 @@ def one_round(b, log, rnd, prefix, st):
                 st['buy_mem_used'] = st['buy_mem_used'] + 1
     except Exception:       # noqa: BLE001
         pass
-    if vis and rnd >= 2 and not marked and not pending_buy:
+    # ⭐⭐⭐ 2026-10-02 v1.29【用户报「进图发了会呆就退出了」】—— 根因在下面 `order` 的构建条件
+    #   真机包 `进图发了会呆就退出了.zip`（realme RMX3800，v1.28）日志：
+    #     r0/r1 `marks_scan: none` + `solver: no_plan` + **`finish: blank_board` ×2**（各 40~90 秒）
+    #     r2   `popup_none_dlg: probe`（找不到面板）+ `universal_close: popup_none`
+    #     r3   `finish: targets_done, gray_left: 24` ⇒ **24 个暗格一格没开就退图** ✗✗
+    #   ⇒ 因为点序只在「有标记 or 有商人/宝库」时才构建（见下面 `if not order and (marked or
+    #     buy_any)`）⇒ 这一帧没认出任何标记（近失分 recommend 0.769 / boss 0.734，都低于闸门）
+    #     ⇒ `order=[]` ⇒ 判"盘上空白" ⇒ 发呆 → 再按"目标做完"退图 ✗
+    #   修法：**没目标但盘还没探开** ⇒ 先探图（沿已揭示的可点格往外开，逼出标记/宝库），
+    #        只有真没得点、或探图预算用完，才允许判空白/收工 ✓
+    _explore = need_explore(marked, pending_buy, len(grays),
+                            st.get('explore_clicks', 0))
+    if vis and rnd >= 2 and not marked and not pending_buy and not _explore:
         log.append(entry)
         log.append({'finish': 'targets_done', 'gray_left': len(grays),
                     'content_skipped': len(nones_extra)})
@@ -6740,7 +6799,7 @@ def one_round(b, log, rnd, prefix, st):
             entry['opt_order'] = len(opt)
             road_all = list(opt)
             order = list(opt)
-    if not order and (marked or buy_any):
+    if not order and (marked or buy_any or _explore):
         # ⭐ 有标记格（或商人/宝库）未处理 -> 先把「出生地→目标」路上的可点格列出来，
         #   a) 优先沿路开路  b) 只有这些格弹出来的战斗才允许打（用户口径：无关战斗不打）
         if st.get('clear_clicks', 0) < 24:
@@ -6792,7 +6851,13 @@ def one_round(b, log, rnd, prefix, st):
     #      · 计划还有没做完的步 ⇒ **继续照走，绝不重算** ✓
     #      · 计划走完 / 连着 3 轮推不动 ⇒ 切 **EffPolicy 片感知兜底**（就是"之前的保底方案"）✓
     #   ⚠ 09-30 曾按"每轮重解更省体力"（离线 +9.2%~+26.1% 优势）推翻本条，
-    #     现按用户口径改回"进图一次"，代价写进 README §6.53；安全网 = 3 轮推不动就切兜底 ✓
+    #     10-02 白天按用户口径改回"进图一次"，**10-02 晚用户又改口「那换回来吧」** ⇒
+    #     ⭐⭐ v1.29：**两条路都留在代码里，用开关切**（`PLAN_ONCE`，历史上已来回翻两次，
+    #        以后再改就动这一个常量 / 环境变量，别再手改逻辑 ✗）
+    #       · `PLAN_ONCE=0`（默认，当前）：**每轮用最新观测重解**（省体力 ✓）
+    #       · `PLAN_ONCE=1`：进图只规划一次 + 走完/推不动切兜底（可预期，但多花体力）
+    #   ⏱ 时间成本实测可忽略（所以这条从来不是"快慢"问题，是"体力 vs 可预期"）：
+    #     真机 solver 自报 `secs: 0.0`；离线 96 张真机盘 p50 0.65ms / p99 1.9ms（A* 重构后）
     if c.get('st'):
         if not OPT_SOLVER:
             st['plan_src'] = 'eff'       # `--no-solver`：直奔 EffPolicy，别白数 3 轮 ✓
@@ -6802,21 +6867,22 @@ def one_round(b, log, rnd, prefix, st):
         if st.get('plan_src') == 'eff':
             _pact, _pwhy = 'keep', 'eff_mode'          # 已在兜底模式 ⇒ 不再规划 ✓
         else:
-            _pact, _pwhy = plan_next(st, len(_rest), _tleft)
+            _pact, _pwhy = plan_mode(st, len(_rest), _tleft)
         if _pact == 'plan':
             _so = {}
             # ⭐ 只要**前 4 步**（每轮真机就点 4 下；多要步数没有意义，还拖慢 ✓）
             _sol = solver_order(st, c, log=log, max_steps=4, out=_so)
             if _sol:
-                st['plan'] = list(_sol)
+                st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**（v1.29 恢复到这个口径 ✓）
                 st['plan_src'] = 'solver'
                 st['planned'] = True
                 st['plan_tries'] = 0
                 st['plan_stuck'] = 0
                 st['plan_prev_len'] = len(_sol)
-                log.append({'plan': 'once', 'cells': ['%d,%d' % (p[0], p[1]) for p in _sol]})
-                say('       · 进图规划一次：%s（后续照着走，不再重算 ✓）'
-                    % ' '.join('%d,%d' % (p[0], p[1]) for p in _sol[:6]))
+                log.append({'plan': _pwhy, 'cells': ['%d,%d' % (p[0], p[1]) for p in _sol]})
+                if _pwhy == 'first':
+                    say('       · 进图规划一次：%s（后续照着走，不再重算 ✓）'
+                        % ' '.join('%d,%d' % (p[0], p[1]) for p in _sol[:6]))
             else:
                 st['plan'] = []
                 # ⚠ 「盘上已经没有目标了」**不算失败**（正常收尾）——否则会白切 EffPolicy ✗
@@ -6909,6 +6975,17 @@ def one_round(b, log, rnd, prefix, st):
         st['plain_road'] = []
     # ⭐ 待处理目标（供 popups 判「紧挨目标的战斗格 = 拦路」用）
     st['targets'] = list(marked) + list(buy_any)
+    # ⭐ v1.29：探索模式的记账 + 悬浮条提示（让用户看得见"它在探图、不是发呆"✓）
+    if _explore and order:
+        st['explore_clicks'] = st.get('explore_clicks', 0) + 1
+        log.append({'explore': 'mode', 'grays': len(grays),
+                    'clicks': st['explore_clicks'],
+                    'order': ['%d,%d' % cell_of(*p) for p in order[:4]]})
+        try:
+            status('第 %d 张图 · 没标记，先探图（还剩 %d 个暗格）'
+                   % (cur_map_no(), len(grays)))
+        except Exception:       # noqa: BLE001
+            pass
     if not order and not marked:
         st['blank'] = st.get('blank', 0) + 1
         log.append(entry)

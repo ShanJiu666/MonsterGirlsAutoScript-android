@@ -2578,68 +2578,123 @@ except Exception as _e27:       # noqa: BLE001
     check('v1.27 幽灵目标守门可运行（%r）' % (_e27,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊶ v1.28【用户口径】**进图只规划一次**，之后不再重算；走完还有目标 ⇒ 切回兜底（老方案）
-#   用户 2026-10-02 原话：「规划就刚进入规划一次，后续不再规划。走完规划的还有目标
-#     就用之前的保底方案走」
-#   背景：09-27 本来就是"进图规划一次"，09-30 被离线对拍（每轮重解省 9.2%~26.1% 体力）推翻。
-#     现在按用户口径改回，代价写进 README §6.53；**安全网**：计划连着 3 轮没推进 ⇒ 自动切兜底 ✓
-#   实现：判据抽成纯函数 `plan_next(st, rest_n, targets_left)`（可离线对拍）
-#     `('plan','first')` 还没规划 ⇒ 算一次 ／ `('keep','has_rest')` 继续照走不重算
-#     `('eff','exhausted')` 走完还有目标 ⇒ 切 EffPolicy 兜底 ／ `('eff','stuck')` 推不动 ⇒ 切兜底
+# ㊶ v1.28/v1.29 规划口径：**两条路都留代码，用开关切**
+#   v1.28（10-02 白天，用户口径）「规划就刚进入规划一次，后续不再规划。走完规划的还有目标
+#     就用之前的保底方案走」→ 实现成"进图一次 + 走完/推不动切兜底"
+#   v1.29（10-02 晚，用户「**那换回来吧**」）→ **恢复每轮重解**（省体力那条，离线对拍
+#     +9.2%~+26.1% 优势），并保留"进图一次"那条路 = `PLAN_ONCE` 开关
+#   ⏱ 时间成本实测可忽略（真机 solver 自报 `secs: 0.0`；离线 96 张 p50 0.65ms / p99 1.9ms）
+#   ⇒ 这条从来不是"快慢"取舍，而是「省体力 ↔ 不在地图里改主意」✓
 # ─────────────────────────────────────────────────────────────────────────
 print()
-print('㊶ v1.28 进图只规划一次 + 走完还有目标就切兜底（用户口径）')
+print('㊶ v1.28/v1.29 规划口径（开关 `PLAN_ONCE`；默认=每轮重解）')
 try:
     _el28p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
     _src28 = open(_el28p, encoding='utf-8').read()
-    check('v1.28 ① 新增纯函数 `plan_next()`（进图一次/继续照走/走完切兜底/推不动切兜底 ✓）',
+    check('v1.29 ① 新增 `PLAN_ONCE` 开关 + 纯函数 `plan_mode()`（两模式都可对拍 ✓）',
+          'PLAN_ONCE = bool(int(os.environ.get(' in _src28
+          and "MAPBOT_PLAN_ONCE" in _src28
+          and 'def plan_mode(st, rest_n, targets_left, once=None):' in _src28
+          and "return 'plan', 'each_round'" in _src28)
+    check('v1.29 ② 默认口径 = **每轮重解**（`PLAN_ONCE` 默认 0 ⇒ 省体力那条 ✓）',
+          "os.environ.get('MAPBOT_PLAN_ONCE', '0')" in _src28
+          and "_pact, _pwhy = plan_mode(st, len(_rest), _tleft)" in _src28)
+    check('v1.29 ③ 每轮重解要**覆盖**旧计划（`st[\'plan\'] = list(_sol)` ✓）',
+          "st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**" in _src28)
+    check('v1.28 ④ 纯函数 `plan_next()` 仍在（"进图一次"那条路没被删 ✗）',
           'def plan_next(st, rest_n, targets_left):' in _src28
           and "return 'plan', 'first'" in _src28
           and "return 'keep', 'has_rest'" in _src28
           and "return 'eff', 'exhausted'" in _src28
           and "return 'eff', 'stuck'" in _src28)
-    check('v1.28 ② 计划还在 ⇒ **不重算**（旧写法每轮 `st[\'plan\'] = list(_sol)` 覆盖 ✗）',
-          "'plan': 'once'" in _src28
-          and "st['plan'] = list(_sol)      # ⭐ 每轮**覆盖**" not in _src28)
-    check('v1.28 ③ 走完还有目标 ⇒ 切 EffPolicy（日志 `plan: exhausted` ✓）',
-          "'plan': _pwhy" in _src28 and "'exhausted'" in _src28)
-    check('v1.28 ④ 安全网：计划连着 3 轮推不动 ⇒ 切兜底（`PLAN_STUCK_ROUNDS = 3` ✓）',
-          'PLAN_STUCK_ROUNDS = 3' in _src28 and "_pwhy == 'exhausted'" in _src28)
+    check('v1.28 ⑤ 走完还有目标 ⇒ 切 EffPolicy（`plan: exhausted` ✓）'
+          '；推不动 ⇒ `plan: stuck`（安全网 ✓）',
+          "log.append({'plan': _pwhy" in _src28
+          and 'PLAN_STUCK_ROUNDS = 3' in _src28
+          and "_pwhy == 'exhausted'" in _src28)
 
     import importlib.util as _ilu28
     _spec28 = _ilu28.spec_from_file_location('el_v128', _el28p)
     _el28m = _ilu28.module_from_spec(_spec28)
     _spec28.loader.exec_module(_el28m)
     _pn = _el28m.plan_next
+    _pm = _el28m.plan_mode
 
+    check('v1.29 ⑥ 执行级：默认模式（`once=False`）⇒ **每轮都去重解** ✓',
+          _pm({}, 3, 2, once=False) == ('plan', 'each_round')
+          and _pm({}, 0, 0, once=False) == ('plan', 'each_round'))
+    check('v1.29 ⑦ 执行级：默认 `PLAN_ONCE` 就是 False（省体力口径 ✓）',
+          _pm({}, 3, 2) == ('plan', 'each_round'), 'PLAN_ONCE=%s' % _el28m.PLAN_ONCE)
     _s = {}
-    check('v1.28 ⑤ 执行级：第一轮（没计划）⇒ `plan/first`（就是"进图那一下" ✓）',
-          _pn(_s, 0, 3) == ('plan', 'first'), 'got=%s' % (_pn(_s, 0, 3),))
+    check('v1.28 ⑧ 执行级：`PLAN_ONCE=1` 第一轮 ⇒ `plan/first`（进图那一下 ✓）',
+          _pm(_s, 0, 3, once=True) == ('plan', 'first'))
     _s = {'planned': True, 'plan': [(1, 1), (2, 2)], 'plan_prev_len': 2}
-    check('v1.28 ⑥ 执行级：计划还有剩 ⇒ `keep/has_rest`（**不重算** ✓）',
-          _pn(_s, 2, 3) == ('keep', 'has_rest'))
+    check('v1.28 ⑨ 执行级：`PLAN_ONCE=1` 有计划 ⇒ `keep/has_rest`（不重算 ✓）',
+          _pm(_s, 2, 3, once=True) == ('keep', 'has_rest'))
     _s = {'planned': True, 'plan': [(1, 1)], 'plan_stuck': 0, 'plan_prev_len': 1}
-    _r1 = _pn(_s, 1, 2)
-    _r2 = _pn(_s, 1, 2)
-    _r3 = _pn(_s, 1, 2)
-    check('v1.28 ⑦ 执行级：同一批步数连着 3 轮**没推进** ⇒ `eff/stuck`（不会死抱计划 ✗）',
-          (_r1, _r2, _r3) == (('keep', 'has_rest'), ('keep', 'has_rest'), ('eff', 'stuck')),
-          'got=%s' % ((_r1, _r2, _r3),))
+    _r = [_pm(_s, 1, 2, once=True) for _ in range(3)]
+    check('v1.28 ⑩ 执行级：`PLAN_ONCE=1` 连着 3 轮没推进 ⇒ `eff/stuck`（安全网 ✓）',
+          _r == [('keep', 'has_rest'), ('keep', 'has_rest'), ('eff', 'stuck')],
+          'got=%s' % (_r,))
     _s = {'planned': True, 'plan_stuck': 2, 'plan_prev_len': 4}
-    check('v1.28 ⑧ 执行级：步数**有减少** ⇒ 计数清零（继续照走 ✓）',
-          _pn(_s, 2, 2) == ('keep', 'has_rest') and _s['plan_stuck'] == 0,
+    check('v1.28 ⑪ 执行级：步数有减少 ⇒ 计数清零（继续照走 ✓）',
+          _pm(_s, 2, 2, once=True) == ('keep', 'has_rest') and _s['plan_stuck'] == 0,
           'stuck=%s' % _s.get('plan_stuck'))
-    _s = {'planned': True}
-    check('v1.28 ⑨ 执行级：计划走完且还有目标 ⇒ `eff/exhausted`（切老兜底 ✓）',
-          _pn(_s, 0, 2) == ('eff', 'exhausted'))
-    _s = {'planned': True}
-    check('v1.28 ⑩ 执行级：计划走完且**没目标** ⇒ `none/no_targets`（交给收尾，不乱切 ✓）',
-          _pn(_s, 0, 0) == ('none', 'no_targets'))
+    check('v1.28 ⑫ 执行级：走完还有目标 ⇒ `eff/exhausted`；走完没目标 ⇒ `none/no_targets` ✓',
+          _pm({'planned': True}, 0, 2, once=True) == ('eff', 'exhausted')
+          and _pm({'planned': True}, 0, 0, once=True) == ('none', 'no_targets'))
 except Exception as _e28:       # noqa: BLE001
-    check('v1.28 进图一次规划守门可运行（%r）' % (_e28,), False)
+    check('v1.28/v1.29 规划口径守门可运行（%r）' % (_e28,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊷ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊷ v1.29【探索模式】修用户真机报「**进图发了会呆就退出了**」（realme RMX3800，v1.28）
+#   反馈包 `进图发了会呆就退出了.zip` 日志（逐轮）：
+#     r0/r1  `marks_scan: none` + `solver: no_plan` + **`finish: blank_board` ×2**（40s / 90s 发呆）
+#     r2     `popup_none_dlg: probe`（找不到面板）+ `universal_close: popup_none`
+#     r3     `finish: targets_done, gray_left: 24` ⇒ **24 个暗格一格没开就退图** ✗✗
+#   根因：点序只在「有标记 or 有商人/宝库」时才构建 ⇒ 这一帧没认出任何标记
+#     （近失分 recommend 0.769 / boss 0.734 都低于闸门）⇒ `order=[]` ⇒ 判"盘空白"发呆 → 退图
+#   修法：`need_explore()` —— 没目标但盘还没探开 ⇒ **先探图**（沿已揭示的可点格往外开），
+#     只有真没得点、或探图预算（40 次）用完，才允许判空白/收工 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊷ v1.29 探索模式：没标记但盘没探开 ⇒ 先探图，不许发呆/空手退图')
+try:
+    _el29p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src29 = open(_el29p, encoding='utf-8').read()
+    check('v1.29 ① 新增 `need_explore()` 判据 + 两个预算常量（`EXPLORE_MIN_GRAY`/`MAX_CLICKS` ✓）',
+          'def need_explore(marked, pending_buy, grays_n, clicks):' in _src29
+          and 'EXPLORE_MIN_GRAY = 8' in _src29 and 'EXPLORE_MAX_CLICKS = 40' in _src29)
+    _i_def29 = _src29.index('def need_explore(')
+    _i_use29 = _src29.index('_explore = need_explore(marked, pending_buy, len(grays),')
+    check('v1.29 ② 判据在**用到它之前**定义（顺序对 ✓）', _i_def29 < _i_use29)
+    check('v1.29 ③ `targets_done` 退图必须被探索模式拦住（`and not _explore` ✓）',
+          'if vis and rnd >= 2 and not marked and not pending_buy and not _explore:'
+          in _src29)
+    check('v1.29 ④ 点序构建也放行探索模式（`if not order and (marked or buy_any or _explore)` ✓）',
+          'if not order and (marked or buy_any or _explore):' in _src29)
+    check('v1.29 ⑤ 探索模式留日志 + 悬浮条提示（用户能看见"在探图"✓）',
+          "'explore': 'mode'" in _src29 and '没标记，先探图' in _src29)
+
+    import importlib.util as _ilu29
+    _spec29 = _ilu29.spec_from_file_location('el_v129', _el29p)
+    _el29m = _ilu29.module_from_spec(_spec29)
+    _spec29.loader.exec_module(_el29m)
+    _ne = _el29m.need_explore
+    # ⭐ 下面这组数字就是**真机日志里原样抄下来的**（r3 `targets_done, gray_left: 24`）
+    check('v1.29 ⑥ 执行级：真机那一局（无标记/无待买/24 暗格/0 次探索）⇒ **要探图** ✓',
+          _ne(0, 0, 24, 0) is True)
+    check('v1.29 ⑦ 执行级：暗格少（<8）⇒ **不要**为探图多花体力（正常收工 ✓）',
+          _ne(0, 0, 4, 0) is False and _ne(0, 0, 7, 0) is False)
+    check('v1.29 ⑧ 执行级：有标记或有待买目标 ⇒ 走正常目标逻辑（不当探索 ✓）',
+          _ne(1, 0, 24, 0) is False and _ne(0, 2, 24, 0) is False)
+    check('v1.29 ⑨ 执行级：探索预算用完（40 次）⇒ 停手（不会无限刷 ✓）',
+          _ne(0, 0, 24, 39) is True and _ne(0, 0, 24, 40) is False)
+except Exception as _e29:       # noqa: BLE001
+    check('v1.29 探索模式守门可运行（%r）' % (_e29,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊸ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
