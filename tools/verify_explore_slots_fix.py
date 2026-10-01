@@ -1861,6 +1861,52 @@ try:
 except Exception as _e50:
     check('v1.20 面板搜索带审计守门可运行（%r）' % (_e50,), False)
 
+# ─────────────────────────────────────────────────────────────────────────
+# ㊱ PC 端提速层（2026-10-01）：固定锚点 + 模板快查
+#   用户定：「PC 端锁 720×1280 换速度；能点固定位置的就用固定位置，
+#            只能 OCR 的才 OCR」。本组守住这条约定不被悄悄破坏。
+print()
+print('㊱ PC 端提速层（fixed.py 固定锚点 + 模板快查）')
+try:
+    import subprocess as _sp51
+    _fx = os.path.join(MAPBOT, 'fixed.py')
+    if not os.path.exists(_fx):
+        check('PC 端 fixed.py 存在', False, _fx)
+    else:
+        _r51 = _sp51.run([sys.executable, _fx], stdout=_sp51.PIPE,
+                         stderr=_sp51.STDOUT, timeout=120, cwd=MAPBOT)
+        _o51 = (_r51.stdout or b'').decode('utf-8', 'replace')
+        check('fixed.py 自检可运行且全过（exit=%d）' % _r51.returncode,
+              _r51.returncode == 0, _o51.strip().split('\n')[-1][:90])
+        check('① 全部锚点在屏内', '全部锚点都在屏内' in _o51)
+        check('② band 全部合法（y0<y1，防静默永不命中）',
+              '个 band 全部合法' in _o51)
+        check('③ 与 layout.LAYOUT(720×1280) 逐条对拍一致',
+              '与 LAYOUT 完全一致' in _o51)
+        _fxv = os.path.join(MAPBOT, 'verify_fastpath.py')
+        if not os.path.exists(_fxv):
+            check('PC 端 verify_fastpath.py 存在', False, _fxv)
+        else:
+            _r52 = _sp51.run([sys.executable, _fxv], stdout=_sp51.PIPE,
+                             stderr=_sp51.STDOUT, timeout=300, cwd=MAPBOT)
+            _o52 = (_r52.stdout or b'').decode('utf-8', 'replace')
+            check('快查验收可运行且全过（exit=%d）' % _r52.returncode,
+                  _r52.returncode == 0, _o52.strip().split('\n')[-1][:90])
+            check('④ 正样本：固定模板在图里必须命中', '命中 5/5' in _o52)
+            check('⑤ 负样本：涂掉后必须不命中（防到处乱跳）',
+                  '涂掉后全部不命中' in _o52)
+            check('⑥ 实测比 OCR 快 100 倍以上', '快 100 倍以上' in _o52)
+    # 提速约定进源码（防"改了 fixed.py 却把热路径退回 OCR"）
+    _el = open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    check('⑦ 大厅离开用固定坐标（不再从 OCR 文字猜 4 个偏移）',
+          "fx_anchor('start_adv_icon')" in _el)
+    check('⑧ 进入地图用固定锚点点，但仍保留体力安全门',
+          "fx_anchor('enter_map')" in _el and 'skip_low_stamina' in _el)
+    check('⑨ 提速层封装了 fx_has/fx_at/fx_tap 三个业务入口',
+          all(('def %s(' % f) in _el for f in ('fx_has', 'fx_at', 'fx_tap')))
+except Exception as _e51:
+    check('PC 提速层守门可运行（%r）' % (_e51,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

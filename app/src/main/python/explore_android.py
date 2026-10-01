@@ -19,6 +19,19 @@ import sys
 import threading
 import time
 
+# ⚠ v1.20：端侧日志噪音收口（**只压这两类**，不用 blanket filterwarnings('ignore')）
+#   ① ResourceWarning: unclosed file —— 根因已在 mapgen/spots 改成 `with` 修掉；
+#      这里只做兜底（Chaquopy 的 C 层与第三方库仍可能触发），避免淹没真正的堆栈。
+#   ② RuntimeWarning: overflow encountered in matmul / divide —— 来自 ONNX
+#      数值计算（int32 归一化除法的标准警告），**不是**异常，PC 端也刷同样的。
+#   ⚠ 绝不用 `filterwarnings('ignore')`：那会把真警告一起吞掉（错误教训：
+#     「缺数据被当成通过」同族问题——把信号静音等于把问题静音）。
+import warnings as _warnings
+_warnings.filterwarnings('ignore', category=ResourceWarning)
+_warnings.filterwarnings('ignore', message='.*matmul.*')
+_warnings.filterwarnings('ignore', message='.*overflow encountered.*')
+_warnings.filterwarnings('ignore', message='.*divide by zero.*')
+
 _STATE = {
     'running': False,
     'stop': False,
