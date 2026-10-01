@@ -18,7 +18,7 @@ import android.content.Intent;
  * ── Python 层命令（Chaquopy）──────────────────────────────────
  *   pyinfo                       环境快照（资源包路径/数据表/模板码）
  *   selftest                     端上全套自检（资源→OCR→截图→地块分类→规划器）
- *   py   --es code "<python>"    跑任意 Python 片段（调试用）
+ *   py   --es code "<python>"    跑任意 Python 片段（⚠ **仅调试包**，release 已禁）
  *   explore --ei maps 1 ...      启动探索（后台线程）
  *                                ⭐ 还认 `--ez auto_supply true`（没体力自动用补给）
  *                                   和 `--ei bag_every 10`（每 N 张图升一次装备星级）
@@ -37,16 +37,53 @@ import android.content.Intent;
  *                                —— 加了 FLAG_SECURE 之后 `screencap` 看不见它了，只能走这个口
  *   overlay_state --es state run|idle|err|lock|auto
  *                                dev：**强制状态灯颜色**（零体力验证"跑起来变绿 + 不收起"）
+ *                                （⚠ **仅调试包**）
  *   mask_check                   dev：证明"机器人对自己瞎"（悬浮条那块在帧里必须是纯色）
+ *                                （⚠ **仅调试包**）
  *   （或：am start -n com.fantasy.autoexplore/.MainActivity -e cmd overlay 切换）
  *
  * 例：
  *   ... --es cmd explore --ei maps 2 --ei max_round 45 --es tag t1 --ez save_first true
  * ⭐ 走广播而不是 Activity：**游戏在前台时也能触发**，不会把本应用顶到前台。
+ *
+ * ⚠⚠ 安全：Receiver 是 exported=true 且无鉴权 ⇒ 同设备任意 app 都能发广播。
+ *   因此 `py`（= exec 任意 Python）/ `classify` / `overlay_state` / `overlay_roll` / `mask_check`
+ *   这 5 个调试命令**只在 BuildConfig.DEBUG 时放行**（见 DEBUG_ONLY）；要调试请出 assembleArm64Debug。
  */
 public class CommandReceiver extends BroadcastReceiver {
 
     public static final String ACTION = "com.fantasy.autoexplore.CMD";
+
+    /**
+     * ⭐⭐ v1.16 安全门：只在**调试包**放行的命令。
+     *
+     * <p>背景：本 Receiver 是 {@code exported=true} 且**无任何鉴权** ⇒ 同设备任意 app 发个广播即可触发。
+     * 其中 {@code py --es code} 会走 {@code explore_android._cmd_run_snippet → exec(code)}，
+     * 等价于<b>任意 Python 代码执行</b>（还能经 DeviceApi 拉起游戏、读设备信息）。
+     * ⚠ release 包同样带这个 Receiver（release 只是 debug 签名 + 不混淆，**不是** debuggable）⇒ 风险一直在。
+     *
+     * <p>因此：下面这些命令在**非 DEBUG 构建**下一律拒绝并记日志。
+     * 日常运维命令（explore / explore_stop / explore_status / summary / red_* / overlay_* /
+     * feedback / pyinfo / selftest / test_ocr …）<b>不受影响</b>，照常可用。
+     *
+     * <p>要调试就出 {@code assembleArm64Debug}（可 run-as、DEBUG=true）。
+     */
+    private static final String[] DEBUG_ONLY = {
+            "py",            // ⚠ exec 任意 Python —— RCE
+            "classify",      // 读任意文件并跑识别（路径来自广播）
+            "overlay_state", // dev 钩子：强制状态灯
+            "overlay_roll",  // dev 钩子：滚动验证
+            "mask_check",    // dev 钩子：涂平验证
+    };
+
+    private static boolean isDebugOnly(String cmd) {
+        for (String d : DEBUG_ONLY) {
+            if (d.equals(cmd)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     @Override
     public void onReceive(Context ctx, Intent intent) {
@@ -56,6 +93,13 @@ public class CommandReceiver extends BroadcastReceiver {
         }
         Context app = ctx.getApplicationContext();
         DeviceApi.bind(app);            // 保证 DeviceApi.appCtx 就绪（没开过界面也能用 ✓）
+
+        // ⭐ v1.16：调试命令在 release 包里直接拒（详见 DEBUG_ONLY 注释）
+        if (isDebugOnly(cmd) && !BuildConfig.DEBUG) {
+            AppLog.i("⛔ 命令 " + cmd + " 仅调试包可用（当前是 release 构建）⇒ 已拒绝");
+            return;
+        }
+
         AppLog.i("收到广播命令：" + cmd);
         new Thread(() -> {
             switch (cmd) {

@@ -1514,6 +1514,38 @@ v1.04（又上保守）/v1.05（再撤保守）都是与用户来回定案的过
 （这次就是这么把 v0.98 第一次构建搞失败的；改法：`.NET WriteAllText + UTF8Encoding($false)`，
 或干脆用编辑器改 ✓）
 
+### 6.39 v1.16：堵掉 `CommandReceiver` 的 RCE 面 + **v1.11~v1.15 补提交推 Gitee**（2026-10-01 下午）
+
+**起因**：接手 AI 通读源码时发现 —— `CommandReceiver` 是 **`exported=true` 且无任何鉴权**，
+而它的 `py --es code` 分支走 `PyBridge.call("_cmd_run_snippet", code)`
+⇒ `explore_android._cmd_run_snippet` → **`exec(code)` 任意 Python 代码执行**。
+⚠ **release 包同样带这个 Receiver**（release 只是 debug 签名 + `minifyEnabled false`，**不是** debuggable），
+所以这不是「只在开发包才有」的问题。
+⇒ **同设备任意 app 发一条广播就能执行任意 Python**（还能经 `DeviceApi.bringGame()` 拉起游戏、
+读设备信息/截图帧）。
+
+**修法**（最小改动，不动日常用法）：
+- `CommandReceiver.java` 加 `DEBUG_ONLY = {py, classify, overlay_state, overlay_roll, mask_check}`
+- 在 `onReceive` 里、**起线程之前**拦：`if (isDebugOnly(cmd) && !BuildConfig.DEBUG) { 记日志; return; }`
+- `app/build.gradle` 显式开 `buildFeatures { buildConfig true }`
+  （⚠ **AGP 8.x 默认不生成 `BuildConfig`**；`gradle.properties` 里那个 `buildconfig=true` 是旧开关、不生效）
+- **日常运维命令全部不受影响**：`explore` / `explore_stop` / `explore_status` / `summary` /
+  `red_lock` / `red_unlock` / `overlay_on|off|dump` / `feedback` / `pyinfo` / `selftest` / `test_ocr` 照常用
+- 要调试请出 `assembleArm64Debug`（DEBUG=true 且可 `run-as`）
+
+**回归**：新增 7 条断言（㉕ 组），含「拦截发生在起线程前」「日常命令不受影响」「buildConfig 已开」
+⇒ **211 → 218 项，通过 218 / 失败 0 / 跳过 1**（跳过的 1 项是 v0.98 颜色认种，
+那帧里没草/果，与本改动无关）。
+
+**顺带把 v1.11~v1.15 补提交并推上 Gitee**：此前 HEAD 停在 `3051601`(v1.10)，
+而**远端 `master` 还停在 `fb6d12c` = v0.38 初始入库**（落后 15 个版本）⇒ 现已推到 `5d8492e`。
+⚠ 本次一并**恢复了被 `b178afe` 那次全量 revert 顺带删掉的 `_verify/` 真机 fixture**
+（`phone_slots_full_0930.json` + `bagdbg/` 26 张帧 + 朋友机 `phone_friend_rmx3800/`）——
+**这些是真机原始证据，丢了要重抓真机**，已随本次入库。
+
+**产物**：`AutoExplore-v1.16-MGAS-广播命令加DEBUG门（堵RCE）+补推Gitee-release.apk`
+（= `MGAS.apk`，versionCode **116** / versionName **1.16**）。
+
 
 
 

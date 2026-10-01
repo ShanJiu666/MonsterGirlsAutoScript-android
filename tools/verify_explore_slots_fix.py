@@ -1483,6 +1483,46 @@ try:
 except Exception as _e15:      # noqa: BLE001
     check('v1.15 in_map 守门可运行（%r）' % (_e15,), False)
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# v1.16 广播命令安全门（CommandReceiver 的 RCE 面）
+#   历史：Receiver 是 exported=true 且无鉴权，`py --es code` 走
+#   explore_android._cmd_run_snippet → exec(code) ⇒ **任意 Python 代码执行**，
+#   且 release 包同样带这个 Receiver（release 只是 debug 签名 + 不混淆）。
+#   修法：5 个调试命令在非 BuildConfig.DEBUG 时直接拒绝。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㉕ v1.16 广播命令安全门（防 release 被广播 exec 任意 Python ✗）')
+
+_CRJ = None
+try:
+    _CRJ = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'src', 'main', 'java',
+                              'com', 'fantasy', 'autoexplore', 'CommandReceiver.java'),
+                encoding='utf-8').read()
+    _BG = open(os.path.join(ROOT, 'android_autoexplore', 'app', 'build.gradle'),
+               encoding='utf-8').read()
+except Exception as _e16:
+    _CRJ, _BG = None, None
+
+if _CRJ is None:
+    check('v1.16 守门可运行（%r）' % (_e16,), False)
+else:
+    check('v1.16 ① 有 DEBUG_ONLY 白名单常量', 'DEBUG_ONLY' in _CRJ)
+    check('v1.16 ② `py` 必须在 DEBUG_ONLY 里（= RCE 的根）', '"py"' in _CRJ)
+    check('v1.16 ③ 拦截判据是 **BuildConfig.DEBUG**（不是白名单黑名单）',
+          'BuildConfig.DEBUG' in _CRJ)
+    check('v1.16 ④ 拦截发生在**起线程之前**（不会先干活再拒绝）',
+          _CRJ.index('isDebugOnly(cmd) && !BuildConfig.DEBUG')
+          < _CRJ.index('"cmd-" + cmd'))
+    check('v1.16 ⑤ 5 个调试命令都列进去了（py/classify/overlay_state/overlay_roll/mask_check）',
+          all(('"%s"' % c) in _CRJ for c in
+              ('py', 'classify', 'overlay_state', 'overlay_roll', 'mask_check')))
+    check('v1.16 ⑥ 日常运维命令**不受影响**（explore/summary/red_unlock/feedback 仍可用）',
+          'DEBUG_ONLY' in _CRJ and '"explore"' not in
+          _CRJ[_CRJ.index('DEBUG_ONLY = {'):_CRJ.index('private static boolean isDebugOnly')])
+    check('v1.16 ⑦ build.gradle 开了 buildConfig（AGP 8.x 默认不生成 BuildConfig ✗）',
+          'buildConfig true' in _BG)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
