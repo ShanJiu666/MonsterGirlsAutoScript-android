@@ -74,6 +74,7 @@ public class CommandReceiver extends BroadcastReceiver {
             "overlay_state", // dev 钩子：强制状态灯
             "overlay_roll",  // dev 钩子：滚动验证
             "mask_check",    // dev 钩子：涂平验证
+            "set_inset",     // dev 钩子：手动注入顶部安全区（会改全局坐标换算）
     };
 
     private static boolean isDebugOnly(String cmd) {
@@ -227,6 +228,17 @@ public class CommandReceiver extends BroadcastReceiver {
                     // dev：证明"机器人对自己瞎"（悬浮条那块在帧里必须是纯色）
                     AppLog.i("[mask_check] " + DeviceApi.maskCheck());
                     break;
+                case "set_inset":
+                    // ⭐ v1.17：手动指定顶部安全区偏移（设备像素）。
+                    //   用途：模拟器没有挖孔 ⇒ detectTopInset() 恒读 0，验不到顶块分支；
+                    //   真机 Redmi/realme 是 ~132px。本命令可注入等效值，在模拟器上
+                    //   复现真机那种「顶部有黑」的布局，把顶块坐标换算纳入回归。
+                    //   用法：--es cmd set_inset --ei px 132    （--ei px 0 ⇒ 恢复自动）
+                    DeviceApi.setTopInset(intent.getIntExtra("px", 0));
+                    AppLog.i("[set_inset] 顶部安全区偏移 = " + DeviceApi.topInset()
+                            + "px（0 = 恢复自动探测）");
+                    break;
+
                 case "feedback":
                     // ⭐ v1.14 一键反馈：与悬浮条「反馈」按钮**同一条代码路径** ✓
                     //   --es share 1 ⇒ 同时弹系统分享面板（默认只打包，方便脚本/调试 ✓）

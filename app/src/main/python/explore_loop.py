@@ -2291,6 +2291,30 @@ def self_ui_hits(items):
     return hits
 
 
+def _login_page_hits(items):
+    """当前帧里命中几个「**只在登录页出现**」的字（2026-10-01 v1.16 新增）。
+
+    ⭐ 背景（MuMu 1264×2780 实测）：游戏没登录态时停在登录页，
+    而 `in_map()` 的每一条否定证据在登录页都不成立 ⇒ 只能靠格子兜底
+    ⇒ **把登录页误判成"已在图里"**（实测后果：`本图结束：stuck`，白跑 62 秒）。
+
+    判据与 `game_recover._game_main_ok`（本文件内）**同源** —— 那几个字是
+    `_game_main_ok` 判定"还没恢复成功"的同一批，所以不会自相矛盾。
+    **≥1 就够了**（不要求多条同时出现：进登录动画时可能只 OCR 到其中一个）。
+    """
+    n = 0
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '')
+        if (not t) or len(t) > 40:       # 跳过整行说明文字（不是按钮/标题）
+            continue
+        for k in ('开始游戏', '我已详细阅读', '健康游戏忠告', '登出', '适龄提示',
+                  '批准文号', '出版物号', '游戏软著', '如遇登录或充值问题'):
+            if k in t:
+                n += 1
+                break
+    return n
+
+
 def in_map(b, img, items):
     """是否已经在探索地图里
 
@@ -2323,6 +2347,15 @@ def in_map(b, img, items):
     #   ⇒ 补两条**只在选图界面出现、且在画面中部**（不受分辨率/band 影响）的字：
     #      `深渊NN`（难度页签）与 `星界秘境`（右下挑战入口）✓
     if any(('深渊' in it['text']) or ('星界秘境' in it['text']) for it in items):
+        return False
+    # ⭐⭐⭐ 2026-10-01 v1.16【登录页误判】（MuMu 1264×2780 实测）：
+    #   游戏**没有登录态**时停在登录页（开始游戏 / 隐私政策 / 健康游戏忠告），
+    #   而登录页没有「结束冒险/HUD/图名[难度]」、也没有「快速扫荡/进入地图」，
+    #   下面所有否定证据全不成立 ⇒ 只能靠格子兜底 ⇒ 把登录页**误判成"已在图里"** ✗
+    #   表现：日志「已进图，体力 ?」→ 棋盘区落在登录页空白文字区 → 判「棋盘被挡」
+    #        → 反复关面板 → `本图结束：stuck`（实测 62 秒）。
+    #   判据与 `game_recover._game_main_ok` **同源** ⇒ 读到就一定**不在图里** ✓
+    if _login_page_hits(items) >= 1:
         return False
     if in_lobby(items):
         return False                         # ⭐ 大厅（四角入口 / 免费指定招募横幅）
@@ -7019,16 +7052,24 @@ def game_recover(b, log, tag='recover', timeout=600):
                 acted_at = time.time()
             time.sleep(4.0)
             continue
-        elif ('公告' in joined) and _find_one('确定'):
-            act = _find_one('确定')
-            b.tap(act['cx'], act['cy'], wait=2.5)
-            log.append({'recover': 'notice_confirm', 'at': (act['cx'], act['cy'])})
-            say('   ⚙ 公告弹窗 → 点确定')
+        # ⚠⚠ 2026-10-01 v1.16 修**真 bug**：登录页上「公告」两个字**仍在画面里**
+        #   （实测 OCR：['公告','幻想少女公会','开始游戏','我已详细阅读并同意《',…]）
+        #   ⇒ 旧的 `elif ('公告' in joined)` 抢先命中 → 帧上没有「确定」⇒ act=None
+        #      → **`elif _find_one('开始游戏')` 永远轮不到**（elif 互斥）✗
+        #      ⇒ 登录页永远点不到「开始游戏」，自动登录形同虚设。
+        #   修法：**先判登录页**（最具体），公告分支放后面，并要求它有独立的「确定」按钮。
         elif _find_one('开始游戏'):
             act = _find_one('开始游戏')
             b.tap(act['cx'], act['cy'], wait=3.0)
             log.append({'recover': 'start_game', 'at': (act['cx'], act['cy'])})
             say('   ⚙ 登录页 → 点「开始游戏」')
+        # 公告分支收紧：必须有**独立的「确定」按钮**才点，否则只记日志等画面推进
+        #   （登录页/主界面上出现「公告」字样 ≠ 有公告弹窗 ✗）
+        elif ('公告' in joined) and _find_one('确定'):
+            act = _find_one('确定')
+            b.tap(act['cx'], act['cy'], wait=2.5)
+            log.append({'recover': 'notice_confirm', 'at': (act['cx'], act['cy'])})
+            say('   ⚙ 公告弹窗 → 点确定')
         elif _find_one('同意', '同意并继续'):
             act = _find_one('同意', '同意并继续')
             b.tap(act['cx'], act['cy'], wait=2.5)

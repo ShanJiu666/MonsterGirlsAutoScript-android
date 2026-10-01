@@ -151,6 +151,11 @@ public final class RefMapper {
         AppLog.i("顶部安全区偏移 = " + Math.round(topInset) + "px（真机状态栏/挖孔；模拟器=0）");
     }
 
+    /** 读当前顶部安全区偏移（设备像素）。v1.17 新增：供 DeviceApi / 调试 dump 读回实际值。 */
+    public static int topInsetPx() {
+        return Math.round(topInset);
+    }
+
     public static int screenW() {
         return screenW;
     }

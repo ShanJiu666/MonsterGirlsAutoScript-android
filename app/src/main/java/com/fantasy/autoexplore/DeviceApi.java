@@ -565,6 +565,26 @@ public final class DeviceApi {
         return sum / (3.0 * n);
     }
 
+    /**
+     * ⭐ 2026-10-01 v1.17：**手动设置顶部安全区偏移**（设备像素）。
+     *
+     * <p>用途：模拟器没有挖孔/状态栏 ⇒ {@code detectTopInset()} 恒读到 0，
+     * 于是「顶块锚顶 + 其余锚底」这个模型在模拟器上**测不到 topInset 分支**
+     * （真机 Redmi 是 132px，realme 同量级）。
+     * 本方法让测试可以注入一个 inset，在模拟器上复现真机那种「顶部有黑/挖孔」的布局，
+     * 从而把顶块相关的坐标换算也纳入回归。
+     *
+     * <p>传 0 即恢复自动（下次 {@code detectTopInset} 会覆盖它）。
+     */
+    public static void setTopInset(int px) {
+        RefMapper.setTopInset((float) Math.max(0, px));
+    }
+
+    /** 读回当前顶部安全区偏移（设备像素，v1.17 新增）。 */
+    public static int topInset() {
+        return RefMapper.topInsetPx();
+    }
+
     /** 棋盘带亮度（PC 端用来判「面板把棋盘压暗了」）。
      *  ⭐ 2026-10-01 修：1002/1722 是**参考系**行号，帧是原始设备帧 ⇒ 必须走 devY
      *    （旧代码在真机 1280×2772 上量的是参考 427~1016 那段世界场景，根本不是棋盘） */
