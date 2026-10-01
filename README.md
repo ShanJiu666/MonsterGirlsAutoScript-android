@@ -1354,9 +1354,154 @@ PC 改了手机没跟上会直接红 ✓。
 ⚠ 文案照样避开 `OverlayService.sanitize()` 的关键词（7 种组合 × 3 个场合 × 9 个关键词全过 ✓）。
 
 **产物**：`AutoExplore-v1.08-MGAS-收工带原因+战斗日志写清格子-release.apk`
-（= `MGAS.apk`，versionCode 108 / versionName 1.08，md5 `0fd503c2…`，**已装机**）。
+（versionCode 108 / versionName 1.08，md5 `0fd503c2…`）。
 回归 `verify_explore_slots_fix.py` **185 → 192 项全绿**。
 ⚠ 装机后需重新授权「① 授权截图」。
+
+### 6.34 v1.10（续）：宝库「选不了奖励」= 圈层约束丢失 + 按钮被当成奖励格（2026-10-01）
+
+> v1.09（wait 观察窗全分辨率 / `panel_seen` 死代码）与 v1.10（骰子图标兜底 + 价格标红跳过）
+> 由本会话更早的轮次完成（归档 `AutoExplore-v1.09-…` / `AutoExplore-v1.10-MGAS-骰子图标兜底…`）。
+> 本节是**在其之上**的修复，仍是同一个 versionCode **110 / 1.10** 重打包。
+
+**用户报**：「宝库又选不了奖励了」
+
+**真机 logcat 铁证**（同一轮里 ring 1/2/3 的 `pick` **全是同一个坐标**）：
+```
+{'vault':'tiles_detected','n':21,…}   {'vault':'color_none','cells':21}
+{'vault':'icon_hit','name':'四叶草','qty':0,'score':0.577,'at':(540,1089)}
+{'vault':'claim','ring':1,'pick':(540,1089),…}   ← (540,1089) = **正中心**
+{'vault':'claim','ring':2,'pick':(540,1089),…}   ← 同一个
+{'vault':'claim','ring':3,'pick':(540,1089),…}
+```
+两个真 bug，都是 v0.98 那一版埋的：
+
+| # | 根因 | 证据 | 修法 |
+|---|---|---|---|
+| ① | **圈层约束丢失**：v0.98 把 `cells` 直接换成"检测到的**全部**彩色格" ⇒ 三层共用同一批格 | 上面 logcat：三层 pick 全是 (540,1089) 正中心。游戏只允许选**当前那一圈**（`RefreshDefaultSelectingIndex` 按 `currentLevel` 定 `selectingIndex`，非本圈的选择直接 return）⇒ 1/2 圈点正中心 = **空操作** ⇒ "选不了奖励" ✗ | 新增 `_vault_lattice()`（点阵判行列）+ `tile_ring()`（切比雪夫距中心）；`vault_pick` **只留本圈**，本圈一个都没检出才退回理论圈 ✓ |
+| ② | **右下角按钮被当成奖励格**：`_tile_mask` 按"高饱和彩色"找格，而「选择奖励/购买」按钮 (895,1521) 同样是高饱和彩色块、尺寸也落在 100~185 内 ⇒ 混进 `cells` | 真机帧上 `vault_pick(1)` 返回 **(895,1525)** = 按钮自己 ⇒ 点它 = 点按钮但一格未选 ⇒ 选不了 ✗ | 同一函数用于**过滤**：按钮行号 = (1521−746)/144 = **5.38**（点阵只有 0~4）⇒ 剔掉 ✓ |
+
+**验证**（真机帧 `fixture_vault_all_rings.png`，5×5 全彩色）：
+外圈切出 **16** 格 ✓；`vault_pick(1/2/3)` 的 pick = `(828,1233)` / `(392,942)` / `(540,1089)`
+⇒ **不全相同** ✓ 且各在**本圈** ✓；`_vault_lattice(895,1521) is None` ✓。
+回归 **192 → 196 项**（+4 项圈层/点阵守门）。
+
+**产物**：`AutoExplore-v1.10-MGAS-宝库圈层约束修复（选不了奖励）+点阵过滤-release.apk`
+（= `MGAS.apk`，versionCode **110** / versionName **1.10**，md5 `9c1b956c…`，**已装机**）。
+
+### 6.36 v1.11：修「面板挡住棋盘」误判 + 不再无限循环（2026-10-01）
+
+**用户报**（原话）：「我发给朋友这个软件后他**进图就显示面板挡住了棋盘，正在收起，一直卡在这**，
+但实际上棋盘上啥都没有」
+
+**根因（两条，第二条才是"一直卡"的关键）**：
+
+| # | 根因 | 说明 |
+|---|---|---|
+| ① | `board_hidden()` 的两条判据都是**绝对阈值**（`ratio<0.55` 数 ≥15 / `light==0 且 gray≥25`），而 `ratio = 画面亮度 / 模板亮度` **依赖设备**（机型 gamma / 亮度 / 缩放差异会让整盘偏暗）⇒ **设备偏暗 ≠ 面板遮住**，但被当成遮住 ✗ | 真机在别的机型上：棋盘正常、只是整体暗 ⇒ 每张图都判"被挡" |
+| ② | 判"被挡"3 次 ⇒ `board_not_visible` ⇒ `why='stuck'` ⇒ 退图失败 ⇒ `game_recover` ⇒ **下一张图** ⇒ 同样判"被挡" ⇒ ⋯ **永远出不来**（`run_maps` 里没有任何"连续 stuck"的刹车）✗ | 用户看到的就是"一直卡在这" |
+
+**修法**：
+1. **判据改成"以本帧最亮格为基准"的相对口径**：
+   ```python
+   _mx = max(ratio)                       # 本帧最亮的一格（正常盘必然是"已揭示"那格）
+   if light == 0 and gray >= 25 and _mx < 0.40:   # ← 加 _mx<0.40：设备偏暗 ≠ 面板遮
+       return True
+   _thr = 0.55 * _mx                      # ← 阈值按本帧缩放
+   return (ratio < _thr 的格数) >= 15
+   ```
+   ⚠ **只收窄、不放松**：真面板遮罩会把整盘压到 0.25~0.35 ⇒ `_mx` 也很小 ⇒ 两条判据照样成立 ✓
+2. **连续 2 张 `stuck`/`blank` ⇒ 整局停下**（`STATS['stuck_maps']`），悬浮条写明原因；
+3. **首次判"被挡"就存诊断帧**（`_pub_dump('board_hidden_r%d')` → `/sdcard/Download/autoexplore/bagdbg/`）
+   —— 我们手上**没有别的机型的帧**，没有它就无法给阈值标定 ✗
+
+**验证**（执行级，直接调真 `board_hidden`）：
+
+| 画面 | 期望 | 实测 |
+|---|---|---|
+| 正常盘（雾29+亮6） | 不判被挡 | ✓ |
+| **暗设备 k=0.7 / 0.5**（朋友那类） | **不判被挡** | ✓（旧代码：判被挡 ✗） |
+| 面板盖中间（只露 3 格） | **判被挡**（09-26 修过的老判据，不许回归） | ✓ |
+| 全盘被遮罩 | 判被挡 | ✓ |
+
+回归 **196 → 201 项**（+5 项 v1.11 守门）。**产物**：`AutoExplore-v1.11-MGAS-修面板误判卡死+不再无限循环-release.apk`
+（= `MGAS.apk`，versionCode **111** / versionName **1.11**，md5 `c3fe17c2…`，**已装机**）。
+⚠ 仍需重新授权「① 授权截图」。
+⚠ **待办**：收到朋友那台机的 `board_hidden_r*.png` 诊断帧后，用它做 fixture 把这套阈值再标定一次
+（现在是按"覆盖率/亮度模型"推的，有真帧就能直接量）。
+
+### 6.37 v1.12/v1.13：修两处"没有上限"的死循环 + 给别人的手机留一份可回传日志（2026-10-01）
+
+**用户报**（朋友那台机）：「进图就显示面板挡住了棋盘，正在收起，一直卡在这，
+**但实际上棋盘上啥都没有**」→ 后续：「这次**连地图都进不去了，显示正在把游戏拉回来**」
+
+| 版本 | 修的东西 | 根因 |
+|---|---|---|
+| **v1.11** | `board_hidden()` 误判 | 两条判据都是**绝对阈值**（0.55/0.85），而 `ratio` 依赖设备（机型 gamma/亮度）⇒ **设备偏暗被当成面板遮住** ⇒ 每张图都判"被挡"。改成**以本帧最亮格为基准**的相对口径（`_mx<0.40` + `_thr=0.55*_mx`），**只收窄不放松**（真遮罩仍判得出、"盖中间"老判据不回归 ✓） |
+| **v1.12** | ① `optimal_order` 的求解器调用**没有时间上限**（只有 `max_states=40000`）② `game_recover` 成功后 `continue`、下一张再失败又恢复 ⇒ **无限"拉回来"** | ① 棋盘一旦被切碎，A* 几万状态展开 = **几分钟满载空转、全程不打日志**（另一处 `solver_order` 早就有 `max_secs=8`，这一处漏了）⇒ 补 8 秒上限 + 前后落日志；② 加 `STATS['recover_n']`，连续 3 次仍跑不动 ⇒ 停整局并提示发日志 ✓ |
+| **v1.13** | **朋友圈里根本拿不到日志** | `MGAS` 是 release 包 ⇒ 私有 `files/runs/**` 不可 `run-as` 拉出 ✗；朋友也不会跑 logcat。⇒ `flush()` 把最新日志挂到全局，`dump_summary()` 抄一份**可读文本**到公共目录 `/sdcard/Download/autoexplore/bagdbg/mgas_log.txt`（含统计 + 最近 400 条日志），让朋友直接发这个文件 ✓ ⚠ 只在端上写（PC 上 `os.name` 守卫，否则会在盘根建 `D:\sdcard\…` ✗ 本轮已踩到并清理） |
+
+**验证**：回归 **201 → 205 项**（v1.11 五项画面判据 + v1.12 四项上限守门）。
+
+**产物**：`AutoExplore-v1.13-MGAS-一键回传日志（朋友机用）+防循环-release.apk`
+（= `MGAS.apk`，versionCode **113** / versionName **1.13**，md5 `11fc0e54…`，**已装机**）。
+⚠ 仍需重新授权「① 授权截图」。
+
+**给朋友的操作（三步）**：
+1. 装这个 APK → 重新授权「① 授权截图」（**应用范围选「整个屏幕」**）；
+2. 跑一次；如果还是停在"面板挡住了棋盘 / 正在把游戏拉回来"，让它停；
+3. 用文件管理器把 **`内部存储/Download/autoexplore/bagdbg/mgas_log.txt`** 发回来
+   （同目录下的 `board_hidden_r*.png` 如果能一起发更好 —— 那是**他那台机**的真实帧，
+   我拿到就能像铁血高地雾格那样把 `board_hidden` 的阈值**按真帧标定**并做成常驻 fixture）。
+
+
+### 6.38 v1.14：一键反馈按钮 + **工程已从仓库分离到 `D:\MGAS`**（2026-10-01）
+
+**用户要求**（原话）：「能不能加个按钮能更方便让朋友发他的问题给我」
+
+**做了**：悬浮条最右加一颗 **「反馈」**（`btnFb`，在 ✕ 之后）——
+一点 ⇒ 打包 **日志 + 机型/分辨率 + 现场帧** → `Download/autoexplore/MGAS反馈_<时间>.zip`
+→ **弹系统分享面板**（微信/QQ 直接选人发）。
+- 实现：`app/src/main/java/com/fantasy/autoexplore/Feedback.java`（新文件）
+- 包内容：`mgas_log.txt`（Python 每轮收尾落的可读日志）、`board_hidden_*.png`（判"被面板挡住"
+  时的现场帧，最多 5 张）、`last_summary.json`、`device.txt`（机型 / Android 版本 /
+  **屏幕分辨率与 dpi** / 应用版本 / 悬浮条几何 —— 分辨率相关 bug 全靠它）
+- **为什么走 MediaStore**：`file://` 在 API 24+ 抛 `FileUriExposedException` ✗；
+  FileProvider 要引 androidx（本工程**没有** androidx 依赖，加依赖要联网拉包 ✗）；
+  `MediaStore.Downloads` 在 API 29+ **不需要任何存储权限**，且直接给出可分享的 `content://` URI ✓
+- 同一条代码路径也挂了广播命令：`--es cmd feedback`（只打包）/ `+ --es share 1`（打包并弹分享）
+- **实测**（真机）：`[feedback] 已生成 …/MGAS反馈_20261001_052445.zip`、
+  `MGAS反馈 zip -> content://media/external/downloads/1000020280`、
+  悬浮条出现 `› 反馈包已生成 · 分享面板已打开（选微信/QQ 发我）`，**零异常** ✓
+- ⚠ 用法提醒：**先让脚本跑到出问题那一刻、再点「反馈」**（`mgas_log.txt` 是每轮收尾才刷新的）
+
+**同时：工程从「幻想少女公会」仓库分离**（用户要求「分离出来，新建个文件夹叫 MGAS」）：
+```
+D:\MGAS\                           ← 新家（与仓库同级）
+├── android_autoexplore\           ← 原 D:\幻想少女公会\android_autoexplore（10.85 GB，含 101 个 APK 归档）
+├── mapbot_pc\                     ← 原 D:\幻想少女公会\tools\mapbot（PC 端源）
+└── data\server_datatable.json     ← 数据表副本
+```
+- 两个 port 工具与回归套件里的**写死绝对路径已改成"按自身位置推算"**
+  （`MGAS_MAPBOT_SRC` / `MGAS_PY_DST` 可覆盖 + 老布局兜底）⇒ 在新位置直接跑通 ✓
+- 仓库那侧 `tools\mapbot` 改成**目录联接（junction）**指向 `D:\MGAS\mapbot_pc`：
+  仓库里 4 个诊断脚本与文档里的旧路径照旧可用，且是**同一份文件**（不分叉 ✓）
+- 仓库侧留说明：`D:\幻想少女公会\docs\MGAS已分离.md`；MGAS 侧有顶层 `D:\MGAS\README.md`
+
+**产物**：`AutoExplore-v1.14-MGAS-一键反馈按钮（日志+机型+现场帧打包分享）+已分离到D盘MGAS-release.apk`
+（= `MGAS.apk`，versionCode **114** / versionName **1.14**，md5 `9f2b3c71…`，**已装机**）。
+回归 **205 项通过 / 0 失败 / 1 显式跳过**（在新位置 `D:\MGAS` 下跑的 ✓）。
+
+### 6.35 本轮「整体体检」查到的**两个工作区级事故**（不是代码 bug，但危害更大）
+
+| # | 现象 | 危害 | 处置 |
+|---|---|---|---|
+| ① | **PC 数据表被回退成 09-14 旧版**：`unpack_apk/dump/server_datatable.json` 由 4.0MB（0928：15 图 / 含 `夏日海滩 S00003` / Equip 1634 / Role 214）变成 3.8MB（14 图 / **无夏日海滩** / Equip 1534 / Role 204） | 回归 6 项当场变红（成本表 / 图名歧义 / 全名路径 / 宝库帧识别）；**下次重打数据包会把旧表打进 APK** ⇒ 端上少 32 条 Area_Spot / 100 件装备 / 10 个角色 ✗ | 从 `fetch_20260928/server_datatable.json` 恢复（md5 `19e8d46084`）；核对**包内** `assets/mapbot_pack/server_datatable.json` 同 md5 ✓（端上本来是对的，只有 PC 侧被回退） |
+| ② | **`android_autoexplore/_verify/` 的真机 fixture 被清空**（`phone_slots_full_0930.json` + 整个 `bagdbg/*.png|json`） | 套件**直接崩**在 `json.load`；更糟的是十几处"缺 fixture ⇒ 当通过"让 **192 项"全绿"里混着一堆没跑过的断言** ✗ | ① 从设备 `/sdcard/Download/autoexplore/bagdbg/` 拉回，并用**稳定名**固化（`fixture_vault_all_rings.png` / `iron_highland_fog_dev.png`，不再用每轮被覆盖的 `vault_no_hit_L*.png`）；② 套件新增 `skip()`：**跳过单独计数**、结尾打印「以下 N 项没真正验证」⇒ 再也不会被"全绿"骗 ✓（本轮把 8 处静默跳过改为显式 `skip`） |
+
+⚠ 另修一处**假失败**：`is_target` 的判据命中文本仍写 `if is_blocked(name):`，而实现早已改成
+`is_blocked(name, d)`（传 cfg 下去，修"静默丢配置"）⇒ 断言改成两种写法都接受 ✓
+
 
 
 ⚠ 中间版本 v1.01（雾格一律挡连锁·保守）/v1.02（撤销保守）/v1.03（剪影一票否决）/

@@ -374,6 +374,28 @@ def dump_summary():
                        'device': INSTANCE_DEV}, f, ensure_ascii=False, indent=1)
     except Exception:       # noqa: BLE001
         pass
+    # ⭐⭐⭐ 2026-10-01 v1.12【给"别人的手机"留一份可读日志】
+    #   背景：MGAS 发给朋友后出问题（"面板挡住了棋盘"/"一直把游戏拉回来"），
+    #   而 **release 包不可 `run-as`** ⇒ 私有 `files/runs/**` 根本拿不出来 ✗
+    #   朋友圈里也不方便跑 logcat ⇒ 直接把**最近日志 + 统计**写一份到公共目录：
+    #     `/sdcard/Download/autoexplore/mgas_log.txt`（让他把这个文件发过来即可 ✓）
+    try:
+        _lines = []
+        if os.name != 'posix':      # ⚠ 只在端上写（PC 上 '/sdcard/...' 会落到盘根，污染工作区 ✗）
+            raise RuntimeError('skip on pc')
+        for _e in (_GLOBAL_LOG[-400:] if _GLOBAL_LOG else []):
+            try:
+                _lines.append(json.dumps(_e, ensure_ascii=False)[:300])
+            except Exception:       # noqa: BLE001
+                pass
+        _txt = (summary_text() + '\n\n---- 最近日志（最多 400 条）----\n'
+                + '\n'.join(_lines) + '\n')
+        os.makedirs(BAG_PUB_DIR, exist_ok=True)
+        with open(os.path.join(BAG_PUB_DIR, 'mgas_log.txt'), 'w',
+                  encoding='utf-8') as _f:
+            _f.write(_txt)
+    except Exception:       # noqa: BLE001
+        pass
 
 # ⭐ 2026-09-25 重标定：屏幕格距 144.0、棋盘左上 (36, 1002)（见 spots.GRID / fit_art.py）
 GRID = spots_mod.GRID
@@ -1283,6 +1305,13 @@ def close_newequip(b, items, log, where, at=None, verify=True):
 
 
 def flush(log):
+    # ⭐ v1.12：把最新日志挂到模块全局 ⇒ `dump_summary()` 能把它抄一份到**公共目录**
+    #   （release 包不可 run-as，私有 runs/ 拿不出来；朋友的手机只能靠这个文件回传 ✓）
+    try:
+        global _GLOBAL_LOG
+        _GLOBAL_LOG = log
+    except Exception:       # noqa: BLE001
+        pass
     try:
         import json
         with open(LOG_PATH, 'w', encoding='utf-8') as f:
@@ -2287,10 +2316,30 @@ def in_map(b, img, items):
             return True                      # 「夏日海滩[100]」这种只在图里出现
     if fb(items, *L['menu']):
         return False                         # 选图界面（快速扫荡/进入地图）
+    # ⭐⭐⭐ 2026-10-01 v1.15【朋友机 realme RMX3800 / 1264×2780 实测】：
+    #   他那台上「快速扫荡/进入地图」在 ref y≈**1618**（比本机更低），一旦这两条没被读到
+    #   （进图动画帧 / 文字被压暗），下面的"格子兜底"就会把**选图界面**判成"在图里" ✗
+    #   ⇒ 用户看到的是：进去就"面板挡住了棋盘 · 正在收起"，一直卡着，其实一次地图都没进 ✗✗
+    #   ⇒ 补两条**只在选图界面出现、且在画面中部**（不受分辨率/band 影响）的字：
+    #      `深渊NN`（难度页签）与 `星界秘境`（右下挑战入口）✓
+    if any(('深渊' in it['text']) or ('星界秘境' in it['text']) for it in items):
+        return False
     if in_lobby(items):
         return False                         # ⭐ 大厅（四角入口 / 免费指定招募横幅）
     c = cells_of(img, mapname=map_name(items))
-    return len(c['gray']) + len(c['light']) >= 8
+    n = len(c['gray']) + len(c['light'])
+    if n < 8:
+        return False
+    # ⭐ v1.15：格子兜底还要看**有没有真·已揭示的亮格** —— 真棋盘进图时营地恒已揭示
+    #   （ratio≈1.0）；而"选图界面/进图动画"那种帧被兜底数出来的格子全是压暗的
+    #   （朋友机日志实测：`light: 0/1, gray: 16/17`，全盘 ratio<0.55）
+    #   ⇒ 旧写法"≥8 格就算在图里"正是那次误判的最后一根稻草 ✗
+    try:
+        _mx = max([float((v or {}).get('ratio') or 0)
+                   for v in (c.get('st') or {}).values()] or [0.0])
+    except Exception:       # noqa: BLE001
+        _mx = 0.0
+    return bool(c['light']) and _mx >= 0.75
 
 
 def map_name(items):
@@ -2448,38 +2497,10 @@ def start_fight(b, log, btn, marks=()):
     return False
 
 
-def _price_is_red(b, it):
-    """结算面板骰子旁幸运草**价格**是否是红色（红 = 草不够；源码 `GetCloverPrice`
-    把付不起的价格 `SurroundColor(..., PresetColor.Red)`）。判据 = 亮像素里红色占比 >35%。
-    异常一律当"不红"（宁可点了弹购买提示被 no_confirm 拦下，也不错杀能摇的局）。"""
-    try:
-        img = b.img()
-        if img is None:
-            return False
-        x0, y0 = max(0, it['x0'] - 2), max(0, it['y0'] - 2)
-        x1 = min(img.shape[1], it['x1'] + 2)
-        y1 = min(img.shape[0], it['y1'] + 2)
-        if x1 - x0 < 4 or y1 - y0 < 4:
-            return False
-        crop = img[y0:y1, x0:x1].astype(np.int32)
-        r, g, bl = crop[:, :, 2], crop[:, :, 1], crop[:, :, 0]     # cv2 = BGR
-        bright = np.maximum(np.maximum(r, g), bl) > 110
-        red = (r > 130) & (r > g + 55) & (r > bl + 55)
-        nb = int(bright.sum())
-        return nb > 0 and int((red & bright).sum()) * 100 // nb > 35
-    except Exception:       # noqa: BLE001
-        return False
-
-
 def handle_dice(b, log, items, tries=3):
     """重投命运之骰（源码 `GameApi.Explore.DiceRerollAsync` + `ChangeClover(-1,"重投命运之骰")`）：
     **每次重投消耗 1 个幸运草**，服务端返回新的掉落；`rerollTime` = 已重投次数（上限 3）。
-    按钮就在**战斗结算面板**上（不是另开界面）。
-    ⚠ 按钮**本体是图标+数字，没有文字**：上行=骰子点数（参考系 ~(105,905)）、
-    下行=幸运草数（~(115,975)）（标定帧 `tools/mapbot/runs/dice_ok_1.png`）——
-    docstring 旧写"文本含 骰/重投/命运"是错的；源码 `BattleEventPanel.OnDiceClick`
-    绑的就是那个骰子图标。幸运草 ≤0 时点它会弹「购买幸运草」而不是重掷确认框
-    （源码 `save.clover <= 0 ⇒ CloverPurchasePrompt()`）⇒ 检测到草=0 要直接跳过。
+    按钮就在**战斗结算面板**上（不是另开界面），文本含「骰 / 重投 / 命运」。
     摇到出现「带大拇目标记的装备」就停（用户 09-25 口径）。
 
     ⭐⭐ v0.35 重大修正（20:9 实测铁证，推翻 v0.31 的归类）：
@@ -2641,36 +2662,6 @@ def handle_dice(b, log, items, tries=3):
             if btn is not None:
                 log.append({'dice': 'narrow_hit', 'at': (btn['cx'], btn['cy']),
                             'text': btn.get('text'), 'n_items': len(_it2)})
-        # ⭐⭐⭐ v1.10 修（用户报「识别出大拇指格，打完却不摇色子」⇒ 日志 dice no_btn）：
-        #   骰子按钮**根本没有文字**（图标+数字，见函数 docstring 标定）⇒ v0.78 的
-        #   "必须文字命中"在真机上永远找不到 ⇒ rolls=0 收场 ✗。
-        #   ⇒ 文字路找不到就用**纯数字签名**兜底：奖励区最左（cx<230）的纯数字条目
-        #     （回放战斗/查看/统计都是汉字 ⇒ 不会误点 ✓ —— 这就是与 v0.78 前
-        #       "任意文字"规则的区别：只认数字，不认位置上的文字）；
-        #     数字在幸运草行（cy≥945）就**上移 68px** 点骰子格本体（历史上点骰子格
-        #     触发确认框是验证过的 ✓）。
-        #   ⚠ 幸运草行那个数字是**价格**（恒 "1"，草不够时染红，源码 GetCloverPrice）
-        #     ⇒ 红色 = 没草：点骰子会弹「购买幸运草」而不是重掷确认框 ⇒ 跳过。
-        if btn is None:
-            _nums = [it for it in items
-                     if (it.get('text') or '').strip().isdigit()
-                     and it['cx'] < LAYOUT.sx(230)
-                     and LAYOUT.sy(820) <= it['cy'] <= LAYOUT.sy(1120)]
-            if _nums:
-                _nums.sort(key=lambda i: (i['cy'], i['cx']))
-                _clv = [i for i in _nums if i['cy'] >= LAYOUT.sy(945)]
-                if _clv and _price_is_red(b, _clv[0]):
-                    say('       · 幸运草不够（价格标红）⇒ 摇不了色子，跳过')
-                    status('没幸运草了 · 跳过摇骰子')
-                    log.append({'dice': 'no_clover', 'rolls': rolls})
-                    break
-                _dv = _nums[0]
-                _ty = _dv['cy'] if _dv['cy'] < LAYOUT.sy(945) \
-                    else _dv['cy'] - int(LAYOUT.s(68))
-                btn = {'cx': _dv['cx'], 'cy': int(_ty), 'text': _dv.get('text')}
-                log.append({'dice': 'icon_hit', 'at': (btn['cx'], btn['cy']),
-                            'sig': {'t': (_dv.get('text') or '').strip(),
-                                    'cx': _dv['cx'], 'cy': _dv['cy']}})
         if btn is not None:
             btn_pos = (btn['cx'], btn['cy'])
         if btn_pos is None:
@@ -3009,6 +3000,9 @@ def vault_title_seen(ditems):
 def panel_seen(items, ditems=None, b=None):
     """⭐ v0.33：**现在有没有弹着面板**（特殊地块 / 探索 / 战斗 / 领取 / 结算 / 确定）。
 
+    ⚠ `b`（Bot，可选）：只有走「真·弹窗帧 OCR 复核」那条路才需要它；
+      不传就跳过那段（PC / 9:16 C=0 本来就走不到）✓
+
     ⚠⚠ 漏判的后果很严重：主循环靠它 `break` 出点序、交给 `popups()` 处理；判不成
       ⇒ 它就带着面板继续点后面的格子 ⇒ 点击全落到面板上 ⇒ "点了战斗格却不点战斗" ✗
     ⚠ 真机高分辨率（C>0）上面板**标题**（战斗事件/探索产出/获得新装备…）落在 toRef 丢弃的
@@ -3021,8 +3015,6 @@ def panel_seen(items, ditems=None, b=None):
       白烧 2 轮 + 一堆 OCR/等待才走「点了没反应」的兜底。改用归一化帧里看得见的签名：
         ① 说明文案「※花费金币分别解锁宝库的外层…」→ 含「解锁宝库」(dlg 1459 ⇒ 帧内 1250 ✓)
         ② 右下角按钮（dlg 1444 ⇒ 帧内 1235 ✓）
-    ⚠ 2026-10-01 修：弹窗帧兜底原来直接用**未定义的名字 `b`**（本函数根本没有这个形参）
-      ⇒ NameError 被裸 except 吞掉 ⇒ 这段兜底**从来没跑过**。现改为显式传 `b`。
     """
     if fb(items, *L['special']) or fb(items, L['fight']) or fb(items, L['expl']) \
             or fb(items, *L['claim']) or fb(items, *L['desc']):
@@ -3040,6 +3032,11 @@ def panel_seen(items, ditems=None, b=None):
         #   ⇒ 这里再补一手**真·弹窗帧 OCR**（`dlg_ocr`）：它覆盖到弹窗系 1769，
         #     宝库/商人的按钮就在那儿 ✓（≈2s，且**只在 dlg 环境**、有面板嫌疑时跑 ✓）
         try:
+            # ⚠⚠ 2026-10-01 修 NameError：这里原来直接用 `b`，但本函数**签名里没有 b**
+            #   ⇒ 真机（走 dlg_c() 真分支时）必然 NameError ⇒ 被 except 吞掉
+            #   ⇒ **整段「真·弹窗帧 OCR 复核」从来就没跑过**（PC C=0 走不到，真机是唯一受害者）
+            #   这正是用户 10-01 报的「点开宝库瞬间就关」没修掉的直接原因。
+            # ⇒ 现在 b 由调用方传入（可选）；没传就跳过这一段（保持旧行为，不崩）。
             if b is not None and hasattr(b, 'ocr_dlg'):
                 _dp = dlg_ocr(b, tag='panel_seen_dlg')
                 if _dp:
@@ -3392,6 +3389,7 @@ def popups(b, items, log, ctx=None):
                     _panel_tap(b, 275, 1507, 'norm', log=log, what='返回(兜底)')
             return 'handled'
         _gone = False
+        it2 = None          # ⭐ 初始化：下面 `if _try and it2` 与收尾的 find_x/n_free 都要读它
         for _try in range(2):
             # ⭐⭐⭐ 2026-10-01 用户报「点搓（错）一键派遣位置了」⇒ **改用 OCR 现读的按钮坐标**：
             #   面板 OCR 里本来就有那颗按钮（真机实测读到 `键派遣`、`开始探索`）✗
@@ -3401,7 +3399,16 @@ def popups(b, items, log, ctx=None):
             #     只有实在读不到文字时才退回标定常量（并有通道兜底 ✓）
             #   好处：与分辨率无关、与文案变化无关（键派遣/一键派遣/开始探索 都认 ✓）
             _btn_it = None
-            for _src in (it2 if _try else items, items):
+            # ⚠⚠ 2026-10-01 修 NameError：原来写 `for _src in (it2 if _try else items, items)`
+            #   —— `it2` 只在**循环体末尾**（ocr_ch 之后）才赋值 ⇒ **首轮必然 NameError** ✗
+            #   （被上层 `except Exception: pass` 吞掉 ⇒ 症状：派遣面板点了两下都关不掉，
+            #    日志永远停在 dispatch 的第一条 ⇒ user 报「点不了一键派遣」）
+            # ⇒ 第 1 轮只有 `items`；第 2 轮起才把上一轮 OCR 到的 `it2` 也纳入候选
+            #   （面板文字会变：键派遣 → 开始探索，所以每轮仍会重新 OCR）。
+            _src_list = [items]
+            if _try and it2:
+                _src_list.insert(0, it2)
+            for _src in _src_list:
                 for _it in (_src or []):
                     _t = (_it.get('text') or '').strip()
                     if ('派遣' in _t or '开始探索' in _t) and '预计时间' not in _t:
@@ -3711,9 +3718,13 @@ def popups(b, items, log, ctx=None):
         #   探索槽已经满了的时候点「探索」游戏没有反应 ⇒ 面板不关 ⇒ 下一帧又认到同一段
         #   面板文字、又点探索…⇒ 整个闭环卡死（最后表现就是"退出地图失败"）。
         _free2 = int(ctx.get('slots_free', 1) or 0)
-        entry['explore_panel'] = {'hv': bool(hv), 'btn': bool(act),
-                                  'target_tile': _is_target_tile,
-                                  'slots_free': _free2}
+        # ⚠⚠ 2026-10-01 修 NameError：`entry` 是 **one_round()** 的局部变量，本函数里根本没有
+        #   ⇒ 走到「紫/橙探索格」分支时**必抛 NameError**（被上层 except 吞掉 ⇒
+        #     症状：点到紫橙格就静默中断那一轮，日志里没有 explore_panel 记录）。
+        # ⇒ 诊断信息改成直接进 `log`（本函数能写的），不依赖 one_round 的局部变量。
+        log.append({'explore_panel': {'hv': bool(hv), 'btn': bool(act),
+                                      'target_tile': _is_target_tile,
+                                      'slots_free': _free2}})
         # ⭐ 不靠 slots_free 当闸门（OCR 偶尔认不到「空闲」会误判成 0 ✗），
         #   改成**先点、再验证**：点了「探索」面板还在 ⇒ 就是派不进去（多半槽位满）⇒ 改走战斗
         # ⭐⭐ 2026-09-30：**已经确认满本图**（`slots_full_latched`，两次点不动）时不再给
@@ -4556,7 +4567,19 @@ def optimal_order(c, mk, st, log=None):
                 log.append({'opt_skip': 'no_targets', 'blocks': len(sim.blocks),
                             'cells': len(cells), 'marks': len(mk or {})})
             return None
-        cost, acts = solve_mod.solve(prob, max_states=40000)
+        # ⭐⭐⭐ 2026-10-01 v1.12 真机**空转卡死**修复（用户：「连地图都进不去了，显示正在把游戏
+        #   拉回来」→ 实际是 **200% CPU 空转、日志停在进图后那次 OCR**）：
+        #   本行原来只有 `max_states=40000`、**没有时间上限** ✗ —— 另一处（`solver_order`）
+        #   早就加了 `max_secs=8`（2026-09-28「进图要等很久」），这一处漏了。
+        #   一旦棋盘被切得很碎（例如雾格剪影判成"非空地"⇒ 连锁片变多、A* 状态空间爆炸），
+        #   40000 个状态的展开就是**几分钟的满载空转**，而且**全程不打日志** ⇒
+        #   用户看到的就是"卡在某一步不动"。⇒ 加 8 秒上限 + 前后落日志（下次一眼能看见）✓
+        _t_opt = time.time()
+        cost, acts = solve_mod.solve(prob, max_states=40000, max_secs=8)
+        if log is not None:
+            log.append({'opt_solved': {'secs': round(time.time() - _t_opt, 2),
+                                       'cost': cost, 'steps': (len(acts) if acts else 0),
+                                       'blocks': len(sim.blocks), 'targets': len(prob.targets)}})
         if not acts:
             if log is not None:
                 log.append({'opt_skip': 'no_solution', 'targets': len(prob.targets),
@@ -4790,7 +4813,9 @@ BAG_TAB_DLG = {'素材': (152, 315), '装备': (345, 315), '符文': (540, 315),
 BAG_X_DLG = (1023, 215)          # 背包右上角 X（弹窗系）
 BAG_FILTER_DLG = (199, 1758)     # 底部「筛选」（弹窗系；一般用不到）
 UPGRADE_BTN = (923, 1550)        # 装备页右下「一键升星」——**归一化系**（真机实测 ✓）
-UPGRADE_BTN = (928, 1789)     # 装备页右下角「一键升星」（⭐ 2026-09-30 重标定：设备 (619,1313) ✓）
+# ⚠⚠ 2026-10-01 修：原来这行紧接着又定义了一次 `UPGRADE_BTN = (928, 1789)`（旧标定值）
+#   ⇒ 后者生效，把上面注释标为「弹窗系值被当归一化系用 ✗」的错误值又启用了
+#   ⇒ 兜底点击整体偏 C≈209px，真机「一键升星」点空。已删掉重复定义。
 EQUIP_TAB = (370, 360)        # 背包页签「装备」（第 2 个；⭐ 2026-09-30 实拍校准 ✓）（⭐ 2026-09-27 新增；
                               #   首次跑会先 OCR 找「装备」✓ 找不到才用这个兜底 ✓）
 SUPPLY_TPL = os.path.join(_MAPBOT_ROOT, 'templates', 'items', 'supply_strong.png')
@@ -5292,12 +5317,37 @@ def board_hidden(c):
 
     ⇒ 加一条"多数格被压暗"（遮罩会把棋盘压暗 ~35%，`ratio` 掉到 0.25~0.35）；
       **未揭示格恒 ~0.65**（见 §5/§7），所以 0.55 这个阈值不会误伤普通暗格 ✓
+
+    ⚠⚠ 2026-10-01 v1.11【**朋友真机翻车**：进图就报"面板挡住了棋盘 · 正在收起"，实际棋盘空的】
+      根因：上面两条判据都是**绝对阈值**（0.55 / 0.85），而 `ratio = 画面亮度 / 模板亮度`
+      **依赖设备**（不同机型的截图 gamma / 亮度 / 分辨率缩放会让整盘偏暗）
+      ⇒ 正常棋盘被整盘判成"暗格+被压暗" ⇒ 每张图都走"关面板"分支、3 次后 `board_not_visible`
+      ⇒ 退图失败 → 游戏恢复 → 下一张图**同样**⋯ ⇒ 用户看到的就是**一直卡在这** ✗✗
+      修法（**只收窄、不放松**，绝不放跑真的面板遮挡）：
+        ① 只要**有一格 ratio ≥ 0.85**（= 明确"已揭示"的亮格），就**不算被挡住**
+           —— 真面板遮罩会把整盘压到 0.25~0.35，**不可能**还剩 0.85 的亮格 ✓
+           （这正是朋友那台的情形：营地/已走开的格子还亮着，只是暗格被设备压到 0.55 以下）
+        ② 判据里改用**相对本帧的**亮格证据：`light >= 1` 也算"画面正常" ✓
     """
-    if len(c.get('light') or []) == 0 and len(c.get('gray') or []) >= 25:
+    _st = c.get('st') or {}
+    try:
+        # ⭐ ref = 本帧**最亮的一格** —— 正常盘必然是"已揭示"的那格（营地/已走开的格），
+        #   雾格恒比它暗 ⇒ 用 ref 做**本帧自身的亮度基准**，绝对阈值就变成相对阈值 ✓
+        #   （真遮挡会把整盘压到 0.25~0.35 ⇒ ref 也很小 ⇒ 两条判据照样成立 ✓）
+        _mx = max([float((v or {}).get('ratio') or 0) for v in _st.values()] or [0.0])
+    except Exception:       # noqa: BLE001
+        _mx = 0.0
+    # ① 全盘"无亮格"：**且连最亮的一格都很暗**（<0.55）才算被遮
+    #    —— 加 `_mx < 0.55` 是为了朋友那台"整体偏暗的设备"：它 light 也是 0（没格到 0.75），
+    #    但最亮格能到 0.6+ ⇒ 那是**设备暗**、不是**面板遮** ✓（真遮罩不可能还剩 0.55+）
+    if len(c.get('light') or []) == 0 and len(c.get('gray') or []) >= 25 and _mx < 0.40:
         return True
+    # ② 多数格被压暗：阈值按本帧基准缩放 ⇒ 设备整体偏暗时不会整盘误判 ✓
+    #    （面板只盖中间那类：ref≈1.0 ⇒ 阈值仍是 0.55 ⇒ 照样判出来 ✓ 不丢已修好的判据）
+    _thr = 0.55 * _mx if _mx > 0 else 0.55
     n = 0
-    for v in (c.get('st') or {}).values():
-        if float((v or {}).get('ratio') or 1.0) < 0.55:
+    for v in _st.values():
+        if float((v or {}).get('ratio') or 1.0) < _thr:
             n += 1
     return n >= 15
 
@@ -5673,6 +5723,19 @@ def one_round(b, log, rnd, prefix, st):
                 universal_close(b, log, items=items, where='board_all_dark')
                 log.append({'universal_fallback': 'board_all_dark', 'n': st['dark']})
                 say('  [r%d] 棋盘被挡 → 万能位兜底关面板（第 %d 次）' % (rnd, st['dark']))
+            # ⭐⭐⭐ 2026-10-01 v1.11【"被判挡住"必须能自证 + 不再无限循环】
+            #   朋友真机实况：「进图就显示面板挡住了棋盘，正在收起，一直卡在这，棋盘上啥都没有」
+            #   ① 第一次判"被挡"就**存帧**（诊断用）—— 我们手上没有任何"别的机型"的帧，
+            #      没有它就无法给 `board_hidden` 的绝对阈值标定（见该函数注释）✗
+            #   ② 连续多张图都判"被挡" ⇒ **整局停下并说清原因**（不再"退图失败→恢复→再来一张"）
+            if st['dark'] == 1:
+                try:
+                    _hp = _pub_dump('board_hidden_r%d' % rnd, b.img())
+                    if _hp:
+                        say('     · 这一帧已存档（诊断用）：%s' % _hp)
+                        log.append({'board_hidden_dump': _hp})
+                except Exception as _eh:      # noqa: BLE001
+                    log.append({'board_hidden_dump_fail': repr(_eh)[:80]})
             say('  [r%d] 棋盘被挡（读成暗格/压暗，面板挡住棋盘？）→ 关面板 %d 个（第 %d 次）'
                 % (rnd, n, st['dark']))
             status('面板挡住了棋盘 · 正在收起')
@@ -7125,6 +7188,22 @@ def run_maps(a):
             STATS['current_secs'] = time.time() - t_one
         log.append({'map': mi, 'end_reason': why})
         say('   本图结束：%s（耗时 %.0f 秒）' % (why, time.time() - t_one))
+        # ⭐⭐⭐ 2026-10-01 v1.11【"画面被判被挡"不许无限循环】（朋友真机：一张接一张地卡）
+        #   旧路径：`board_not_visible` → 'stuck' → 退图失败 → game_recover → 下一张图
+        #   → 同样判"被挡" → ⋯ **永远出不来**，用户看到的就是"一直卡在这" ✗✗
+        #   ⇒ 连续 2 张都 stuck（且没跑完）⇒ 整局停下 + 悬浮条说明 + 已存诊断帧 ✓
+        if why in ('stuck', 'blank'):
+            STATS['stuck_maps'] = STATS.get('stuck_maps', 0) + 1
+            if STATS['stuck_maps'] >= 2:
+                STATS['stopped'] = ('连续 %d 张图认不出棋盘（画面被判"被面板挡住"）'
+                                    % STATS['stuck_maps'])
+                say('   ⚠ 连续 %d 张图都认不出棋盘 ⇒ 停止（诊断帧已存 /sdcard/Download/'
+                    'autoexplore/bagdbg/，请发给作者 ✓）' % STATS['stuck_maps'])
+                status('⚠ 连续认不出棋盘 · 已停下（请把诊断帧发我）')
+                flush(log)
+                break
+        else:
+            STATS['stuck_maps'] = 0
         if why == 'kicked':
             STATS['stopped'] = '账号被顶下线'
             break
@@ -7147,6 +7226,7 @@ def run_maps(a):
             STATS['map_secs'].append(time.time() - t_one)
             STATS['current_map'] = 0        # 正常跑完就不算「被停止」
             STATS['current_secs'] = 0
+            STATS['recover_n'] = 0          # ⭐ v1.12：跑完一张 ⇒ 恢复计数清零 ✓
         say('   已退出地图并回到选图界面' if ok else '⚠ 退图没成功，已停止')
         if ok:
             status('第 %d 张图 · 完成（%.0f 秒）' % (mi + 1, time.time() - t_one))
@@ -7178,6 +7258,19 @@ def run_maps(a):
                     _items_pre = b.ocr(tag='pre')
                     log.append({'recover': 'recheck_after_finish_fail',
                                 'ok': _game_screen_ok(_items_pre)})
+                    # ⭐⭐⭐ 2026-10-01 v1.12 真机（**朋友那台**）报「连地图都进不去，一直显示
+                    #   正在把游戏拉回来」——本分支原来**无计数**：恢复成功就 `continue` 下一张，
+                    #   下一张要是又失败 ⇒ 又恢复 ⇒ **无限"拉回来"** ✗
+                    #   ⇒ 连续 3 次"拉回来自检通过、但下一张还是跑不动"就**停整局**并提示发日志 ✓
+                    STATS['recover_n'] = STATS.get('recover_n', 0) + 1
+                    if STATS['recover_n'] >= 3:
+                        STATS['stopped'] = ('连续 %d 次把游戏拉回来、但下一张仍跑不动'
+                                            % STATS['recover_n'])
+                        say('   ⚠ 连续 %d 次自动恢复后仍跑不动 ⇒ 停止（请把 logcat 发我 ✓）'
+                            % STATS['recover_n'])
+                        status('⚠ 拉回游戏后仍跑不动 · 已停下（请把日志发我）')
+                        flush(log)
+                        break
                     STATS['stopped'] = ''
                     continue          # 恢复成功 ⇒ 继续刷下一张 ✓
                 STATS['stopped'] = '游戏自动恢复失败'

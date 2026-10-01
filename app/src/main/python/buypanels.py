@@ -535,6 +535,45 @@ def _vault_dump(name, img):
     return None
 
 
+def _vault_lattice(x, y, tol=0.62):
+    """(x, y) → 宝库 5×5 的 (行, 列)（**0 基**）；**不在点阵上** ⇒ None
+
+    ⚠ 用途：挡掉"长得像格子但不是格子"的东西 —— 真机实测右下角「选择奖励/购买」按钮
+      (895,1521) 同样是高饱和彩色块，会被 `_tile_mask` 检成奖励格 ✗
+      按钮的行号 = (1521−746)/144 = **5.38**（点阵只有 0~4）⇒ None ⇒ 剔掉 ✓
+    ⚠ 容差 0.62 个格距：真机上网格整体比常数低 ~50px（= 0.35 格），仍能对上 ✓
+    """
+    p = float(VAULT['pitch'] or 144)
+    fc = (x - VAULT['gx0']) / p
+    fr = (y - VAULT['gy0']) / p
+    c, r = int(round(fc)), int(round(fr))
+    if not (0 <= c <= 4 and 0 <= r <= 4):
+        return None
+    if abs(fc - c) > tol or abs(fr - r) > tol:
+        return None
+    return r, c
+
+
+def _vault_rc(x, y):
+    """检测到的奖励格 → 宝库 5×5 里的 (行, 列)（**0 基**）
+
+    ⚠ 用"最近的理论格"判：真机上网格常比常数 `gy0` 低 ~50px（面板高度随文案变），
+      但 `50 < 半格距(72)` ⇒ 最近邻判行列**免疫整体位移** ✓（实测 800→行0 / 942→行1 /
+      1085→行2 / 1231→行3 / 1378→行4，逐个对得上 ✓）
+    """
+    p = float(VAULT['pitch'] or 144)
+    c = int(round((x - VAULT['gx0']) / p))
+    r = int(round((y - VAULT['gy0']) / p))
+    return max(0, min(4, r)), max(0, min(4, c))
+
+
+def tile_ring(x, y):
+    """该格属于第几圈：**1 外圈 / 2 中圈 / 3 核心**（切比雪夫距中心 ✓，与 `vault_ring` 同口径）"""
+    r, c = _vault_rc(x, y)
+    d = max(abs(r - 2), abs(c - 2))
+    return {0: 3, 1: 2, 2: 1}.get(d, 1)
+
+
 def vault_pick(bot, log, level, max_probe=25):
     """在某一层里挑一件奖励（**用户口径：不点开详情，直接认图标**）
 
@@ -566,6 +605,21 @@ def vault_pick(bot, log, level, max_probe=25):
         cells = [(x, y) for (x, y, _w, _h) in _tiles]
         for (x, y, w, h) in _tiles:
             _rad[(x, y)] = int(min(w, h) * 0.36)
+        # ⭐⭐⭐ 2026-10-01 v1.09 修**真机 bug**（用户报「**宝库又选不了奖励了**」）：
+        #   v0.98 把 `cells` 直接换成"检测到的**全部**彩色格" ⇒ **圈层约束丢了** ✗
+        #   真机铁证（logcat）：ring 1/2/3 三次 `pick` **全是同一个格 (540,1089)**（= 正中心），
+        #   而游戏只允许选**当前那一圈**（源码 `RefreshDefaultSelectingIndex` 按 currentLevel
+        #   定 `selectingIndex`；非本圈的选择 `OnFuncButtonClicked` 直接 return）
+        #   ⇒ 点正中心在 1/2 圈 = 空操作 ⇒ 用户看到的就是**选不了奖励** ✗✗
+        #   ⇒ 现在按检测格自己的 5×5 行列算圈层，**只留本圈**；本圈一个都没检出才退回理论圈 ✓
+        _ring_cells = [p for p in cells if tile_ring(p[0], p[1]) == level]
+        if _ring_cells:
+            log.append({'vault': 'ring_filter', 'level': level, 'all': len(cells),
+                        'ring': len(_ring_cells)})
+            cells = _ring_cells
+        else:
+            log.append({'vault': 'ring_filter_fallback', 'level': level, 'all': len(cells)})
+            cells = vault_ring(level)[:max_probe]
     if len(cells) == 1:                     # 第三轮：只有核心一格，无需扫描
         log.append({'vault': 'center_only', 'at': cells[0]})
         return cells[0], '核心'
@@ -751,6 +805,14 @@ def vault_tiles(img, min_area=4000, min_side=100, max_side=185):
         x, y, w, h, a = stats[i]
         if a > min_area and min_side <= w <= max_side and min_side <= h <= max_side \
                 and y > 700 and x < 960:          # 弹窗帧：网格在面板中下部、左侧 ✓
+            # ⭐⭐⭐ 2026-10-01 v1.09 修**按钮被当成奖励格**（真机 logcat 实证）：
+            #   右下角那颗「选择奖励/购买」按钮 (895,1521) 同样是**高饱和彩色块**
+            #   ⇒ 被 `_tile_mask` 检出、尺寸也刚好落在 100~185 里 ⇒ 混进 cells ✗
+            #   后果：`vault_pick` 可能返回**按钮自己的坐标**（真机 ring1 的 pick 就是
+            #   (895,1525)）⇒ 点它 = 点按钮、但当时**一个格子都没选** ⇒ 选不了奖励 ✗✗
+            #   ⇒ 用**宝库 5×5 点阵**过滤：按钮的行号是 5.41（点阵只有 0~4）⇒ 剔掉 ✓
+            if _vault_lattice(int(round(cent[i][0])), int(round(cent[i][1]))) is None:
+                continue
             raw.append((int(round(cent[i][0])), int(round(cent[i][1])), int(w), int(h), int(a)))
     raw.sort(key=lambda z: -z[4])                 # 大块优先 ⇒ 去重时留它 ✓
     out = []

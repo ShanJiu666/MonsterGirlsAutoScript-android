@@ -117,8 +117,17 @@ class Problem:
                 n = rr * COLS + ccc
                 if n in camp_cells:
                     return True
-                nb = self.board[n]
-                if nb < 0 or (nb >= 0 and nb in consumed):
+                # ⚠⚠⚠ 2026-10-01 修**格索引 / 块索引 空间混用**（实测 1556 块里 382 个假阳性）：
+                #   `n` 已经是**格索引**、`consumed` 也是**格索引**集合 ⇒ 判据就该是 `n in consumed`
+                #   （该邻格本身已被消耗 ⇒ 本块紧邻消耗格 ⇒ 会被揭示 ✓ 语义正确，
+                #     也与 explore_loop._infer_chain_consumed 的反推律同口径）
+                #   旧写法取 `nb = self.board[n]`（**块 id**）再 `nb in consumed`（**格 id** 集）——
+                #   两个索引空间数值范围都是 0..34，肉眼无法区分 ⇒ 只要「邻格所属块的编号」
+                #   数值上撞上「某个已消耗格的编号」就误判已揭示 ⇒ 求解器以为点得动，
+                #   真机上其实是雾格 ⇒ `fogged_noop` 空转、整条计划错位、漏目标。
+                #   另：`board[n] < 0` 的情形已被上面的 `consumed_cells` 全量收集（board<0 ⇔ n∈consumed），
+                #   不需要在这里再单独判一次。
+                if n in consumed:
                     return True
         return False
 
@@ -161,7 +170,12 @@ class Problem:
             if pick is None:                  # 兜底：整片都没揭示（不该发生）
                 pick = cells[0]
             out.append((rc_of(pick), bi, w))
-            consumed |= (self.plain_group(bi) if b.plain else {bi})
+            # ⚠⚠ 2026-10-01 修：原来 `consumed |= (self.plain_group(bi) if b.plain else {bi})`
+            #   —— `plain_group` 返回的是**块 id**、`{bi}` 也是**块 id**，
+            #   而 `consumed` 全程是**格索引**（`block_revealed` 按格判）⇒ 又一处空间混用 ✗
+            #   ⇒ 本步真正被占用的**格**是 `cells`（候选格全部在片内、空地片已全部连锁消耗 ✓）
+            #   改用 `cells` 后语义自洽，也顺带覆盖"多格块只点了一格、其余成员仍算已揭示"的漏洞。
+            consumed |= set(cells)
         return out
 
     def visible(self, state):

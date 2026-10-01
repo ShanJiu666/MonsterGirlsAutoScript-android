@@ -183,6 +183,22 @@ public class CommandReceiver extends BroadcastReceiver {
                     // dev：证明"机器人对自己瞎"（悬浮条那块在帧里必须是纯色）
                     AppLog.i("[mask_check] " + DeviceApi.maskCheck());
                     break;
+                case "feedback":
+                    // ⭐ v1.14 一键反馈：与悬浮条「反馈」按钮**同一条代码路径** ✓
+                    //   --es share 1 ⇒ 同时弹系统分享面板（默认只打包，方便脚本/调试 ✓）
+                    new Thread(() -> {
+                        try {
+                            boolean _sh = "1".equals(intent.getStringExtra("share"));
+                            // ⚠ BroadcastReceiver 自己不是 Context ⇒ 用 onReceive(ctx,…) 那个 ✓
+                            Context _c = ctx.getApplicationContext();
+                            String r = _sh ? Feedback.collectAndShare(_c)
+                                           : Feedback.collectOnly(_c);
+                            AppLog.i("[feedback] " + r);
+                        } catch (Throwable t) {
+                            AppLog.i("[feedback] 异常：" + t);
+                        }
+                    }, "cmd-feedback").start();
+                    break;
 
                 default:
                     AppLog.i("未知命令：" + cmd);

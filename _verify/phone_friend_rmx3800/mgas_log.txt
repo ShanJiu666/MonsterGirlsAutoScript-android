@@ -1,0 +1,42 @@
+
+════════ 本次统计 ════════
+  消耗体力   ：—
+  平均每图   ：—
+  刷完地图   ：0 张
+  平均耗时   ：0 秒/张（合计 0 秒）
+  首领关     ：0 场（胜 0）
+  全部战斗   ：0 场（胜 0）
+  大拇指装备 ：0 件（推荐战 0 场 / 胜 0；摇色子拿到 0）
+  幸运草地块 ：0 个
+  旅行商人   ：买完 0 个
+  黄金宝库   ：买完 0 个
+══════════════════════════
+  ⏱ 耗时分布：截图 4.4s(极速)｜OCR 28.2s/13次｜棋盘识别 6.1s（7次）｜点击等待 8.3s(7次)
+               （以上合计 47 秒；其余为游戏动画/面板本身的响应时间）
+              OCR 分账：round 13.6s/6次｜pre 5.0s/2次｜round_full 4.4s/2次｜round_dlg 3.3s/2次｜popup_none_dlg 1.8s/1次
+
+---- 最近日志（最多 400 条）----
+{"pre": "not_in_map", "attempt": 0, "act": "none", "closed_x": 0, "state": "menu"}
+{"pre_gate": "stamina", "stamina": 781, "min": 25, "auto_supply": false}
+{"enter": "in_map", "stamina": 781}
+{"fog_wait": "pre_identify", "secs": 2.0}
+{"shot": "saved", "rnd": 0, "file": "r_055204_0.png"}
+{"fog_retry": 1, "dimmed": true}
+{"fog_retry": 2, "dimmed": false}
+{"obs_merge": "grew", "added": 35, "total": 35}
+{"popup": "dlg_frame_retry", "n_items": 28, "act": "none", "texts": ["清凉沙滩", "05:47:22", "帮助", "198%", "夏日海滩入侵", "当前难度253", "星界秘境", "09:52:48", "09:46:58", "深渊46", "深渊47", "深渊48", "深渊49", "深渊50", "136级", "137级", "138级", "139级", "140级", "..17", "100级7100级", "100级", "020", "双方获得滋润层数+5", "快速扫荡", "进入地图"
+{"board_hidden_dump": "/sdcard/Download/autoexplore/bagdbg/board_hidden_r0.png"}
+{"round": 0, "stamina": 781, "slots": {"free_txt": 0, "busy": 4, "busy_strict": 4}, "slots_free": 1}
+{"board_hidden": "all_dark", "closed": 2, "n": 1, "light": 1, "gray": 16}
+{"round_end": 0, "why": null, "secs": 19.7}
+{"popup": "dlg_frame_retry", "n_items": 28, "act": "none", "texts": ["清凉沙滩", "05:47:11", "帮助", "198%", "夏日海滩入侵", "当前难度253", "星界秘境", "14:10:42", "09:52:36", "09:46:46", "深渊46", "深渊47", "深渊48", "深渊49", "深渊50", "136级", "137级", "138级", "139级", "140级", "..17", "100级7100级", "100级", "双方获得滋润层数+5", "快速扫荡", "
+{"universal_close": "board_all_dark", "at": [541, 1890]}
+{"universal_fallback": "board_all_dark", "n": 2}
+{"round": 1, "stamina": 782, "slots": {"free_txt": 0, "busy": 4, "busy_strict": 4}, "slots_free": 1}
+{"board_hidden": "all_dark", "closed": 2, "n": 2, "light": 0, "gray": 17}
+{"round_end": 1, "why": null, "secs": 32.8}
+{"popup_none_dlg": "probe", "btn_zone": [[755, 1667, "100级7100"]], "n": 26}
+{"universal_close": "popup_none", "at": [541, 1890]}
+{"round": 2, "stamina": 782, "slots": {"free_txt": 0, "busy": 4, "busy_strict": 4}, "slots_free": 1}
+{"universal_fallback": "popup_none", "n": 3}
+{"round_end": 2, "why": null, "secs": 39.0}

@@ -717,13 +717,16 @@ def ascii_board(img, cell=30):
                 bd, best = d, cc
         return best
 
-    px = self.grid['pitch']
+    # ⚠ 2026-10-01 修 NameError：本函数是**模块级**的（不是 Board 的方法），
+    #   原来写 `self.grid[...]` ⇒ 一调用就 NameError（state_cmd 走这里 ⇒ 诊断命令必崩）
+    # ⇒ 改用模块级 GRID（Board 构造时也是从它拷的同一份几何 ✓）。
+    px = GRID['pitch']
     lines = []
-    for r in range(1, self.grid['rows'] + 1):
+    for r in range(1, GRID['rows'] + 1):
         rowtxt = []
-        for c in range(1, self.grid['cols'] + 1):
-            x = int(self.grid['x0'] + (c - 1) * px + px / 2)
-            y = int(self.grid['y0'] + (r - 1) * px + px / 2)
+        for c in range(1, GRID['cols'] + 1):
+            x = int(GRID['x0'] + (c - 1) * px + px / 2)
+            y = int(GRID['y0'] + (r - 1) * px + px / 2)
             patch = img[max(0, y - 30):y + 30, max(0, x - 30):x + 30]
             if patch.size == 0:
                 rowtxt.append('   ?    ')
@@ -874,7 +877,7 @@ def live_cmd(a):
 def calib_cmd(a):
     """重新标定几何：给定一张已知含 N 个相同地块的截图，扫 pitch/原点"""
     print('几何：设计格距 32px × 缩放 %.1f = 屏幕格距 %.1f；左上 (%.0f, %.0f)；单格贴图 %.0fx%.0f'
-          % (SCALE, SCALE * DESIGN_PITCH, self.grid['x0'], self.grid['y0'],
+          % (SCALE, SCALE * DESIGN_PITCH, GRID['x0'], GRID['y0'],
              DESIGN_TILE * SCALE, DESIGN_TILE * SCALE))
     print('重现：python fit_art.py scale <截图> --probe S00003_001  # 找缩放')
     print('      python fit_art.py peaks <截图> --probe S00003_001  # 峰间距=格距')

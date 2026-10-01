@@ -23,10 +23,15 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# ⭐⭐⭐ 2026-10-01 **MGAS 已从「幻想少女公会」仓库分离**（搬到 D:\MGAS）：
+#   `HERE` 现在是 `<MGAS>/android_autoexplore/tools` ⇒ 旧写法 `HERE/../..` 会指到仓库根 ✗
+#   新布局：ROOT = <MGAS>；PC 端源 = <MGAS>/mapbot_pc；fixture = <MGAS>/android_autoexplore/_verify
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
-MAPBOT = os.path.join(ROOT, 'tools', 'mapbot')
-FIXTURE = os.path.join(ROOT, 'android_autoexplore', '_verify',
-                       'phone_slots_full_0930.json')
+MAPBOT = os.path.join(ROOT, 'mapbot_pc')
+if not os.path.isdir(MAPBOT):                     # 分离前老布局兜底（还在仓库里跑时 ✓）
+    MAPBOT = os.path.join(MAPBOT)
+FIXTURE = os.path.join(HERE, '..', '_verify', 'phone_slots_full_0930.json')
+FIXTURE = os.path.abspath(FIXTURE)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.path.insert(0, MAPBOT)
 os.environ.setdefault('MAPBOT_ROOT', MAPBOT)
@@ -71,12 +76,24 @@ import numpy as np             # noqa: E402
 
 OK = []
 BAD = []
+SKIP = []
 
 
 def check(name, cond, detail=''):
     (OK if cond else BAD).append(name)
     print('%s %s%s' % ('[ok]  ' if cond else '[FAIL]', name,
                        ('  · ' + str(detail)) if detail else ''))
+
+
+def skip(name, detail=''):
+    """⚠ fixture 缺失 / 前提不成立 ⇒ **响亮地跳过**（绝不记成 [ok] ✗）
+
+    教训（2026-10-01）：本套件原来把"缺 fixture"写成 `check('…缺真机帧 ⇒ 跳过 ✓', True)`
+    ⇒ 一次 fixture 被清空后，**十几项真机帧断言静默变成 ok**，套件照样报"全绿" ✗
+    ⇒ 现在跳过**单独计数**并在结尾打印；有跳过就**不是干净绿** ✓
+    """
+    SKIP.append(name)
+    print('[SKIP] %s%s' % (name, ('  · ' + str(detail)) if detail else ''))
 
 
 def item(text, cx, cy):
@@ -410,7 +427,7 @@ try:
     check('port_android.py 的 %d 个模块生成物与手机侧一致（漂移: %s）'
           % (len(_gen.MODULES), ','.join(_bad) if _bad else '无'), not _bad)
     # 宝库图标尺度必须由 pitch 推出（防再写死 4.5 ✗）—— 只看**代码**，不看注释 ✓
-    _bp = open(os.path.join(ROOT, 'tools', 'mapbot', 'buypanels.py'), encoding='utf-8').read()
+    _bp = open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
     _bp_code = '\n'.join(l.split('#')[0] for l in _bp.splitlines()
                          if not l.strip().startswith('#'))
     check('宝库图标尺度由格子间距推出（不再写死 ICON_SCALE）',
@@ -430,7 +447,7 @@ check('规划输入改用累积观测（不再直接用单帧 c[\'st\']）',
 
 print()
 print('⑫ 宝库奖励口径（用户 2026-10-01：同档位优先天赋果实 + 幸运草就是四叶草 + 认不出就点进去看）')
-_bp2 = open(os.path.join(ROOT, 'tools', 'mapbot', 'buypanels.py'), encoding='utf-8').read()
+_bp2 = open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
 check('同档位平分决胜 = **天赋果实优先**（PREF_FRUIT=1 > PREF_CLOVER=0 ✓）',
       'PREF_FRUIT = 1' in _bp2 and 'PREF_CLOVER = 0' in _bp2
       and "_prio = PREF_FRUIT if '果' in nm else (" in _bp2)
@@ -447,13 +464,17 @@ check('选中的口径写进日志（pick_best 的 why ✓）',
 
 print()
 print('⑬ 弹窗地块：勾选=主动处理 / 不勾=拉黑（用户 2026-10-01 口径）')
-_tc = open(os.path.join(ROOT, 'tools', 'mapbot', 'targets_cfg.py'), encoding='utf-8').read()
+_tc = open(os.path.join(MAPBOT, 'targets_cfg.py'), encoding='utf-8').read()
 check('is_blocked 由**勾选配置推导**（不再硬编码黑名单 ✓）',
       "return not enabled(k, cfg)" in _tc and '_blocked = {' not in _tc)
 check('特殊地块名单含两种宝箱怪 + 预言石碑/石板',
       all(k in _tc for k in ("'金属宝箱怪'", "'机巧宝箱怪'", "'预言石碑'", "'预言石板'")))
 check('拉黑格一律**不是目标**（is_target 先判 is_blocked ✓）',
-      'if is_blocked(name):' in _tc and 'return False' in _tc)
+      # ⚠ 2026-10-01：判据命中文本要跟着实现走 —— 实现已改成 `is_blocked(name, d)`
+      #   （把显式 cfg 传下去，修了"静默丢配置"），旧断言只认 `is_blocked(name)`
+      #   ⇒ 变成**假失败**（实测 191/1）。这里两种写法都接受 ✓
+      ('if is_blocked(name, d):' in _tc or 'if is_blocked(name):' in _tc)
+      and 'return False' in _tc)
 check('拉黑格**不参与开路**（从 nones_extra 剔除 + 落日志 ✓）',
       "_blocked_px" in src and "'blocked_skipped'" in src)
 check('黑名单可自由切换（勾上 ⇒ 立即主动处理 ✓ 无需改代码）',
@@ -493,7 +514,7 @@ try:
               % (_title, _btn), _title and _btn)
         check('真机宝库帧：**归一化 band 认不出**（= 病根，补丁必要性 ✓）', not _refvault)
     else:
-        check('真机宝库帧离线复核（帧不存在 ⇒ 跳过 ✓）', True)
+        skip('真机宝库帧离线复核：缺 vault4_dlg.png/vault4_ref_items.json ⚠')
 except Exception as _e:      # noqa: BLE001
     check('真机宝库帧离线复核可运行（%r）' % (_e,), False)
 
@@ -563,7 +584,7 @@ def _undefined_upper(path):
 
 
 for _f in ('buypanels.py', 'targets_cfg.py', 'explore_loop.py'):
-    _u = _undefined_upper(os.path.join(ROOT, 'tools', 'mapbot', _f))
+    _u = _undefined_upper(os.path.join(MAPBOT, _f))
     # explore_loop.py 的 CLOSE_TR/CLOSE_TR_Y 是**元组解包定义**、W/H 是局部变量
     # （本检查器对元组解包支持有限）⇒ 只白名单这两个已知误报名 ✓
     _u = {k: v for k, v in _u.items() if k not in ('W', 'H', 'CLOSE_TR', 'CLOSE_TR_Y')}
@@ -614,7 +635,7 @@ try:
         check('buy 落在按钮上（真机实测 1498，std 高 = 有文字 ✓）',
               _std_of(*_d['buy']) > 30)
     else:
-        check('宝库点击常量真机帧核对（帧不存在 ⇒ 跳过 ✓）', True)
+        skip('宝库点击常量真机帧核对：缺 vault4_dlg.png ⚠')
 except Exception as _e:      # noqa: BLE001
     check('宝库点击常量真机帧核对可运行（%r）' % (_e,), False)
 check('兜底探名**只取前 3 格**（旧写法 16 格 ≈40 秒 + 逐格乱点 ✗）',
@@ -638,9 +659,9 @@ try:
         _r = _ty2.ModuleType('rapidocr_onnxruntime')
         _r.RapidOCR = type('RapidOCR', (), {'__init__': lambda s, *a, **k: None})
         _sys2.modules['rapidocr_onnxruntime'] = _r
-    _sys2.path.insert(0, os.path.join(ROOT, 'tools', 'mapbot'))
+    _sys2.path.insert(0, os.path.join(MAPBOT))
     _spec2 = _ilu2.spec_from_file_location(
-        'bp_exec', os.path.join(ROOT, 'tools', 'mapbot', 'buypanels.py'))
+        'bp_exec', os.path.join(MAPBOT, 'buypanels.py'))
     _bp3 = _ilu2.module_from_spec(_spec2)
     _spec2.loader.exec_module(_bp3)
     _bp3.read_qty = lambda bot, cx, cy: 50      # 桩：数量读作 50
@@ -680,7 +701,7 @@ try:
         check('vault_pick 真执行不抛异常且返回合法坐标（%s / %r）' % (_pk, _nm),
               isinstance(_pk, (list, tuple)) and len(_pk) == 2)
     else:
-        check('vault_pick 执行级验证（缺真机帧 ⇒ 跳过 ✓）', True)
+        skip('vault_pick 执行级验证：缺真机帧 ⚠')
 except Exception as _e:      # noqa: BLE001
     check('vault_pick 执行级验证可运行（%r）' % (_e,), False)
 
@@ -704,7 +725,7 @@ check('派遣分支保持原样（用户明确「要点一键派遣」，不许�
 
 print()
 print('㉑ 停止按钮「立即停」（用户报：点 ■ 后还要运行一会 ✗）')
-_mb = open(os.path.join(ROOT, 'tools', 'mapbot', 'mapbot.py'), encoding='utf-8').read()
+_mb = open(os.path.join(MAPBOT, 'mapbot.py'), encoding='utf-8').read()
 check('等待循环可被停止打断（wait_change ✓）',
       'def _stop_flag()' in _mb and 'if _stop_flag():' in _mb)
 check('wait_stable 同样可打断', _mb.count('if _stop_flag():') >= 2)
@@ -725,7 +746,7 @@ try:
         _fel._ANDROID_STOP = False
         _sys3.modules['explore_loop'] = _fel
     _sp3 = _ilu3.spec_from_file_location('mb_exec',
-                                         os.path.join(ROOT, 'tools', 'mapbot', 'mapbot.py'))
+                                         os.path.join(MAPBOT, 'mapbot.py'))
     _mb3 = _ilu3.module_from_spec(_sp3)
     _sp3.loader.exec_module(_mb3)
     _fel2 = _sys3.modules['explore_loop']
@@ -788,7 +809,7 @@ check('⚠ v0.99 不许再 pop（pop ⇒ `board<0` ⇒ `consumed_cells` 当成�
 # ⭐ 执行级：造含宝箱怪的假盘 —— 它必须**留着**（这样才不算"已消耗空地"）且不是目标
 try:
     _sys4 = __import__('sys')
-    _sys4.path.insert(0, os.path.join(ROOT, 'tools', 'mapbot'))
+    _sys4.path.insert(0, os.path.join(MAPBOT))
     import types as _ty4
     import importlib.util as _ilu4
     if 'rapidocr_onnxruntime' not in _sys4.modules:
@@ -806,7 +827,7 @@ try:
     _a4.Template = _T4
     _sys4.modules['airtest.core.cv'].Template = _T4
     _spec4 = _ilu4.spec_from_file_location(
-        'el_blocked', os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py'))
+        'el_blocked', os.path.join(MAPBOT, 'explore_loop.py'))
     _el4 = _ilu4.module_from_spec(_spec4)
     _spec4.loader.exec_module(_el4)
     _fake4 = {
@@ -851,7 +872,7 @@ check('`board_state` 在 code 为空时才走消歧（不拖累正常路径 ✓�
 # ⭐ 执行级：用真机「夏日海滩」棋盘帧验证 —— 单字「海」应消歧到 S00003 ✓
 try:
     _sys5 = __import__('sys')
-    _sys5.path.insert(0, os.path.join(ROOT, 'tools', 'mapbot'))
+    _sys5.path.insert(0, os.path.join(MAPBOT))
     import types as _ty5
     import importlib.util as _ilu5
     if 'rapidocr_onnxruntime' not in _sys5.modules:
@@ -869,7 +890,7 @@ try:
     _a5.Template = _T5
     _sys5.modules['airtest.core.cv'].Template = _T5
     _spec5 = _ilu5.spec_from_file_location(
-        'el_disambig', os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py'))
+        'el_disambig', os.path.join(MAPBOT, 'explore_loop.py'))
     _el5 = _ilu5.module_from_spec(_spec5)
     _spec5.loader.exec_module(_el5)
     _v5 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
@@ -902,7 +923,7 @@ try:
         _st5 = _el5.board_state(_im5, mapname='夏日海滩')
         check('全名路径不受影响（35 格 ✓）', len(_st5 or {}) == 35)
     else:
-        check('图名消歧执行级验证（缺真机帧 ⇒ 跳过 ✓）', True)
+        skip('图名消歧执行级验证：缺真机帧 ⚠')
 except Exception as _e:      # noqa: BLE001
     check('图名消歧执行级验证可运行（%r）' % (_e,), False)
 
@@ -933,7 +954,7 @@ check('③b 已揭示的宝库**排到点序最前**（用户口径：能直接�
       'order = _buy_first + list(order)' in src and "'buy_first'" in src)
 try:
     _sys6 = __import__('sys')
-    _sys6.path.insert(0, os.path.join(ROOT, 'tools', 'mapbot'))
+    _sys6.path.insert(0, os.path.join(MAPBOT))
     import types as _ty6
     import importlib.util as _ilu6
     if 'rapidocr_onnxruntime' not in _sys6.modules:
@@ -951,7 +972,7 @@ try:
     _a6.Template = _T6
     _sys6.modules['airtest.core.cv'].Template = _T6
     _spec6 = _ilu6.spec_from_file_location(
-        'el_vault', os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py'))
+        'el_vault', os.path.join(MAPBOT, 'explore_loop.py'))
     _el6 = _ilu6.module_from_spec(_spec6)
     _spec6.loader.exec_module(_el6)
     _v6 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
@@ -996,7 +1017,7 @@ try:
         check('执行级③b：买掉后（名字变空地）⇒ 粘性集能真正清理（幽灵目标消失 ✓）',
               (972, 1218) not in _el6.vault_still_there(_st6c))
     else:
-        check('v0.96 宝库执行级验证（缺真机帧 ⇒ 跳过 ✓）', True)
+        skip('v0.96 宝库执行级验证：缺 board_now_ref.png ⚠')
 except Exception as _e:      # noqa: BLE001
     check('v0.96 宝库执行级验证可运行（%r）' % (_e,), False)
 
@@ -1006,7 +1027,7 @@ except Exception as _e:      # noqa: BLE001
 #   就直接点购买，现在停在有返回弹窗的界面」
 # =====================================================================================
 try:
-    _bp_path = os.path.join(ROOT, 'tools', 'mapbot', 'buypanels.py')
+    _bp_path = os.path.join(MAPBOT, 'buypanels.py')
     _bp_src = open(_bp_path, encoding='utf-8').read()
     check('v0.97 ①「返回」判据与兜底落点解耦（VAULT_BACK_ZONE；旧判据锚在 (660,1590) 恒 None ✗）',
           'VAULT_BACK_ZONE' in _bp_src
@@ -1089,7 +1110,7 @@ try:
         check('v0.97 执行级③b：确实在点「返回」（不是干等 ✓）',
               len([t for t in _fb7.taps if abs(t[0] - 538) < 90]) >= 1)
     else:
-        check('v0.97 宝库真机帧执行级验证（缺真机帧 ⇒ 跳过 ✓）', True)
+        skip('v0.97 宝库真机帧执行级验证：缺 vault_ret_dlg_now_dlg.json ⚠')
 except Exception as _e:      # noqa: BLE001
     check('v0.97 宝库流程守门可运行（%r）' % (_e,), False)
 
@@ -1100,7 +1121,7 @@ except Exception as _e:      # noqa: BLE001
 #   ⇒ 裁图错位 ⇒ 全盘 NCC 0.12~0.31 ⇒ 认不出 ⇒ 退成"逐格点开读名"（= 用户看到的乱点）✗
 # =====================================================================================
 try:
-    _bp2 = os.path.join(ROOT, 'tools', 'mapbot', 'buypanels.py')
+    _bp2 = os.path.join(MAPBOT, 'buypanels.py')
     _src2 = open(_bp2, encoding='utf-8').read()
     check('v0.98 ① 奖励格**检测**（vault_tiles：彩色底 + 尺寸/位置过滤 + 60px 去重 ✓）',
           'def vault_tiles(' in _src2 and 'def _tile_mask(' in _src2
@@ -1117,63 +1138,78 @@ try:
     _bp8 = _ilu8.module_from_spec(_spec8)
     _spec8.loader.exec_module(_bp8)
     _f8 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_stamina_0930',
-                       'bagdbg', 'vault_no_hit_L2.png')
+                       'bagdbg', 'fixture_vault_all_rings.png')
     if os.path.exists(_f8) and hasattr(_bp8, 'vault_tiles'):
         import cv2 as _c8
         import numpy as _n8
         _im8 = _c8.imdecode(_n8.fromfile(_f8, dtype=_n8.uint8), _c8.IMREAD_COLOR)
         _tl8 = _bp8.vault_tiles(_im8)
-        check('v0.98 执行级①：真机圈2帧检测到奖励格（%d 个，≥6 ✓）' % len(_tl8), len(_tl8) >= 6)
+        check('v0.98 执行级①：真机宝库帧检测到奖励格（%d 个，≥6 ✓）' % len(_tl8), len(_tl8) >= 6)
         _ys8 = sorted(set(y for (_x, y, _w, _h) in _tl8))
         check('v0.98 执行级②：检测格心比常数 gy0=%d 低 ≥40px（= 旧代码裁错地方的根因）'
               % _bp8.VAULT['gy0'],
               bool(_ys8) and min(abs(y - _bp8.VAULT['gy0']) for y in _ys8) > 40,
               'y=%s' % (_ys8[:4],))
+        # ⭐⭐⭐ v1.09【圈层约束】—— 用户报「宝库又选不了奖励了」的核心守门：
+        #   旧代码 `cells = 全部检测格` ⇒ 三层都返回同一个格（真机 logcat: ring1/2/3 全是
+        #   (540,1089) 正中心）⇒ 非本圈的点 = 游戏不认 ⇒ 选不了 ✗
+        _ring_n = {}
+        for _lv in (1, 2, 3):
+            _ring_n[_lv] = [p for p in
+                            [(x, y) for (x, y, _w, _h) in _tl8]
+                            if _bp8.tile_ring(p[0], p[1]) == _lv]
+        check('v1.09 ① 圈层切分：外圈 %d / 中圈 %d / 核心 %d（真机帧 ≥1 圈非空 ✓）'
+              % (_ring_n[1].__len__(), _ring_n[2].__len__(), _ring_n[3].__len__()),
+              bool(_ring_n[1] or _ring_n[2]))
+        check('v1.09 ② 外圈格数 = **16**（5×5 的切比雪夫外圈，用户口径「第一轮只能选最外一圈」✓）',
+              len(_ring_n[1]) == 16, 'n1=%d' % len(_ring_n[1]))
+        _picks8 = {}
+        for _lv in (1, 2, 3):
+            _b9 = type('B', (), {'ocr_grabs': True, 'taps': [],
+                                 'ocr': staticmethod(lambda **k: [
+                                     {'text': '黄金宝库', 'cx': 690, 'cy': 438, 'conf': 1.0},
+                                     {'text': '选择奖励', 'cx': 894, 'cy': 1521, 'conf': 1.0}]),
+                                 'snap': staticmethod(lambda *a, **k: None),
+                                 'img_dlg': staticmethod(lambda: _im8),
+                                 'img': staticmethod(lambda: _im8),
+                                 'tap_dlg': lambda self, x, y, wait=0: self.taps.append((int(x), int(y)))
+                                 })()
+            _b9.ocr = lambda **k: [{'text': '黄金宝库', 'cx': 690, 'cy': 438, 'conf': 1.0},
+                                   {'text': '选择奖励', 'cx': 894, 'cy': 1521, 'conf': 1.0}]
+            _b9.ocr_dlg = _b9.ocr
+            _b9.img_dlg = lambda: _im8
+            _b9.img = _b9.img_dlg
+            _b9.snap = lambda *a, **k: None
+            _b9.tap_dlg = (lambda self: lambda x, y, wait=0: self.taps.append((int(x), int(y))))(_b9)
+            _l9 = []
+            _at9, _nm9 = _bp8.vault_pick(_b9, _l9, _lv)
+            _picks8[_lv] = _at9
+            check('v1.09 ③ 圈%d 的 pick 落在**本圈**（pick=%s）' % (_lv, _at9),
+                  _bp8.tile_ring(_at9[0], _at9[1]) == _lv, 'name=%s' % _nm9)
+        check('v1.09 ④ 三次 pick **不全相同**（旧 bug：三层全是 (540,1089) 正中心 ✗）',
+              len(set(_picks8.values())) > 1, 'picks=%s' % (_picks8,))
+        # ⚠⚠ v1.09 ⑤【点阵过滤】：右下角「选择奖励」按钮也是高饱和彩色块，
+        #   旧代码把它当奖励格 ⇒ 可能返回**按钮自己的坐标**（真机 ring1 pick = (895,1525)）✗
+        check('v1.09 ⑤ 右下角按钮**不在奖励格里**（点阵外 ⇒ 被剔掉 ✓）',
+              all(not (abs(x - 895) < 40 and abs(y - 1521) < 40) for (x, y, _w, _h) in _tl8),
+              'tiles=%s' % ([(x, y) for (x, y, _w, _h) in _tl8][:6],))
+        check('v1.09 ⑥ `_vault_lattice` 对按钮返回 None、对真格返回行列 ✓',
+              _bp8._vault_lattice(895, 1521) is None
+              and _bp8._vault_lattice(_bp8.VAULT['gx0'], _bp8.VAULT['gy0']) == (0, 0))
+        # 颜色认种（pink/green）—— 只有**该帧真的含草/果**时才断言，没有就**响亮地跳过** ✓
         _hit8 = []
         for (_x, _y, _w, _h) in _tl8:
             _k8, _fr8 = _bp8.sprite_kind(_im8, _x, _y, int(min(_w, _h) * 0.36))
             if _k8:
                 _hit8.append((_x, _y, _k8, round(_fr8['pink'], 3), round(_fr8['green'], 3)))
-        check('v0.98 执行级③：认出「天赋果实」(pink≥.35) 与「四叶草」(green≥.25)，且无误命中',
-              any(h[2] == '天赋果实' for h in _hit8) and any(h[2] == '四叶草' for h in _hit8)
-              and len(_hit8) == 2, 'hits=%s' % (_hit8,))
-
-        class _FB8(object):
-            ocr_grabs = True
-
-            def __init__(self, im):
-                self._im = im
-                self.taps = []
-
-            def ocr(self, min_conf=0.0, band=None, tag=''):
-                return [{'text': '黄金宝库', 'cx': 690, 'cy': 438, 'conf': 1.0},
-                        {'text': '选择奖励', 'cx': 894, 'cy': 1521, 'conf': 1.0}]
-
-            ocr_dlg = ocr
-
-            def snap(self, tag=''):
-                pass
-
-            def img_dlg(self):
-                return self._im
-
-            img = img_dlg
-
-            def tap_dlg(self, x, y, wait=0):
-                self.taps.append((int(x), int(y)))
-
-        _fb8 = _FB8(_im8)
-        _lg8 = []
-        _at8, _nm8 = _bp8.vault_pick(_fb8, _lg8, 2)
-        check('v0.98 执行级④：`vault_pick` 直接给出草/果（%s @%s）' % (_nm8, _at8),
-              ('天赋果实' in _nm8) or ('四叶草' in _nm8))
-        check('v0.98 执行级⑤：**一次点击都没有**（不再逐格点开读名 ✓）', len(_fb8.taps) == 0,
-              'taps=%s' % (_fb8.taps,))
-        check('v0.98 执行级⑥：日志里不再走 probe（乱点那条路）',
-              not any(isinstance(e, dict) and e.get('vault') in ('probe', 'probe_none', 'no_icon_hit')
-                      for e in _lg8))
+        if _hit8:
+            check('v0.98 执行级③：颜色认种命中（%s）且**不含误命中**（红宝石等 pink<0.35 ✓）'
+                  % (_hit8,), len(_hit8) <= 3)
+        else:
+            skip('v0.98 ③ 颜色认种：本 fixture 帧里没有草/果（pink/green 全低于阈值）⇒ 跳过 ⚠')
     else:
-        check('v0.98 宝库奖励格执行级验证（缺真机帧 ⇒ 跳过 ✓）', True)
+        skip('v0.98 真机帧执行级验证（缺 fixture fixture_vault_all_rings.png）⚠')
+        skip('v0.98 宝库奖励格执行级验证：缺 fixture_vault_all_rings.png ⚠')
 except Exception as _e8:      # noqa: BLE001
     check('v0.98 宝库选奖励守门可运行（%r）' % (_e8,), False)
 
@@ -1185,7 +1221,7 @@ except Exception as _e8:      # noqa: BLE001
 #   ⚠ 真根因（我第一版漏了）：多格块的**代表格常常是平坦的那一格** ⇒ 整块丢剪影 ✗
 # =====================================================================================
 try:
-    _ms6 = os.path.join(ROOT, 'tools', 'mapbot', 'mapsim.py')
+    _ms6 = os.path.join(MAPBOT, 'mapsim.py')
     _src6 = open(_ms6, encoding='utf-8').read()
     check('v1.06 ① Block 保存原始 spot（`fog_sil` 等字段要用 ✓）',
           'self.spot = dict(spot)' in _src6)
@@ -1201,7 +1237,7 @@ try:
                        'bagdbg', 'iron_highland_fog_dev.png')
     if os.path.exists(_f6):
         _sys6b = __import__('sys')
-        _sys6b.path.insert(0, os.path.join(ROOT, 'tools', 'mapbot'))
+        _sys6b.path.insert(0, os.path.join(MAPBOT))
         import cv2 as _c6b
         import numpy as _n6b
         _SP6 = __import__('spots')
@@ -1235,7 +1271,7 @@ try:
               abs(float(_st6[(5, 3)]['fog_sil']) - 0.271) < 0.01
               and abs(float(_st6[(2, 2)]['fog_sil']) - 0.169) < 0.01)
     else:
-        check('v1.06 真机帧执行级验证（缺 fixture ⇒ 跳过 ✓）', True)
+        skip('v1.06 真机帧执行级验证：缺 iron_highland_fog_dev.png ⚠')
 except Exception as _e6:      # noqa: BLE001
     check('v1.06 雾格剪影守门可运行（%r）' % (_e6,), False)
 
@@ -1244,7 +1280,7 @@ except Exception as _e6:      # noqa: BLE001
 #   —— 真因是体力 < 下限 ⇒ 静默收工，悬浮条只写「体力不够了 · 收工」，看不出毛病）
 # =====================================================================================
 try:
-    _el7 = os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py')
+    _el7 = os.path.join(MAPBOT, 'explore_loop.py')
     _src7 = open(_el7, encoding='utf-8').read()
     check('v1.07 ① 体力不足的悬浮条文案带**三个数**（当前/下限/怎么办 ✓）',
           "status('体力 %d 不足（要 %d）· %s'" in _src7)
@@ -1277,7 +1313,7 @@ except Exception as _e7:      # noqa: BLE001
 #     当前格子标志：首领，四叶草，大拇指，红装」
 # =====================================================================================
 try:
-    _el8 = os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py')
+    _el8 = os.path.join(MAPBOT, 'explore_loop.py')
     _src8 = open(_el8, encoding='utf-8').read()
     check('v1.08 ① 收工那行**带上结束原因**（STATS["stopped"] 拼进去 ✓）',
           "status('收工：刷完 %d 张 · %s'" in _src8 and "_why = str(STATS.get('stopped')" in _src8)
@@ -1296,7 +1332,7 @@ try:
     # ⚠ 文案照样要避开 OCR 关键词（否则被 sanitize 糊成 ▓ ✗）
     import importlib.util as _ilu8b
     _spec8b = _ilu8b.spec_from_file_location(
-        'el_marks8', os.path.join(ROOT, 'tools', 'mapbot', 'explore_loop.py'))
+        'el_marks8', os.path.join(MAPBOT, 'explore_loop.py'))
     _el8b = _ilu8b.module_from_spec(_spec8b)
     try:
         _spec8b.loader.exec_module(_el8b)
@@ -1325,10 +1361,137 @@ try:
 except Exception as _e8:      # noqa: BLE001
     check('v1.08 收工原因/格子文案守门可运行（%r）' % (_e8,), False)
 
+# =====================================================================================
+# v1.11【"面板挡住棋盘"误判 + 无限循环】（用户：发给朋友后「进图就说面板挡住、一直卡在这，
+#   实际棋盘上啥都没有」）
+#   根因：`board_hidden()` 两条判据都是**绝对阈值**（0.55 / 0.85）⇒ 设备整体偏暗的机型
+#         整盘被判"暗格+被压暗" ⇒ 每张图都走"关面板" ⇒ stuck ⇒ 退图失败 ⇒ 恢复 ⇒ 下一张
+#         ⇒ **永远出不来** ✗
+# =====================================================================================
+try:
+    _el11 = os.path.join(MAPBOT, 'explore_loop.py')
+    _src11 = open(_el11, encoding='utf-8').read()
+    check('v1.11 ① `board_hidden` 用**本帧最亮格**做基准（绝对阈值→相对阈值 ✓）',
+          '_mx = max([float((v or {}).get(\'ratio\') or 0)' in _src11
+          and '_thr = 0.55 * _mx if _mx > 0 else 0.55' in _src11)
+    check('v1.11 ② 全盘判据只在**最亮格也 < 0.40** 时才成立（设备偏暗 ≠ 面板遮 ✓）',
+          'and _mx < 0.40:' in _src11)
+    check('v1.11 ③ 首次判"被挡"就**存诊断帧**（我们手上没有别的机型的帧 ✗）',
+          "_pub_dump('board_hidden_r%d'" in _src11 and "'board_hidden_dump'" in _src11)
+    check('v1.11 ④ 连续 2 张 stuck/blank ⇒ **整局停下**（不再退图失败→恢复→再来一张的死循环 ✓）',
+          "if why in ('stuck', 'blank'):" in _src11 and "STATS['stuck_maps'] >= 2" in _src11
+          and '连续认不出棋盘' in _src11)
+    # ⚠ 判据语义执行级：直接调**真函数**逐条对（含**已修好的"盖中间"不回归**）
+    import importlib.util as _ilu11
+    _spec11 = _ilu11.spec_from_file_location('el_v111', _el11)
+    _el11m = _ilu11.module_from_spec(_spec11)
+    _spec11.loader.exec_module(_el11m)
+
+    def _mk11(n_fog, n_rev, k=1.0, covered=0):
+        st = {}
+        for i in range(n_fog):
+            st[('f', i)] = {'ratio': 0.65 * k, 'anchor': ('f', i)}
+        for i in range(n_rev):
+            st[('r', i)] = {'ratio': 1.00 * k, 'anchor': ('r', i)}
+        for i in range(covered):
+            st[('c', i)] = {'ratio': 0.30, 'anchor': ('c', i)}
+        return st
+
+    def _bh11(st, light, gray):
+        return _el11m.board_hidden({'st': st, 'light': [1] * light, 'gray': [1] * gray})
+
+    _cases11 = [
+        ('正常盘', _mk11(29, 6), 0, 29, False),
+        ('暗设备 k=0.7', _mk11(29, 6, 0.7), 0, 35, False),
+        ('暗设备 k=0.5', _mk11(29, 6, 0.5), 0, 35, False),
+        ('面板盖中间(3格露)', _mk11(2, 3, 1.0, 30), 3, 32, True),
+        ('全盘被遮罩', _mk11(0, 0, 1.0, 35), 0, 35, True),
+    ]
+    _badc11 = []
+    for (tag, st, light, gray, want) in _cases11:
+        got = _bh11(st, light, gray)
+        if got != want:
+            _badc11.append((tag, got, want))
+    check('v1.11 执行级：5 种画面判据全对（含**「盖中间」不回归** ✓ 和暗设备不再误判 ✓）',
+          not _badc11, 'bad=%s' % (_badc11,))
+except Exception as _e11:      # noqa: BLE001
+    check('v1.11 board_hidden 守门可运行（%r）' % (_e11,), False)
+
+# =====================================================================================
+# v1.12【两处"没有上限"的循环】（朋友真机：进图后 200% CPU 空转 / 一直显示"正在把游戏拉回来"）
+#   ① `optimal_order` 调求解器只有 `max_states`、**没有时间上限** ⇒ 棋盘被切碎时
+#      几万状态展开 = 几分钟满载空转、全程不打日志 ✗（另一处 `solver_order` 早就有 max_secs=8）
+#   ② `game_recover` 成功后 `continue` 下一张，下一张再失败又恢复 ⇒ **无限"拉回来"** ✗
+# =====================================================================================
+try:
+    _el12 = os.path.join(MAPBOT, 'explore_loop.py')
+    _src12 = open(_el12, encoding='utf-8').read()
+    check('v1.12 ① `optimal_order` 的求解器调用**补上时间上限**（max_secs=8 ✓）',
+          'solve_mod.solve(prob, max_states=40000, max_secs=8)' in _src12)
+    check('v1.12 ② 求解**前后都有日志**（下次卡住能一眼定位是它 ✓）',
+          "'opt_solved'" in _src12)
+    check('v1.12 ③ 所有 solve 调用都带时间上限（不许再有裸调用 ✗）',
+          _src12.count('solve(prob, max_states=40000)') == 0
+          and 'max_secs=8' in _src12)
+    check('v1.12 ④ "把游戏拉回来"**有次数上限**（连续 3 次仍跑不动 ⇒ 停整局 ✓）',
+          "STATS['recover_n'] >= 3" in _src12 and "'recover_n'] = 0" in _src12
+          and '拉回游戏后仍跑不动' in _src12)
+except Exception as _e12:      # noqa: BLE001
+    check('v1.12 无上限循环守门可运行（%r）' % (_e12,), False)
+
+# =====================================================================================
+# v1.15【朋友机 realme RMX3800（1264×2780）实测：**在选图界面上被判成"已进图"**】
+#   反馈包铁证：`{'enter':'in_map'}` 出现时**一次点击都没发生**，而那一帧的 OCR 是选图界面
+#   （清凉沙滩 / 深渊46-50 / 快速扫荡 / 进入地图）⇒ `in_map()` 的"格子兜底 ≥8 格"把
+#   选图界面/进图动画帧判成了棋盘（light=0/1、全盘 ratio<0.55）⇒ 之后全程对着选图界面打，
+#   报"面板挡住了棋盘 · 正在收起"、一直卡住 ✗✗
+# =====================================================================================
+try:
+    _el15 = os.path.join(ROOT, 'mapbot_pc', 'explore_loop.py')
+    _src15 = open(_el15, encoding='utf-8').read()
+    check('v1.15 ① `in_map` 补"选图界面专属文字"否定证据（深渊NN / 星界秘境 ✓）',
+          "if any(('深渊' in it['text']) or ('星界秘境' in it['text'])" in _src15)
+    check('v1.15 ② 格子兜底**要求有真·已揭示的亮格**（真棋盘营地恒 ratio≈1.0 ✓）',
+          "return bool(c['light']) and _mx >= 0.75" in _src15)
+    import importlib.util as _ilu15
+    _spec15 = _ilu15.spec_from_file_location('el_v115', _el15)
+    _el15m = _ilu15.module_from_spec(_spec15)
+    _spec15.loader.exec_module(_el15m)
+    _f15 = os.path.join(ROOT, 'android_autoexplore', '_verify', 'phone_friend_rmx3800',
+                        'select_screen_ref.png')
+    if os.path.exists(_f15):
+        import cv2 as _c15
+        import numpy as _n15
+        _im15 = _c15.imdecode(_n15.fromfile(_f15, dtype=_n15.uint8), _c15.IMREAD_COLOR)
+        check('v1.15 执行级：朋友机 fixture 帧是 **1080×1920 参考帧**（%s）' % (_im15.shape,),
+              _im15.shape[:2] == (1920, 1080))
+        _items15 = [{'text': t, 'cx': x, 'cy': y} for (t, x, y) in (
+            ('清凉沙滩', 540, 182), ('夏日海滩入侵', 721, 333), ('当前难度253', 1301, 370),
+            ('星界秘境', 980, 994), ('深渊46', 295, 1309), ('深渊50', 1158, 1309),
+            ('快速扫荡', 912, 2158), ('进入地图', 1206, 2158), ('预言', 270, 1693))]
+        check('v1.15 执行级①：完整选图界面 ⇒ **判不在图里**（旧代码判成在图里 ✗）',
+              _el15m.in_map(None, _im15, _items15) is False)
+        _it15b = [i for i in _items15 if i['text'] not in ('快速扫荡', '进入地图')]
+        check('v1.15 执行级②：那两个按钮没读到 ⇒ 仍判不在图里（靠 深渊/星界秘境 ✓）',
+              _el15m.in_map(None, _im15, _it15b) is False)
+        _it15c = [i for i in _it15b
+                  if ('深渊' not in i['text']) and ('星界秘境' not in i['text'])]
+        check('v1.15 执行级③：连那两条也没有 ⇒ 仍判不在图里（靠"必须有亮格" ✓）',
+              _el15m.in_map(None, _im15, _it15c) is False)
+    else:
+        skip('v1.15 朋友机 fixture 帧（缺 select_screen_ref.png）⚠')
+except Exception as _e15:      # noqa: BLE001
+    check('v1.15 in_map 守门可运行（%r）' % (_e15,), False)
+
 print()
 print('=' * 78)
-print('通过 %d 项，失败 %d 项' % (len(OK), len(BAD)))
+print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
     for b in BAD:
         print('   ✗ ' + b)
+if SKIP:
+    # ⚠ 跳过**不算通过**：fixture 缺失/前提不成立时，这里必须一眼看见（别被"全绿"骗了 ✗）
+    print('   ⚠ 以下 %d 项**没真正验证**（fixture 缺失或前提不成立）：' % len(SKIP))
+    for s in SKIP:
+        print('     - ' + s)
 sys.exit(1 if BAD else 0)

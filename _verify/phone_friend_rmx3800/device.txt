@@ -1,0 +1,36 @@
+MGAS 反馈包
+生成时间: 2026-10-01 05:52:50
+应用版本: 1.14 (versionCode 114)
+机型: realme RMX3800
+系统: Android 16 (API 36)
+屏幕: 1264x2780  dpi=560  density=3.5
+悬浮条: overlay: on
+expanded: true  logMode: true  logForce: null  state: run
+stateForce: -（跟随真实）
+frame: 有（截图权限已授）
+secure: false（必须是 false，见硬约束②）
+gravity: 8388691
+xy(dev,离底): 23,119
+k: 1.1704  设备屏 1264x2780
+bubble: ▶ MGAS
+bar(dev): 1120x113  ⇒ 顶边(参考 y)=1722 底边(参考 y)=1818  （顶边必须 ≥ 1722）
+blankRect(dev): [23,2548][1143,2661]
+barOnScreen: x 23~1143  y 2548~2661
+涂平记账: 涂平前该处亮度 均值=150.0 最小=0 最大=255 极差=255（采样31920） rect=23,2548-1143,2661
+logW(dev): 1113
+logShown: 画面认不出 · 正在收起面板
+logRoll: roll=1.0000 本句=14字/423px 视口=1063px 行高=40 上一句=无 新句y=0 旧句y=-40 ｜画面认不出 · 正在收起面板｜-
+action: 画面认不出 · 正在收起面板
+logBack: 0  buf=8
+--- 最近 8 条「当前行动」---
+  ▶ 启动 · 正在连游戏
+  已启动 · 体力下限 25 ｜ 自动补给关（体力不够会直接收工，建议开上）
+  开跑（1 张）· 正在找游戏画面
+  第 1 张图 · 准备进图
+  第 1 张图 · 已进图，正在看棋盘
+  面板挡住了棋盘 · 正在收起
+  面板挡住了棋盘 · 正在收起
+  画面认不出 · 正在收起面板
+
+
+（这份文件 + mgas_log.txt + board_hidden_*.png 就是定位问题所需的东西 ✓）

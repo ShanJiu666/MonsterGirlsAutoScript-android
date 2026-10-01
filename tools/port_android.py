@@ -16,8 +16,22 @@
 import os
 import re
 
-SRC = r'D:\幻想少女公会\tools\mapbot'
-DST = r'D:\幻想少女公会\android_autoexplore\app\src\main\python'
+# ⭐⭐⭐ 2026-10-01 **MGAS 已从「幻想少女公会」仓库分离**（搬到 D:\MGAS）：
+#   ⇒ 这里的源/目标**不能再写死仓库绝对路径** ✗（原来是 D:\幻想少女公会\...）
+#   现在按**本脚本自身位置**推算（MGAS 里 `android_autoexplore/tools/` 与 `mapbot_pc/` 同级），
+#   并允许环境变量覆盖（想把 PC 源指回旧仓库做对拍时：设 MGAS_MAPBOT_SRC 即可 ✓）
+_HERE = os.path.dirname(os.path.abspath(__file__))              # …/android_autoexplore/tools
+PROJ = os.path.dirname(_HERE)                                    # …/android_autoexplore
+MGAS_ROOT = os.path.dirname(PROJ)                                # …（MGAS 根）
+SRC = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(MGAS_ROOT, 'mapbot_pc')
+DST = os.environ.get('MGAS_PY_DST') or os.path.join(PROJ, 'app', 'src', 'main', 'python')
+if not os.path.isdir(SRC):
+    # 兜底：分离前的老布局（脚本还在仓库里、PC 源在 tools/mapbot）
+    _old = os.path.join(MGAS_ROOT, 'tools', 'mapbot')
+    if os.path.isdir(_old):
+        SRC = _old
+    else:
+        raise SystemExit('找不到 mapbot PC 源：%s（可用环境变量 MGAS_MAPBOT_SRC 指定）' % SRC)
 
 # 需要移植的纯逻辑模块（依赖只有 cv2 / numpy / 标准库）
 MODULES = [

@@ -163,7 +163,13 @@ def is_target(name, sid, marks=None, cfg=None):
     用户口径「把有弹窗的地块拉黑，暂时不要点」，黑名单优先级最高 ✓）
     """
     d = cfg or current()
-    if is_blocked(name):
+    # ⚠⚠ 2026-10-01 修**静默丢配置**：`is_blocked(name, cfg)` 本来支持 cfg 形参，
+    #   这里却只传 name ⇒ 它内部回落到 `enabled(k, None)` → `current()` → **模块级 _CACHE**
+    #   ⇒ 显式传入的 `cfg`（多开/多账号隔离、测试回放、GUI 预览）在这条判据上**被忽略**。
+    #   实测：缓存里「旅行商人」=OFF、显式 cfg 里 =ON 时，`is_target(...)` 仍返回 False
+    #        （而 `enabled(name, cfg)` 本身是对的）。
+    # ⇒ 传下去 d，让 is_blocked 与本函数其余判据用**同一份**配置 ✓
+    if is_blocked(name, d):
         return False
     if marks:
         for m in marks:

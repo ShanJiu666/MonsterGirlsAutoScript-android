@@ -30,8 +30,23 @@
 """
 import os
 
-SRC = r'D:\幻想少女公会\tools\mapbot\explore_loop.py'
-DST = r'D:\幻想少女公会\android_autoexplore\app\src\main\python\explore_loop.py'
+# ⭐⭐⭐ 2026-10-01 **MGAS 已从「幻想少女公会」仓库分离**（搬到 D:\MGAS）
+#   ⇒ 源/目标按**本脚本位置**推算（不再写死仓库绝对路径 ✗），可用环境变量覆盖：
+#     MGAS_MAPBOT_SRC = PC 端 mapbot 目录（默认 <MGAS>/mapbot_pc）
+#     MGAS_PY_DST     = Android python 目录（默认 <MGAS>/android_autoexplore/app/src/main/python）
+_TOOLS = os.path.dirname(os.path.abspath(__file__))              # …/android_autoexplore/tools
+_PROJ = os.path.dirname(_TOOLS)                                  # …/android_autoexplore
+_MGAS = os.path.dirname(_PROJ)                                   # …（MGAS 根）
+_SRC_DIR = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(_MGAS, 'mapbot_pc')
+if not os.path.isdir(_SRC_DIR):
+    _old = os.path.join(_MGAS, 'tools', 'mapbot')                # 分离前老布局兜底
+    if os.path.isdir(_old):
+        _SRC_DIR = _old
+    else:
+        raise SystemExit('找不到 mapbot PC 源：%s（可用环境变量 MGAS_MAPBOT_SRC 指定）' % _SRC_DIR)
+_PY_DIR = os.environ.get('MGAS_PY_DST') or os.path.join(_PROJ, 'app', 'src', 'main', 'python')
+SRC = os.path.join(_SRC_DIR, 'explore_loop.py')
+DST = os.path.join(_PY_DIR, 'explore_loop.py')
 
 SHIM = '''
 # ─────────────────────────────────────────────────────────────────────────────

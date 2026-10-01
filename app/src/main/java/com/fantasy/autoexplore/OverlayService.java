@@ -165,7 +165,7 @@ public class OverlayService extends Service {
     /** 下行：气泡 + 张数 + ▶ + ■ + ✕ */
     private LinearLayout btnRow;
     private MarqueeView tvLog;
-    private TextView bubble, btnCount, btnStart, btnStop, btnClose;
+    private TextView bubble, btnCount, btnStart, btnStop, btnClose, btnFb;
     /** 展开（true）时可见按钮 + 日志行；收起（false）只剩气泡 */
     private boolean expanded = false;
     /** 日志行是否要显示（运行中自动 true；长按气泡可手动强开/强关） */
@@ -606,6 +606,26 @@ public class OverlayService extends Service {
             setExpanded(false);
         });
         btnRow.addView(btnClose);
+
+        // ⭐⭐⭐ 2026-10-01 v1.14【反馈】用户口径：「能不能加个按钮能更方便让朋友发他的问题给我」
+        //   一点 = 把 日志 + 机型信息 + 现场帧 打成 zip 并**弹系统分享面板**（微信/QQ 直接发）✓
+        //   ⚠ 按钮文案走 `sanitize()`：本工程的 OCR 关键词表里没有「反馈」⇒ 不会被糊成 ▓ ✓
+        //   ⚠ 放最右下（✕ 之后）：不容易误触（它只多打一个包，不改变任何运行状态 ✓）
+        btnFb = chip("反馈", 0xFFFFD79E);
+        btnFb.setOnClickListener(v -> {
+            flash(btnFb);
+            keepAlive();
+            AppLog.i("[ovl] 点「反馈」⇒ 打包日志 + 机型信息 + 现场帧");
+            final Context c = getApplicationContext();
+            new Thread(() -> {
+                try {
+                    Feedback.collectAndShare(c);
+                } catch (Throwable t) {
+                    AppLog.i("[ovl] 反馈异常：" + t);
+                }
+            }, "ovl-feedback").start();
+        });
+        btnRow.addView(btnFb);
 
         // ── ② 日志行（**在按钮上面**，整行全宽、自己画、上下滚动）──
         //    ⭐ 2026-09-29 用户口径：「要在按钮上面啊，并且是**黑色字**」
