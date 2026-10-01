@@ -2847,7 +2847,7 @@ def dice_gate(marks, exact, win_streak, result_streak, on_result, diced=False):
     return None, 'waiting_result_panel'
 
 
-def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
+def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None):
     """等战斗结算。⚠ 用户 09-25：战斗胜利不会超过 5s —— 超过很久还没结算就是没打起来，
     别死等（原来 180s，白耗时间）。
 
@@ -2856,6 +2856,9 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
     - 画面**连续 ~1 秒完全不动**才算「该看一眼了」（`need=15` ≈ 0.9s@0.06）
       ⚠ 一开始设成 3 帧就被战斗动画的**每次停顿**触发 → 一场战斗 OCR 十几次（实测 22 次/35s）
     - 再叠加**最小间隔 3 秒**，最多 8 秒兜底一次 ⇒ 一场战斗通常只 OCR 2~4 次
+
+    ⭐ 2026-10-02 v1.23：`state` / `rc` = 本局循环状态 + 这一格的坐标，用于**跨路径防重复摇色子**
+    （结算面板也可能被下一轮的 `popups()` 看到 ⇒ 两条路径都摇就白花幸运草 ✗）
     """
     say('       · 战斗中…')
     # ⭐ v1.08 用户口径：战斗期间悬浮条也要写清"在打什么格子"（多种标记全写 ✓）
@@ -2930,36 +2933,45 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None):
         # ⭐⭐ v1.22：判据走 `dice_gate()`（纯函数 ✓），且**无论摇不摇都留一条日志** ——
         #   用户那个「不使用幸运草」的包就是因为"跳过时零日志"而无法自证 ✗
         if not diced and 'recommend' in list(marks):
-            _act, _why = dice_gate(marks, _ex, win_streak, result_streak, on_result, diced)
-            if _act is None and result_streak < 2:
-                time.sleep(0.6)                     # 复核一帧（不关面板，等它稳定）
-                b.snap('battle_wait2')
-                it3 = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
-                _w3 = bool(fb(it3, L['win']))
-                if _w3 and (bool(fb(it3, *L['desc'])) or bool(bottom_close(it3))):
-                    result_streak += 1
-                    win_streak += 1
-                    items = it3
-                else:
-                    result_streak = 0
-                    win_streak = (win_streak + 1) if _w3 else 0
-                _act, _why = dice_gate(marks, _ex, win_streak, result_streak,
-                                       on_result, diced)
-            if _act == 'roll':
+            if isinstance(state, dict) and rc is not None and state.get('diced_rc') == rc:
+                # ⭐ v1.23：这一格的结算面板**已经摇过了**（多半是 `popups()` 那条路径摇的）
+                #   ⇒ 别再摇（每次重投都要花 1 个幸运草 ✗）
                 diced = True
-                if _why == 'win_only':
-                    say('       · 结算面板文字认不出，但连读两帧「战斗胜利」⇒ 照常试摇色子 ✓')
-                    log.append({'dice': 'win_only_attempt', 'win_streak': win_streak,
-                                'marks': list(marks or []), 'exact': list(_ex or [])})
-                handle_dice(b, log, items)
-                items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
-            elif not _dice_skip_logged:
-                # ⭐ 这一场"想摇却没摇"的**唯一证据**：连判据的输入一起记下来 ✓
-                _dice_skip_logged = True
-                log.append({'dice_skip': _why, 'win': bool(win), 'on_result': bool(on_result),
-                            'result_streak': result_streak, 'win_streak': win_streak,
-                            'marks': list(marks or []), 'exact': list(_ex or []),
-                            'texts': [(i.get('text') or '')[:12] for i in items][:24]})
+                log.append({'dice_skip': 'already_diced_this_cell', 'rc': list(rc)})
+            else:
+                _act, _why = dice_gate(marks, _ex, win_streak, result_streak, on_result, diced)
+                if _act is None and result_streak < 2:
+                    time.sleep(0.6)                     # 复核一帧（不关面板，等它稳定）
+                    b.snap('battle_wait2')
+                    it3 = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+                    _w3 = bool(fb(it3, L['win']))
+                    if _w3 and (bool(fb(it3, *L['desc'])) or bool(bottom_close(it3))):
+                        result_streak += 1
+                        win_streak += 1
+                        items = it3
+                    else:
+                        result_streak = 0
+                        win_streak = (win_streak + 1) if _w3 else 0
+                    _act, _why = dice_gate(marks, _ex, win_streak, result_streak,
+                                           on_result, diced)
+                if _act == 'roll':
+                    diced = True
+                    if _why == 'win_only':
+                        say('       · 结算面板文字认不出，但连读两帧「战斗胜利」⇒ 照常试摇色子 ✓')
+                        log.append({'dice': 'win_only_attempt', 'win_streak': win_streak,
+                                    'marks': list(marks or []), 'exact': list(_ex or [])})
+                    handle_dice(b, log, items)
+                    if isinstance(state, dict) and rc is not None:
+                        state['diced_rc'] = rc          # ⭐ v1.23：记账（防另一条路径重复摇 ✓）
+                    items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
+                elif not _dice_skip_logged:
+                    # ⭐ 这一场"想摇却没摇"的**唯一证据**：连判据的输入一起记下来 ✓
+                    _dice_skip_logged = True
+                    log.append({'dice_skip': _why, 'win': bool(win),
+                                'on_result': bool(on_result),
+                                'result_streak': result_streak, 'win_streak': win_streak,
+                                'marks': list(marks or []), 'exact': list(_ex or []),
+                                'texts': [(i.get('text') or '')[:12] for i in items][:24]})
         # ⭐ 2026-09-28 提速（P5）：真结算面板上把「自动跳过」勾上（只一次，已勾不点），
         #   之后的战斗跳过动画直接进结算 —— 战斗动画是单图最大动画开销 ✓
         if win and on_result and not _AUTO_SKIP['done']:
@@ -3473,26 +3485,7 @@ def popups(b, items, log, ctx=None):
     #   ⇒ **boss 没打就退图** ✗（用户 2026-09-26 报「第一把没打到 boss 关就退了」）
     #   ⇒ 改成和 `wait_end()` 里 `on_result` **同一套判据**（那边早就修过了 ✓）：
     #      ①（【正面】/【负面】 and 胜负）  ② 底部「关闭」  ③ 「回放战斗」
-    _res = bool(fb(items, *L['desc']) and fb(items, L['win'], L['lose'])) \
-        or bool(bottom_close(items)) or bool(fb(items, '回放战斗'))
-    if _res:
-        # 结算面板：把所有按钮文字落盘（含幸运草/摇色子相关），供实现摇色子用
-        log.append({'popup': 'result_panel',
-                    'buttons': [{'t': i['text'], 'cx': i['cx'], 'cy': i['cy']}
-                                for i in items if i['cy'] > LAYOUT.sy(600) and len(i['text']) <= 8],
-                    'texts': [i['text'] for i in items][:30]})
-        cl = bottom_close(items)
-        if cl:
-            _tap(b, cl['cx'], cl['cy'], wait=2.5)
-            log.append({'popup': 'result_closed', 'at': (cl['cx'], cl['cy'])})
-            return 'handled'
-        # ⭐ 确实认到是结算面板却没量到「关闭」⇒ 交给 universal_close（内部按战斗面板
-        #   点实测的关闭坐标 (577,1439)，**不会点开始冒险** ✓）——别再 return 'none' 干耗 ✗
-        universal_close(b, log, items=items, where='result_no_close_btn')
-        log.append({'popup': 'result_closed_fixed'})
-        return 'handled'
-    img = b.img()
-
+    # ⭐ 刚点那格的标记（本格精确命中优先；没有就取 ±1 邻域最近的）
     def near():
         if not tapped:
             return []
@@ -3508,6 +3501,57 @@ def popups(b, items, log, ctx=None):
             if d <= 1 and d < best:
                 best, hit = d, v['marks']
         return list(hit)
+
+    _res = bool(fb(items, *L['desc']) and fb(items, L['win'], L['lose'])) \
+        or bool(bottom_close(items)) or bool(fb(items, '回放战斗'))
+    if _res:
+        # 结算面板：把所有按钮文字落盘（含幸运草/摇色子相关），供实现摇色子用
+        log.append({'popup': 'result_panel',
+                    'buttons': [{'t': i['text'], 'cx': i['cx'], 'cy': i['cy']}
+                                for i in items if i['cy'] > LAYOUT.sy(600) and len(i['text']) <= 8],
+                    'texts': [i['text'] for i in items][:30]})
+        # ⭐⭐⭐ 2026-10-02 v1.23【**用户报「遇见大拇指格子不使用幸运草」的真根因**】
+        #   真机实测（Redmi 1280×2772 / v1.22 实跑日志）：
+        #     ① r3 点大拇指格 (1,6) → 弹「战斗事件」面板 → 点「战斗」→ `wait_end` 等 5 秒
+        #        没看到战斗（`{'battle':'no_battle_in_5s'}` / `not_started` / `blocked`）
+        #     ② **下一轮** r4 才看到结算面板 ⇒ 走的是**本分支**（`popup: result_panel`）
+        #     ③ 本分支以前**只关面板、从不摇色子**（`handle_dice` 只挂在 `wait_end` 里 ✗）
+        #     ⇒ 大拇指标记白丢、一次幸运草都没花 = 用户看到的现象 ✗✗
+        #   （`no_battle_in_5s` 在真机上很常见：点完「战斗」到真正开打 >5 秒）
+        #   修法：**结算面板落在大拇指格上 ⇒ 先摇色子，再关**（摇色子按钮就在这块面板上 ✓）
+        #   ⚠ 防重复：`st['diced_rc']` 记这一格已摇过（两条路径都摇 = 白花幸运草 ✗）
+        _state = ctx.get('flags') if isinstance(ctx.get('flags'), dict) else {}
+        _rc, _mk_here = None, []
+        if tapped:
+            try:
+                _rc = cell_of(tapped[0], tapped[1])
+                _mk_here = near()
+            except Exception:       # noqa: BLE001
+                _rc, _mk_here = None, []
+        if 'recommend' in _mk_here and _state.get('diced_rc') != _rc:
+            say('       · 结算面板落在大拇指格(%s)上 ⇒ **先摇色子再关**（v1.23）'
+                % ('%d,%d' % _rc if _rc else '?'))
+            status('摇骰子 · 大拇指格')
+            log.append({'popup': 'result_dice', 'rc': list(_rc) if _rc else None,
+                        'marks': _mk_here})
+            try:
+                handle_dice(b, log, items)
+            except Exception as _ed:      # noqa: BLE001
+                log.append({'popup': 'result_dice_err', 'e': repr(_ed)[:80]})
+            if _rc is not None:
+                _state['diced_rc'] = _rc
+            items = b.ocr(tag='popup_dice')
+        cl = bottom_close(items)
+        if cl:
+            _tap(b, cl['cx'], cl['cy'], wait=2.5)
+            log.append({'popup': 'result_closed', 'at': (cl['cx'], cl['cy'])})
+            return 'handled'
+        # ⭐ 确实认到是结算面板却没量到「关闭」⇒ 交给 universal_close（内部按战斗面板
+        #   点实测的关闭坐标 (577,1439)，**不会点开始冒险** ✓）——别再 return 'none' 干耗 ✗
+        universal_close(b, log, items=items, where='result_no_close_btn')
+        log.append({'popup': 'result_closed_fixed'})
+        return 'handled'
+    img = b.img()
 
     # ⭐ 敌方预览面板「偶遇强敌 / 遭遇强敌」（2026-09-25 用户报卡在这里）：
     #   面板：标题(542,243) + 右上角 X(988,244) + 敌人名 + 底部「邀请挑战」(297,1587)
@@ -3844,7 +3888,7 @@ def popups(b, items, log, ctx=None):
         say('       · 开打 · %s（标记 %s）' % (_desc_open, mk or ['拦路']))
         status('开打 · %s' % _desc_open)
         # ⭐ 本格标记（统计/摇色子用 ✓）：只取刚点那格的标记，不含 ±1 邻域 ✓
-        _exm = None
+        _exm, _rc = None, None          # ⚠ v1.23：`_rc` 必须先初始化（下面 may 不进 try 体 ✗）
         try:
             if tapped:
                 _rc = cell_of(tapped[0], tapped[1])
@@ -3852,7 +3896,8 @@ def popups(b, items, log, ctx=None):
                 _exm = list(_mv.get('marks') or []) if _mv else []
         except Exception:       # noqa: BLE001
             _exm = None
-        wait_end(b, log, marks=mk, exact_marks=_exm)
+        wait_end(b, log, marks=mk, exact_marks=_exm,
+                 state=ctx.get('flags'), rc=_rc)     # ⭐ v1.23：带格号，防两条路径重复摇 ✓
         # ⚠ 2026-09-27 用户要求：**去掉**"战斗成功后下一轮先试点目标格" ✗
         #   （原来会 try_targets=True ⇒ 下一轮把目标排最前 ✓ 用户不要这个行为 ✗）
         return 'battle_clear' if not mk else 'battle'
@@ -3928,7 +3973,7 @@ def popups(b, items, log, ctx=None):
                 # ⭐ v1.08：悬浮条同样按中文写清是什么格子（多种标记全写 ✓）
                 status('开打 · %s' % tile_phrase(_mk2))
                 # ⭐ 2026-09-27：本格标记（不含 ±1 邻域 ✗）⇒ 防"邻格大拇指"白摇色子 ✓
-                _exm2 = None
+                _exm2, _rc2 = None, None      # ⚠ v1.23：`_rc2` 必须先初始化（见上）
                 try:
                     if tapped:
                         _rc2 = cell_of(tapped[0], tapped[1])
@@ -3936,7 +3981,8 @@ def popups(b, items, log, ctx=None):
                         _exm2 = list(_mv2.get('marks') or []) if _mv2 else []
                 except Exception:       # noqa: BLE001
                     _exm2 = None
-                wait_end(b, log, marks=_mk2, exact_marks=_exm2)
+                wait_end(b, log, marks=_mk2, exact_marks=_exm2,
+                         state=ctx.get('flags'), rc=_rc2)   # ⭐ v1.23：同上 ✓
                 # ⚠ 2026-09-27 用户要求：不再设 try_targets ✓（战斗后不抢着点目标 ✓）
                 return 'battle_clear' if not _mk2 else 'battle'
             # 开不起来也不能像以前那样干耗着 ⇒ 强制脱困

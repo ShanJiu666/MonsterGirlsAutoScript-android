@@ -2438,6 +2438,63 @@ if not diced and 'recommend' in list(marks):
   正样本现在是 `_verify/phone_friend_nubia_nx729j/`（boss 近失）等 ✓
 - ⏳ `进不去图` 的 `no_plan`/`blank_board` 通路：本次只确认"标记扫不到会直接导致它"，
   没有独立的第二根因证据 ⇒ 等标记那条结论定了再看
+- ✅ **已由 §6.48 定论**（v1.22 的证据链当天就抓到了真根因 ⇒ 见下一节）
+
+### 6.48 ⭐⭐⭐ v1.23：**真机实跑抓到「遇见大拇指格不摇色子」的真根因**（2026-10-02）
+
+v1.22 的证据链当场就派上用场了：装到用户手机（Redmi 1280×2772）跑了一把，
+**有大拇指格、没摇色子** —— 而且这回日志把链路记得清清楚楚。
+
+#### ① 真机日志（`_tmpman/live_122.log`，v1.22 实跑）
+
+```
+r0  marks = {'4,4': ['boss'], '1,6': ['recommend']}      ← 标记识别完全正常 ✓
+r0  {'popup': 'fight_panel', 'cell_marks': ['boss'],  'entry': 'dlg_btn'}
+r0  {'battle': 'no_battle_in_5s', ...} / {'battle': 'not_started'} / {'battle': 'blocked'}
+r2  {'popup': 'result_panel', ... '关闭' (577,1440) ...} → {'popup': 'result_closed'}
+r3  {'popup': 'fight_panel', 'cell_marks': ['recommend'], 'entry': 'dlg_btn'}   ← 大拇指格 (1,6)
+r3  {'battle': 'no_battle_in_5s'} / {'not_started'} / {'blocked'}
+r4  {'popup': 'result_panel', ...} → {'popup': 'result_closed'}   ← **一条 dice 日志都没有** ✗
+r6  {'marks_dropped_panel': '1,6', 'marks': ['recommend']} → targets_done(gray_left 21) → 退图
+```
+
+#### ② 根因：**结算面板走了另一条路，而那条路上没有摇色子**
+
+- `handle_dice()` 只挂在 **`wait_end()`** 里（点「战斗」后等结算那条路）；
+- 真机上点完「战斗」到**真正开打 >5 秒**（`no_battle_in_5s`）⇒ `wait_end` 先放弃了；
+- 战斗照样打完 ⇒ **下一轮**才看到结算面板 ⇒ 被 **`popups()` 的 `result_panel` 分支**接走，
+  而那个分支**只关面板、从不摇色子**（作者当年只在注释里写了"供实现摇色子用"，
+  实现没跟上 ✗）
+- ⇒ **大拇指标记白丢、一次幸运草都没花** = 用户报的「遇见大拇指格子不使用幸运草」✗✗
+
+⚠ 顺带澄清：这一台**标记识别是好的**（`boss`/`recommend` 都扫到了）——
+§6.47 那条"标记近失"是**另一台 nubia** 的问题，两个都要修，但不是一个病。
+
+#### ③ 修法
+
+1. **`popups()` 的结算面板分支：落在大拇指格上 ⇒ 先摇色子再关**
+   （摇色子按钮就在这块面板上；`near()` 提到分支之前，只认**本格**标记 ⇒ 防邻格白摇 ✓）
+2. **跨路径防重复**：`st['diced_rc']` 记"这一格已摇过"，`wait_end` 也带格号入参
+   ⇒ 同一格的结算面板不会被两条路径各摇一次（每次重投都要花 1 个幸运草 ✗）
+
+#### ④ 验收
+
+- **主门禁 307 → 314 项，通过 314 / 失败 0 / 跳过 1**（新增 ㊱ v1.23 七项）
+- 其中 ⑤⑥⑦ 是**执行级**：用假 bot 直接调真 `popups()` ——
+  - 大拇指格的结算面板 ⇒ 日志出 `{'popup': 'result_dice', ...}` 且真的进了 `handle_dice` ✓
+  - 摇完**仍然把面板关掉**（点 (577,1440)）✓、`st['diced_rc']` 记上 ✓
+  - **首领格**的结算面板不摇色子（只关，不回归）✓
+- 四个面板自检 exit 0
+- **产物**：`AutoExplore-v1.23-MGAS-修「大拇指格不摇色子」真根因（结算面板也要摇+跨路径防重复）-release.apk`
+  （`versionCode 123` / `versionName 1.23`）
+
+#### ⑤ 下一步
+
+- ⏳ **真机再跑一把有大拇指的图**：这次应该看到
+  `{'popup': 'result_dice', ...}` → `{'dice': 'panel'/'no_btn'/'got_recommend'}` →
+  `{'popup': 'result_closed'}`。若出 `no_btn`，说明这块面板上**没有**重投按钮
+  （= 奖励行本来没有可重投项，或按钮文字不在搜索带里）⇒ 拿那条日志再定 ✓
+- ⏳ §6.47 的**标记闸门标定**（偏暗机型）仍未做
 
 
 

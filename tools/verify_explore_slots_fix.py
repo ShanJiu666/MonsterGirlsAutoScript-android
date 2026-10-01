@@ -2221,7 +2221,100 @@ except Exception as _e22:       # noqa: BLE001
     check('v1.22 摇色子判据/标记近失守门可运行（%r）' % (_e22,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊱ PC 端提速层（fixed.py）—— **已移出本门禁**
+# ㊱ v1.23 ⭐⭐「遇见大拇指格子不使用幸运草」**真根因**（真机实跑抓到的）
+#   证据（Redmi 1280×2772 / v1.22 实跑日志，`_tmpman/live_122.log`）：
+#     r3 点大拇指格 (1,6) → 弹「战斗事件」面板 → 点「战斗」→ `wait_end` 等 5 秒没等到战斗
+#        （`{'battle':'no_battle_in_5s'}` → `not_started` → `blocked`）
+#     r4 **下一轮**才看到结算面板 ⇒ 走 `popups()` 的 `result_panel` 分支
+#     ⚠ 那个分支**只关面板、从不摇色子**（`handle_dice` 只挂在 `wait_end` 里 ✗）
+#     ⇒ 大拇指标记白丢、一次幸运草都没花 = 用户看到的现象 ✗✗
+#   修法：① `popups()` 的结算面板分支：**落在大拇指格上 ⇒ 先摇色子再关**
+#         ② `st['diced_rc']` 记账 ⇒ 两条路径不会为同一格重复摇（每次重投花 1 个幸运草 ✗）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊱ v1.23 修「遇见大拇指格不摇色子」真根因：结算面板也要摇（+跨路径防重复）')
+try:
+    _el23p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _src23 = open(_el23p, encoding='utf-8').read()
+    check('v1.23 ① 结算面板分支里**先摇色子再关**（`result_dice` 标记 ✓）',
+          "'popup': 'result_dice'" in _src23 and 'handle_dice(b, log, items)' in _src23)
+    check('v1.23 ② 只有**本格**是大拇指才摇（`near()` 提到分支之前，防邻格白摇 ✗）',
+          _src23.index('def near():') < _src23.index("'popup': 'result_dice'")
+          and "'recommend' in _mk_here" in _src23)
+    check('v1.23 ③ 跨路径防重复：`st[\'diced_rc\']`（两条路径都摇 = 白花幸运草 ✗）',
+          "_state.get('diced_rc') != _rc" in _src23
+          and "_state['diced_rc'] = _rc" in _src23
+          and "state['diced_rc'] = rc" in _src23
+          and "'already_diced_this_cell'" in _src23)
+    check('v1.23 ④ `wait_end(..., state=, rc=)` 两个调用点都带上了格号',
+          _src23.count("state=ctx.get('flags'), rc=") == 2)
+
+    import importlib.util as _ilu23
+    import numpy as _np23
+    _spec23 = _ilu23.spec_from_file_location('el_v123', _el23p)
+    _el23m = _ilu23.module_from_spec(_spec23)
+    _spec23.loader.exec_module(_el23m)
+
+    class _FakeBot(object):
+        """只够 `popups()` 跑完结算面板分支的假 bot（记录点击顺序 ✓）"""
+
+        def __init__(self, items):
+            self._items = items
+            self.taps = []
+            self.fast_ok = False
+            self.dev = 'fake'
+
+        def tap(self, x, y, wait=0.0):
+            self.taps.append((int(x), int(y)))
+            return True
+
+        def ocr(self, *a, **k):
+            return list(self._items)
+
+        def img(self):
+            return _np23.zeros((120, 120, 3), dtype=_np23.uint8)
+
+        def snap(self, *a, **k):
+            return None
+
+        def wait_stable(self, *a, **k):
+            return True
+
+    _items23 = [{'text': '关闭', 'cx': 577, 'cy': 1440}]
+
+    def _run23(marks_of_cell):
+        st = {'marks': {}}
+        _cell = _el23m.cell_center(1, 6)
+        markers = {(1, 6): {'marks': list(marks_of_cell), 'at': _cell, 'score': 0.95}}
+        ctx = {'marks': markers, 'tapped': _cell, 'flags': st, 'st': None,
+               'road': [], 'plain_road': [], 'plan_road': [], 'slots_free': 1,
+               'ev_tiles': [], 'tapped_sid': '', 'clear_fights': 0}
+        _bot = _FakeBot(_items23)
+        _log = []
+        _act = _el23m.popups(_bot, _items23, _log, ctx=ctx)
+        return _act, _bot, _log, st
+
+    _act23, _bot23, _log23, _st23 = _run23(['recommend'])
+    check('v1.23 ⑤ 执行级：大拇指格的结算面板 ⇒ 真的去摇色子（`result_dice` ✓）',
+          _act23 == 'handled'
+          and any(e.get('popup') == 'result_dice' for e in _log23 if isinstance(e, dict))
+          and any('dice' in e for e in _log23 if isinstance(e, dict)),
+          'act=%s log=%s' % (_act23, [e for e in _log23 if isinstance(e, dict)][:6]))
+    check('v1.23 ⑥ 执行级：摇完**仍然把面板关掉**（点 (577,1440) ✓）+ 记下已摇格',
+          (577, 1440) in _bot23.taps and _st23.get('diced_rc') == (1, 6),
+          'taps=%s diced_rc=%s' % (_bot23.taps, _st23.get('diced_rc')))
+    _act23b, _bot23b, _log23b, _st23b = _run23(['boss'])
+    check('v1.23 ⑦ 执行级：**首领格**的结算面板不摇色子（只关 ✓，不回归）',
+          _act23b == 'handled'
+          and not any(e.get('popup') == 'result_dice'
+                      for e in _log23b if isinstance(e, dict))
+          and (577, 1440) in _bot23b.taps and _st23b.get('diced_rc') is None,
+          'act=%s taps=%s' % (_act23b, _bot23b.taps))
+except Exception as _e23:       # noqa: BLE001
+    check('v1.23 结算面板摇色子守门可运行（%r）' % (_e23,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊲ PC 端提速层（fixed.py）—— **已移出本门禁**
 #   2026-10-01 晚「两端完全平行」：PC 端的固定锚点/模板快查是**PC 自己的**东西，
 #   手机端仓里**没有** fixed.py，也**不该**有 —— 在这里查它等于让手机端依赖 PC。
 #   ⇒ 这组检查搬到了 **PC 端仓**：`mapbot_pc/verify_gate.py`（PC 自己的门禁）。
