@@ -1,17 +1,27 @@
 # -*- coding: utf-8 -*-
-"""port_loop.py · 把 PC 端 `explore_loop.py` 整体移植到 Android
+"""port_loop.py · 把 PC 端 `explore_loop.py` 一次性快照到 Android
 
-为什么整体移植而不是重写
-------------------------
+⭐⭐⭐ 2026-10-01 起 **PC 端与手机端正式分开、平行独立开发**（用户决定）
+
+    两端是两个独立 git 仓、两份独立源码，`explore_loop.py` **各存一份、可以分叉**。
+    ⇒ 本脚本不是"每次改 PC 都必须重跑"的强制步骤，而是
+      「想把 PC 上的某个改动/修复搬到手机时，跑一次的搬运工具」。
+      手机端自己改的代码**不需要**回灌到 PC，也**不会**被本脚本主动覆盖
+      （只有你手动跑它时才会覆盖）。两端逻辑漂移是**允许的**。
+    ⚠⚠ 跑之前先 `git status app/src/main/python/explore_loop.py`：
+       本脚本是覆盖式写入，手机端已分叉的代码会被静默冲掉，没有合并。
+
+为什么当初是「整体移植而不是重写」
+----------------------------------
 `explore_loop` 是 4400 行、踩了几十轮真机坑才稳定下来的状态机（见 MEMORY-detail §B）。
 它对设备的全部依赖都走 `b`（Bot）—— 而 Android 版 `mapbot.Bot` 已经**同名同语义**实现了
 截图/OCR/点击/等画面，所以大部分代码可以**一行不改地跑在手机上**。
 
-审计结果（跨端调用面极小）：
+当初的审计结果（跨端调用面极小）：
     subprocess ×3（tasklist 查锁 PID、adb 回退键）  loopguard ×10（进程查重/设备锁）
     mapcollect ×3（内存通道，已由 COLLECT_REAL_MAPS=False 关掉）  ADB ×4
 
-本脚本只做 5 处补丁（+1 处结构补丁，共 5 项 replace + 1 段追加）：
+本脚本做 5 处补丁（+1 处结构补丁，共 5 项 replace + 1 段追加）：
   ① 资源根：`SUPPLY_TPL` 原来是**相对路径**（依赖 CWD）⇒ 改成 MAPBOT_ROOT 绝对路径
   ② `back_to_map` 的 adb 回退键 ⇒ Android 走无障碍 `b.back()`
   ③ `guard_duplicates` / 设备锁：Android 单实例，直接放行（不查 tasklist）
@@ -23,10 +33,9 @@
 ⚠ 与 `port_android.py` 的分工（别搞混，2026-10-01 踩过）：
   · 本脚本只管 **explore_loop.py** 一个文件
   · `port_android.py` 管**另外 11 个模块**（layout/spots/marks/badge/grid_detect/
-    buypanels/mapgen/mapsim/mapsolve/strategy/targets_cfg）—— 它们是**独立副本**，
-    改了 PC 侧必须重跑 `port_android.py`，否则手机上是旧代码 ✗
-  · `mapbot.py`（Android 版）**不在任何生成器里**，是手写独立文件 ⇒ 改 PC 的 mapbot
-    对手机**没有任何影响**（2026-10-01 就因此漏过一次停止中断 ✗）
+    buypanels/mapgen/mapsim/mapsolve/strategy/targets_cfg）
+  · `mapbot.py`（Android 版）**不在任何生成器里**，是手写独立文件
+    ⇒ 改 PC 的 mapbot 对手机**没有任何影响**（2026-10-01 就因此漏过一次停止中断 ✗）
 """
 import os
 
@@ -195,7 +204,34 @@ P5_NEW = '''def past_stop_time():
     return _dt.datetime.now() >= STOP_TIME'''
 
 
+def _guard_overwrite():
+    """⚠ 覆盖前先查手机端 explore_loop.py 有没有**本地未提交改动**（2026-10-01 拆分时加）
+
+    两端平行独立开发后，手机端代码**可以**与 PC 端分叉；
+    而本脚本是覆盖式写入、没有合并 ⇒ 有未提交改动就冲掉是不可逆的数据损失。
+    已提交但与 PC 端分叉的情况**不拦**（那是合法状态），跑完 `git diff` 即可比对。
+    """
+    import subprocess as sp
+    proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rel = os.path.relpath(DST, proj).replace('\\', '/')
+    try:
+        out = sp.run(['git', '-C', proj, 'status', '--porcelain', '--', rel],
+                     stdout=sp.PIPE, stderr=sp.DEVNULL, timeout=30)
+        dirty = [ln for ln in (out.stdout or b'').decode('utf-8', 'replace').splitlines()
+                 if ln.strip()]
+    except Exception:
+        return
+    if not dirty:
+        return
+    print('⚠⚠ 中止：手机端 %s 有**未提交改动**，本脚本会覆盖它且不合并：' % rel)
+    for ln in dirty:
+        print('    ' + ln)
+    print('   处置：先 `git -C %s stash`（或提交），确认后再跑。' % proj)
+    raise SystemExit(1)
+
+
 def main():
+    _guard_overwrite()
     txt = open(SRC, encoding='utf-8').read()
     if 'Android 适配补丁' in txt:
         raise SystemExit('源文件已被补丁过？请从 PC 源重新读取')
@@ -219,7 +255,8 @@ def main():
     with open(DST, 'w', encoding='utf-8', newline='\n') as f:
         f.write(txt)
 
-    print(f'移植 explore_loop.py → {DST}  ({len(txt)/1024:.0f} KB, {txt.count(chr(10))+1} 行)')
+    print(f'搬运 explore_loop.py → {DST}  ({len(txt)/1024:.0f} KB, {txt.count(chr(10))+1} 行)')
+    print('⚠ 覆盖式写入，无合并 ⇒ 跑完务必 `git diff` 看两端差异是否可接受。')
     print('\n'.join(report))
 
 

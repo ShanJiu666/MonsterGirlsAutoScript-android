@@ -127,13 +127,20 @@ Python（Chaquopy 3.10）：
 真机实测延迟：最坏 **11.37s → ≤0.1s**（`_verify/.../autoexplore_stop2.log` 量化过 ✓）。
 `past_stop_time()`（04:58 收工）仍**故意**等到图边界 —— 那是"收工"不是"急停"，两者别混 ✓
 
-移植是**可重放的脚本**（PC 端改完重跑即可同步）：
+⭐⭐⭐ **2026-10-01 起 PC 端与手机端已正式分开、两端平行独立开发**（详见
+`../mapbot_pc/README.md` §0）。本仓的 `app/src/main/python/*.py` 是**手机端自己的源码**，
+不再是"每次改 PC 都必须重跑脚本"的强制生成物。下列两个 `port_*.py` 现在是
+「**想把 PC 上的某个改动/修复搬到手机时**」跑一次的**搬运工具**：
 
 ```bash
 python tools/build_pack.py     # ① 打资源包：templates/(unit 裁前3帧) + server_datatable.json → assets/mapbot_pack
-python tools/port_android.py   # ② 搬 11 个纯逻辑模块 + 资源根改环境变量
-python tools/port_loop.py      # ③ 搬 explore_loop.py + 打 5 处补丁
+python tools/port_android.py   # ② 【可选·搬运】11 个纯逻辑模块 + 资源根改环境变量
+python tools/port_loop.py      # ③ 【可选·搬运】explore_loop.py + 打 5 处补丁
 ```
+
+- ②③ 是**覆盖式写入、没有合并** ⇒ 跑前两个脚本会先查手机端有无**未提交改动**，
+  有就**中止**并提示；跑完**务必 `git diff app/src/main/python` 看差异**。
+- 手机端改了就直接改手机端，**不需要**回灌 PC。两端逻辑漂移是允许的。
 
 ### 6.3 两个关键的路径改造
 
@@ -2013,12 +2020,56 @@ fixture 帧里没有草/果，与本轮无关）。
 - ✅ 悬浮条顶边 1717 < 1722 —— **不复现**，划掉
 - ✅ v1.19 搜索带的离线验收缺口 —— **本节补上**（㉛ 组）
 - ⏳ 端侧日志噪音：`ResourceWarning: unclosed file server_datatable.json` / `matmul` RuntimeWarning
-- ⏳ **`MGAS` 顶层（`D:\MGAS`）不在 git 里**；版本控制只覆盖 `android_autoexplore/`（有自己的 `.git`）
-  ⇒ **`mapbot_pc/`（PC 端源，Android 侧 11 个模块由它生成）没有版本控制兜底**，这是当前最大风险
-  （`app/src/main/python/explore_loop.py` 是它的生成物，进了仓；但源改了若忘了重放移植，两边会漂移）
+- ✅ **PC 端已有独立版本控制**（2026-10-01 建仓 `mapbot_pc/`，11366 文件 / 25.4MB）——
+  本节此前记的「PC 端无版本控制兜底」**已解决**
 - ⏳ 仍缺「**真机大拇指奖励帧**」这个正样本 fixture：图标通道的**端到端**验收
   （真机上真找到标记并摇到色子）只能等实跑撞上，一旦撞上立刻
   `adb pull` 存进 `_verify/` 并在 `verify_reward_band_allres.py` 里加一条正样本断言
+
+---
+
+### 6.44 ⭐⭐ 两端正式分开（2026-10-01 晚 ~21:00）
+
+**决定**（用户）：PC 端与手机端**正式分开**，并且是**平行独立开发**（不是"上游源 + 下游生成物"）。
+
+#### ① 三个决定各自的后果
+
+| 决定 | 做了什么 | 带来的影响 |
+|---|---|---|
+| PC 端建独立 git 仓 | `mapbot_pc/` 从零 `git init`，11366 文件 / 25.4MB 入仓 | PC 端第一次有回滚能力；`runs/`(1.2GB)/`_archive/` 不入仓 |
+| 601 个 `_*.py` 归档不删 | 移到 `_archive/`（反编译参考另放 `_archive/反编译参考/`） | 根目录 793 → 192 文件，可读性大幅改善 |
+| **两端平行独立开发** | `port_*.py` 从「强制同步步骤」降级为「**可选搬运工具**」 | **本节 ② 是重点**：不能再把手机端代码当成生成物看待 |
+
+#### ② 因为"平行独立"，必须改掉的三处认知（否则以后一定踩）
+
+1. **`app/src/main/python/*.py` 是手机端自己的源码**，不是"每次改 PC 都必须重放"的生成物。
+   手机端改完**不需要**回头动 PC。
+2. **两个 `port_*.py` 是覆盖式写入、没有合并** —— 这次给它们都加了守卫
+   （`_guard_overwrite()`）：手机端对应文件有**未提交改动**时**直接中止**并提示，
+   避免静默冲掉手机端已分叉的代码。
+3. **两端逻辑漂移是合法的**。判据是**各自的行为**（门禁全绿 + 实跑正常），
+   **不是**"两边源码一致"。以后 review 时看到 `mapbot_pc/explore_loop.py` 和
+   `app/src/main/python/explore_loop.py` 有 diff，**不必当成 bug**。
+
+#### ③ 顺手记下的一个 git 坑（`mapbot_pc` 建仓时踩的）
+
+`.gitignore` **不支持行尾注释**。写成
+
+```gitignore
+runs/        # 每轮跑出来的帧，~1.2GB     ← ❌ 整行（含 #）被当字面模式，永不匹配
+```
+
+结果是 `runs/` 11172 个文件、1.2GB 全被 `git add` 进去，`.gitignore` 形同虚设。
+⇒ **每条规则必须独占一行，注释另起一行**（已写进 `mapbot_pc/.gitignore` 头部警示）。
+排查手法：`git check-ignore -v <真实文件路径>`（要用**文件路径**，用目录名测会误判）。
+
+#### ④ 两边的版本控制现状
+
+| 端 | 路径 | 仓 | 规模 |
+|---|---|---|---|
+| PC | `D:\MGAS\mapbot_pc\` | 独立仓（`master`） | 11366 文件 / 25.4MB |
+| 手机 | `D:\MGAS\android_autoexplore\` | `gitee.com/geng-haojie/MGAS.git` | — |
+| 顶层 `D:\MGAS\` | — | **不在 git 里**（只是这两个仓的容器目录） | — |
 
 
 

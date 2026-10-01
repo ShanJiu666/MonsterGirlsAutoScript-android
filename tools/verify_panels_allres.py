@@ -23,7 +23,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
-MAPBOT = os.path.join(ROOT, 'mapbot_pc')
+# ⚠ PC 端是**独立仓**（2026-10-01 拆分），路径可被环境变量覆盖：
+#   MGAS_MAPBOT_SRC —— 指到别的 checkout（或两端已分叉时，指到别的 PC 副本）
+MAPBOT = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(ROOT, 'mapbot_pc')
+if not os.path.isdir(MAPBOT):
+    raise SystemExit(
+        '找不到 PC 端源码：%s\n'
+        '   PC 端已拆成独立仓（README §6.44），本脚本要 import 它的 explore_loop。\n'
+        '   处置：① clone PC 仓到 <MGAS>\\mapbot_pc，或 ② 设环境变量 '
+        'MGAS_MAPBOT_SRC 指向已有 checkout。' % MAPBOT)
 sys.path.insert(0, MAPBOT)
 os.chdir(MAPBOT)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')

@@ -1,8 +1,25 @@
 # -*- coding: utf-8 -*-
-"""port_android.py · 把 PC 端 mapbot 的**纯逻辑模块**移植到 Android（Chaquopy）
+"""port_android.py · 把 PC 端 mapbot 的**纯逻辑模块**一次性快照到 Android（Chaquopy）
 
-做两件事
---------
+⭐⭐⭐ 2026-10-01 起 **PC 端与手机端正式分开、平行独立开发**（用户决定）
+
+    两端现在是**两个独立 git 仓**、两份独立源码：
+        PC 端    D:\\MGAS\\mapbot_pc\\                （独立仓，gitee/.../mapbot_pc）
+        手机端   D:\\MGAS\\android_autoexplore\\      （本仓）
+    `layout/spots/marks/badge/grid_detect/buypanels/mapgen/mapsim/mapsolve/
+     strategy/targets_cfg/explore_loop` **各存一份，可以分叉**。
+
+    ⇒ 本脚本的定位从「**每次改 PC 都必须重跑**」降级为
+      「**想把 PC 上的某个改动/修复带到手机时，跑一次的搬运工具**」：
+        · 手机端改了就直接改手机端，不必回头动 PC
+        · PC 端改完想同步过来，才跑本脚本（**会覆盖**手机端同名文件！）
+        · 两端逻辑漂移**是允许的**；判据是各自的行为，不是一致性
+
+    ⚠⚠ 跑之前**先确认手机端这几个文件有没有本地改动**（`git status`）——
+       本脚本是覆盖式写入，没有合并。手机端已分叉的代码会被静默冲掉。
+
+做两件事（搬运时）
+------------------
 1. 复制 11 个逻辑模块到 `app/src/main/python/`（不含 airtest/rapidocr/adb 依赖：
    PC 的 mapbot.py 用 Android 版替代，fastcap/mapcollect/memmap/loopguard/roadpick 属于
    **内存通道**，无 root 手机上不可用 ⇒ 不带）。
@@ -104,8 +121,40 @@ EXACT = {
 }
 
 
+def _guard_overwrite(names):
+    """⚠ 覆盖前先查手机端这些文件有没有**本地未提交改动**（2026-10-01 拆分时加）
+
+    两端平行独立开发后，手机端的代码**可以**与 PC 端分叉。
+    而本脚本是覆盖式写入、没有合并 ⇒ 若手机端有未提交改动就冲掉，是**不可逆**的数据损失。
+    ⇒ 有改动就**停下**并提示，让使用者自己决定
+       （`git stash` / 先提交 / 先 diff 看一眼）。
+    已提交但与 PC 端分叉的情况**不拦** —— 那是合法状态，跑完 git diff 就能看清差异。
+    """
+    import subprocess as sp
+    proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # ⚠ 必须传**列表**：join 成一个字符串的话 git 会当成单个路径 → 报
+    #    "could not open directory" → 永远返回空 → 守卫**静默失效**（2026-10-01 自测才发现）
+    paths = ['app/src/main/python/%s' % n for n in names]
+    try:
+        out = sp.run(['git', '-C', proj, 'status', '--porcelain'] + paths,
+                     stdout=sp.PIPE, stderr=sp.DEVNULL, timeout=30)
+        dirty = [ln for ln in (out.stdout or b'').decode('utf-8', 'replace').splitlines()
+                 if ln.strip()]
+    except Exception:
+        return          # git 不可用就不拦（不该因为环境问题卡住主流程）
+    if not dirty:
+        return
+    print('⚠⚠ 中止：手机端这些文件有**未提交改动**，本脚本会覆盖它们且不合并：')
+    for ln in dirty:
+        print('    ' + ln)
+    print('   处置：先 `git -C %s stash`（或提交），确认后再跑。' % proj)
+    print('   若你确定要丢弃这些改动：先把改动文件移走，再重跑本脚本。')
+    raise SystemExit(1)
+
+
 def main():
     os.makedirs(DST, exist_ok=True)
+    _guard_overwrite([m + '.py' for m in MODULES])
     report = []
     for m in MODULES:
         src = os.path.join(SRC, m + '.py')
@@ -121,7 +170,8 @@ def main():
         with open(dst, 'w', encoding='utf-8', newline='\n') as f:
             f.write(txt)
         report.append(f'  {m}.py  {n0/1024:6.1f} KB')
-    print(f'移植到 {DST}')
+    print(f'搬运到 {DST}')
+    print('⚠ 覆盖式写入，无合并 ⇒ 跑完务必 `git diff` 看两端差异是否可接受。')
     print('\n'.join(report))
     print(f'共 {len(MODULES)} 个模块')
 

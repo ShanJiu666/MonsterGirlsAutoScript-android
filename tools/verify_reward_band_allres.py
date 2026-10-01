@@ -30,7 +30,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
-MAPBOT = os.path.join(ROOT, 'mapbot_pc')
+# ⚠ PC 端是**独立仓**（2026-10-01 拆分），路径可被环境变量覆盖：
+#   MGAS_MAPBOT_SRC —— 指到别的 checkout（或两端已分叉时，指到别的 PC 副本）
+MAPBOT = os.environ.get('MGAS_MAPBOT_SRC') or os.path.join(ROOT, 'mapbot_pc')
+if not os.path.isdir(MAPBOT):
+    raise SystemExit(
+        '找不到 PC 端源码：%s\n'
+        '   PC 端已拆成独立仓（§6.44），本脚本要 import 它的 explore_loop/badge。\n'
+        '   处置：① clone PC 仓到 <MGAS>\\mapbot_pc，或 ② 设环境变量 '
+        'MGAS_MAPBOT_SRC 指向已有 checkout。' % MAPBOT)
 sys.path.insert(0, MAPBOT)
 os.chdir(MAPBOT)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -111,12 +119,17 @@ def main():
     ck('新 box 覆盖**左半区全部**奖励行条目', not miss_y, str(miss_y))
 
     print()
-    print('【4】PC 9:16 基准帧（runs/bw2.json）：不过度收紧')
-    p = os.path.join(MAPBOT, 'runs', 'bw2.json')
-    if os.path.exists(p):
+    print('【4】PC 9:16 基准帧：不过度收紧')
+    # ⭐ 基准帧**随本仓走**（`_verify/bw2_pc_result_panel.json`），不从 PC 仓取 ——
+    #   2026-10-01 拆分时 PC 的 runs/ 已被 .gitignore 排除，靠跨仓读会在干净 clone 上挂掉。
+    cands = [os.path.join(HERE, '..', '_verify', 'bw2_pc_result_panel.json'),
+             os.path.join(MAPBOT, 'runs', 'bw2.json')]
+    p = next((c for c in cands if os.path.exists(c)), None)
+    if p:
         d = json.load(open(p, encoding='utf-8'))
         its = d['items'] if isinstance(d, dict) else d
         pb = EL._reward_box(its)
+        print('  基准帧：%s' % os.path.relpath(p, os.path.join(HERE, '..')))
         print('  PC 帧 band = %s' % (pb,))
         p_in = [i['text'] for i in its
                 if pb[1] <= i['cy'] <= pb[3] and i['cx'] < pb[2]]
@@ -125,8 +138,8 @@ def main():
         ck('PC 帧奖励条目被覆盖（>=4）', len(p_in) >= 4, str(p_in[:5]))
         ck('PC 帧底部按钮被排除', not p_btn, str(p_btn))
     else:
-        print('  （无 runs/bw2.json ⇒ 跳过 PC 段）')
-        ck('PC 基准帧存在', False, p)
+        print('  （找不到 PC 基准帧）')
+        ck('PC 基准帧存在', False, ' / '.join(cands))
 
     print()
     print('【5】徽章阈值与尺度带（正样本 0.92@缩放4.5 不能被拒）')
