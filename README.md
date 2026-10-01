@@ -1552,8 +1552,78 @@ $ 同上逐条：mask_check / classify                    ⇒  ⛔ 已拒绝 ✓
 （`phone_slots_full_0930.json` + `bagdbg/` 26 张帧 + 朋友机 `phone_friend_rmx3800/`）——
 **这些是真机原始证据，丢了要重抓真机**，已随本次入库。
 
-**产物**：`AutoExplore-v1.16-MGAS-广播命令加DEBUG门（堵RCE）+补推Gitee-release.apk`
-（= `MGAS.apk`，versionCode **116** / versionName **1.16**）。
+### 6.40 v1.17：⭐⭐ **改 MuMu 分辨率的正确方法**（`wm size` 是**无效**的，别再试）＋ 朋友真机几何对拍（2026-10-01 下午）
+
+**起因**：用户要求「把模拟器分辨率换成朋友真机的分辨率，测脚本能否正常运行」。
+
+#### ⚠ 先说结论：`adb shell wm size/density` 对 MuMu **完全无效**（已实测，别再浪费时间）
+
+```bash
+$ adb shell wm size 1264x2780 && adb shell wm density 560   # 显示 Override 成功
+$ adb shell wm size                                          # 但 Physical size 仍是 720x1280
+$ adb shell "getprop ro.product.cpu.abilist"  …               # RefMapper 读到 k=0.6667
+$ adb exec-out screencap -p | 解析 PNG 头                     # 出的图仍是 720x1280
+```
+根因：`CaptureService.realScreenSize()` 用的 `getMaximumWindowMetrics()`（`CaptureService.java:184`）
+在模拟器上返回**物理屏**，不认 override ⇒ 实际帧根本没变。
+
+#### ✅ 正确方法：改 MuMu 实例的 `customer_config.json`（`wm size` 之前就是这么改的）
+
+**两个关键点，少一个都不生效**：
+1. `setting.resolution.current` = `"宽.000000:高.000000:dpi.000000"`
+2. ⚠ **`setting.resolution.mode.choose` 必须切成 `"resolution.mode.custom"`**
+   —— 默认是 `"resolution.mode.phone"`，MuMu 会用**手机预设 720×1280 覆盖**掉 `current`（这就是只改 current 却没效果的原因）
+3. 改完**必须重启该实例**（配置在启动时读取）
+
+```bash
+# ① 找到在跑的是哪个实例
+"D:/MuMu Player 12/nx_main/mumu-cli.exe" info -v 1        # 列出实例名
+"D:/MuMu Player 12/nx_main/mumu-cli.exe" info -v all      # 带 adb_port
+#   ★ 实例目录名 ≠ index：configs/extra_config.json 里的 "relateId"/"playerName" 才是真的
+#     （踩过：改 15.0-2 的配置，重启的却是 index=1，白跑一趟）
+
+# ② 改配置（改前务必备份）
+D:\MuMu Player 12\vms\<实例>\configs\customer_config.json
+#   "resolution": { "current": "1264.000000:2780.000000:560.000000",
+#                   "mode": { "choose": "resolution.mode.custom", ... } }
+
+# ③ 重启该实例
+"D:/MuMu Player 12/nx_main/mumu-cli.exe" control -v <index> restart     # errcode 0 = ok
+# 等 ~50s 起来
+```
+
+**实测（已生效 ✅）**：
+```
+$ adb shell wm size   →  Physical size: 1264x2780     （不再是 720x1280）
+$ adb shell wm density→  Physical density: 560
+$ adb exec-out screencap -p → PNG 实际尺寸 1264x2780
+```
+⚠ 重启后**三项授权要重做**（无障碍 / 悬浮窗 / **截图授权**），且**截图授权必须点系统弹窗**（MuMu 1080×1920 = (849,1277)；
+真机则要「应用范围→整个屏幕」）。没授权时 MGAS 日志报「⚠ 没有帧：请先授权截图」，
+此时 `RefMapper` 仍显示 720×1280 —— **那不是配置没生效，是没帧**。
+
+#### 顺带：朋友真机（realme RMX3800 1264×2780）锚定模型几何对拍
+
+新增 `tools/verify_friend_phone_geometry.py`（**不依赖设备**，用真机留下的
+`_verify/phone_friend_rmx3800/device.txt` 里的 overlay_dump 当 ground truth 离线复算），
+**11 项全过**：
+
+| 项 | 模型预测 | 真机实测 | 差 |
+|---|---|---|---|
+| k | 1.1704 | 1.1704 | 0 |
+| 悬浮条顶边 devY(1722) | 2548.3 | **2548** | 0.3px |
+| 悬浮条底边 devY(1818) | 2660.6 | **2661** | 0.4px |
+| 高度 devLen(96) | 112.4 | 112 | 0.4px |
+| 左边 devX(20) | 23.4 | 23 | 0.4px |
+| C = dialogShift | 227.7 | — | ≠0 ⇒ 两系必须分开走 |
+| 弹性带 | (351, 884) | — | 非空 ⇒ 面板标题/背包页签只能走弹窗系 |
+
+⇒ **锚定模型在 1264×2780 上成立**（几何层面）。
+⚠ 但这只验几何，**不验识别阈值/面板判定/点击命中** —— 那些必须真机或改好分辨率的模拟器实跑。
+
+**回归**：主门禁新增 v1.17 组（5 项）⇒ **223 项，通过 223 / 失败 0 / 跳过 1**。
+
+
 
 
 
