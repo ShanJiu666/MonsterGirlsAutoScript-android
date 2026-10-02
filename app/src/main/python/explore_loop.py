@@ -4192,7 +4192,12 @@ def popups(b, items, log, ctx=None):
         _n_ex = (_PANEL_STUCK.get('expl') or 0) + 1
         _PANEL_STUCK['expl'] = _n_ex
         log.append({'explore': 'first_high_value' if act else 'first_fixed_btn',
-                    'at': _eat, 'n': _n_ex, 'slots_free': _free_now})
+                    'at': _eat, 'n': _n_ex, 'slots_free': _free_now,
+                    # ⭐⭐ v1.40 补诊断：把**点的哪格、sid、是不是紫橙**记下来
+                    #   （2026-10-02 用户问「第三次规划打开了一个蓝色探索格，这是什么问题」——
+                    #    旧日志只有坐标，board 字段又被截断到 300 字符 ⇒ **事后查不出点的哪格** ✗）
+                    'tile': '%d,%d' % cell_of(_eat[0], _eat[1]) if _eat else None,
+                    'sid': _tapped_sid, 'is_purple': bool(_is_purple)})
         if panel_gone(b, L['expl'], dlg_btn=L['ebtn']):
             _PANEL_STUCK['expl'] = 0
             # ⚠ **不在这里改 slots_free**：面板关掉只代表游戏受理了这下（多半换成
@@ -4585,6 +4590,32 @@ def popups(b, items, log, ctx=None):
                     say('       · 旅行商人买完（第 %d 个，本次买到 %d 次）'
                         % (STATS['merchants'], _mok))
                     status('旅行商人 · 完成 ✓')
+                    # ⭐⭐ v1.40【商人买完也要登记"已消耗"】—— 与黄金宝库**同口径** ✓
+                    #   用户 2026-10-02 实报：「买完商人后，商人格子**不会消失**，
+                    #     下一次规划又打开了商人格子（黄金宝库买完会消失）」✗
+                    #   根因：v1.27 只给**宝库**加了这段登记（当时报的是"宝库还剩1个目标"），
+                    #     商人的成功分支只 `STATS['merchants'] += 1` ⇒ **没登记** ⇒
+                    #     那一格的贴图买完还在（认成商人、score ≥ 0.60）⇒
+                    #     `buy_seen` 每轮被刷新 ⇒ 永远进不了"已消耗" ⇒ 永远被当目标 ✗✗
+                    #   真机日志铁证（v1.39）：
+                    #     `{"merchant":"done","bought":4}`      ← 四档全买成 ✓
+                    #     下一轮 `{"solver":"ok","targets":2}`  ← 实际只有 1 个 boss ⇒ 多一个就是商人格 ✗
+                    #     又打开一次面板 ⇒ `{"merchant":"all_bought"}`（认出来了、没重复买，但白点一次）✗
+                    try:
+                        # ⚠ 只在**真买成了**（`_mok > 0`）才登记"已消耗"。
+                        #   `_mok == 0` 表示"流程走完了但这次没买到"（已买完 / 没钱）⇒
+                        #   若也登记，那一格就被永久拉黑 ⇒ **下次买新档位时不会再去** ✗
+                        _st_m = ctx.get('flags')
+                        if isinstance(_st_m, dict) and tapped and _mok > 0:
+                            _rcm = cell_of(tapped[0], tapped[1])
+                            _pxm = marks_mod.cell_center(*_rcm)
+                            _st_m.setdefault('buy_consumed', set()).add(_rcm)
+                            for _km in (_pxm, tuple(tapped)):
+                                _st_m.get('buy_seen', {}).pop(_km, None)
+                                _st_m.get('buy_sticky', {}).pop(_km, None)
+                            log.append({'merchant': 'consumed', 'rc': list(_rcm)})
+                    except Exception:       # noqa: BLE001
+                        pass
                 else:
                     try:
                         buypanels.ensure_closed(b, log)

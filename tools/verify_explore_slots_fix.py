@@ -3640,6 +3640,55 @@ try:
 except Exception as _e39:       # noqa: BLE001
     check('v1.39 奖励页守门可运行（%r）' % (_e39,), False)
 
+# ─────────────────────────────────────────────────────────────────────────
+# ㊶⏤ v1.40 ⭐⭐【商人买完的格子要消失】—— 治「买完商人，下一次规划又打开商人格」
+#   用户 2026-10-02 真机报：「买完商人后，商人格子**不会消失**，下一次规划又打开了
+#   商人格子。（**黄金宝库买完会消失**）」✗
+#   **真机铁证**（v1.39 日志，同一张图）：
+#     `{"merchant":"done","bought":4}`                  ← 四档全买成 ✓
+#     下一轮 `{"solver":"ok","targets":2}`             ← 这一盘只有 1 个 boss ⇒ 多一个就是商人格 ✗
+#     又打开一次商人面板 `{"merchant":"all_bought"}`   ← 认出来了、没重复买，但**白点一次** ✗
+#   根因：v1.27 那段"买完登记 `buy_consumed`"**只加给了黄金宝库**
+#     （当时报的是"宝库还剩 1 个目标"），商人的成功分支只有 `STATS['merchants'] += 1`
+#     ⇒ 商人格永久留在 `buy_seen` 里，每轮都被刷新、永远进不了"已消耗" ✗✗
+#   修法：商人成功分支**同口径**登记（+ 门槛 `_mok > 0`：
+#         流程走完但没买到（已买完/没钱）时**不能**登记，否则那一格被永久拉黑 ✗）
+#   另：探索派遣日志补 `tile`/`sid`/`is_purple`（旧日志只有坐标、
+#       board 又被截断到 300 字符 ⇒ 事后**查不出点的哪格** ✗）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊶⏤ v1.40 商人买完登记"已消耗" + 探索日志补诊断')
+try:
+    _EL40 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    check('v1.40 ① 商人成功分支**登记"已消耗"**（与宝库同口径 ✓）',
+          "{'merchant': 'consumed'" in _EL40
+          and "setdefault('buy_consumed', set()).add(_rcm)" in _EL40)
+    _im = _EL40.index("{'merchant': 'consumed'")
+    _segm = _EL40[max(0, _im - 1000):_im + 200]
+    check('v1.40 ② 登记时**从 buy_seen / buy_sticky 删掉**（否则每轮被刷新回来 ✗）',
+          "get('buy_seen', {}).pop" in _segm
+          and "get('buy_sticky', {}).pop" in _segm)
+    check('v1.40 ③ 门槛 `_mok > 0`（流程走完但**没买到**时不登记，否则永久拉黑 ✗）',
+          'and _mok > 0' in _segm)
+    _is = _EL40.index("STATS['merchants'] += 1")
+    check('v1.40 ④ 登记在**商人统计之后**（不是误加到别的分支 ✗）',
+          _im > _is, '差 %d 行' % (_im - _is))
+    # ⭐ 回归：宝库那份不能被改坏
+    _iv = _EL40.index("{'vault': 'consumed'")
+    _segv = _EL40[max(0, _iv - 800):_iv + 200]
+    check('v1.40 ⑤ 回归：宝库的登记**未被改坏**（两条路径都在 ✓）',
+          "setdefault('buy_consumed', set()).add(_rcv)" in _segv
+          and "{'vault': 'consumed'" in _EL40)
+    # ⑥ 探索日志补诊断
+    _ie = _EL40.index("log.append({'explore': 'first_high_value'")
+    _sege = _EL40[_ie:_ie + 700]
+    check('v1.40 ⑥ 探索日志记了 `tile`/`sid`/`is_purple`（事后能查点的哪格 ✗）',
+          "'tile':" in _sege and "'sid': _tapped_sid" in _sege
+          and "'is_purple':" in _sege)
+except Exception as _e40:       # noqa: BLE001
+    check('v1.40 守门可运行（%r）' % (_e40,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
