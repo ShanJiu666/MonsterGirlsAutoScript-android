@@ -50,6 +50,43 @@ DESIGN_PITCH = 32.0
 DESIGN_TILE = 30.0
 INNER = 3.0          # 裁掉设计尺寸的外圈像素（透明圆角，避免干扰）
 
+# ⭐⭐ v1.35【`ratio` 分母口径开关】—— 治「同一台机，夏日海滩能跑、广袤草原跑不了」
+#   'map'  （**默认**）= 分母取**本图全部地块模板亮度的中位** ⇒ 各图 ratio 分布同形
+#                      ⇒ 同一道 0.75 阈值通吃所有图，且新图不用再标定 ✓
+#   'cell'            = 旧口径（分母取该格所属地块自己的模板亮度）
+#                      ⚠ 保留只为**离线对拍与回滚**；它配写死 0.75 会量纲错位 ✗
+#   （真机实测 2026-10-02：Redmi/1280×2772，雾格绝对亮度 139.5
+#      沙滩 139.5/201=0.694 ✓ ／ 草原 139.5/183=0.762 ✗ 越过 0.75 被误判成已揭示）
+RATIO_DEN = (os.environ.get('MAPBOT_RATIO_DEN', 'map') or 'map').strip().lower()
+
+# ⭐⭐ v1.36【「已揭示」阈值 + 双证据兜底】—— 0.75 踩线，0.80 才站得稳
+#   ## 为什么不能再用 0.75（2026-10-02 两帧真机实测，Redmi/1280×2772，广袤草原）
+#   同一台机、同一张图、同一套代码，两帧的分布**不一样**：
+#     帧A（12:45 诊断帧）：雾格 ratio 上界 **0.762** ← 越过 0.75 ⇒ 1 格误判成已揭示
+#     帧B（13:2x 现抓）  ：雾格 ratio 上界 **0.722** ← 安全
+#   汇总 70 格：**已揭示格最低 0.855**、**雾格最高 0.761** ⇒ 两类**不重叠**，
+#   中间有 **0.094 的干净带**；而 **0.75 落在雾格那一侧**（离 0.761 只差 0.011）
+#   ⇒ 阈值卡在雾格分布的漂移区间上，**每帧都可能踩线** ✗✗
+#   干净区间实测 = **0.78 ~ 0.85**（取中段 0.80，余量两边都有 ✓）
+#   ⚠ **只有 2 帧样本**（真机每张图要扣 25 体力，抓帧机会少）⇒
+#     0.80 是"当前证据下的最优"，**不是"已充分验证"** ⇒ 留开关可现场回滚 ✓
+#
+#   ## 双证据兜底（`REVEAL_EVIDENCE=dual`）
+#   亮度是**连续量**、雾格与已揭示格之间没有硬间隔 ⇒ 单靠它永远会被某些帧的
+#   边缘格咬住。第二条独立证据 = **雾格剪影**（`FOG_SIL_MIN=0.04`，4 倍空档）：
+#     · 剪影 **≥ 0.04** = 雾下**有东西** ⇒ 那必然**还没揭示**（东西还盖在雾里）
+#     · 剪影 **< 0.04** = 雾下**平坦空地** ⇒ 空地本来就没东西，不该被雾"压住"
+#   实测能兜住帧A 那个唯一误判格（`2,3` ratio=0.761 剪影=0.0643 ≥0.04 ⇒ 判未揭示 ✓）
+#   ⚠ 剪影**不能单独**判已揭示：已揭示格剪影 0.0138~0.1868 与雾格**重叠**
+#     （盖图标的宝箱剪影 0.18 比不少雾格还高）⇒ 只作"否决"用，不作"通过"用 ✓
+#   ⇒ 规则：`已揭示 = (ratio ≥ 0.80) 或 (ratio ≥ DUAL_LO 且 剪影 < FOG_SIL_MIN)`
+#   ⚠ 默认仍走**纯亮度**（`single`）：两帧样本不足以证明双证据在所有盘型都更稳，
+#     先积累真机反馈再切（`MAPBOT_REVEAL_EVIDENCE=dual` 现场可开）✓
+REVEAL_RATIO_MIN = float(os.environ.get('MAPBOT_REVEAL_RATIO_MIN', '0.80') or 0.80)
+REVEAL_EVIDENCE = (os.environ.get('MAPBOT_REVEAL_EVIDENCE', 'single') or 'single').strip().lower()
+# 双证据里的"低置信亮度带"：在这个区间里改用剪影裁决（实测干净带下沿 0.78）
+DUAL_BAND_LO = float(os.environ.get('MAPBOT_DUAL_BAND_LO', '0.74') or 0.74)
+
 # ⭐⭐ 2026-09-27：多格地块的**真实占格必须由 alpha 推导**（不能按 (dw+2)/32 的矩形外框 ✗）
 #   实测 S00003_111：画布 62x62（2×2 外框）但 alpha 只覆盖 **3 格 L 形**（右上整片透明）。
 #   旧代码把缺的那格也算进模板 ⇒ 而那格实际住着**邻居**（图1 (2,5) 是 103 游乐设施）
@@ -579,10 +616,42 @@ class Board:
                 g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 if self.k:
                     g = g[self.k:-self.k, self.k:-self.k]
-                ratio = float(g.mean()) / max(1e-6, self._tpl_luma(eff))
+                # ⭐⭐ v1.35：分母用**本图模板亮度中位**（`MAPBOT_RATIO_DEN=map`）
+                #   旧口径（逐格 `_tpl_luma(eff)`）配写死 0.75 ⇒ 两个量纲对不上 ✗
+                #   ⇒ 沙滩 ratio 0.694 能跑，**草原 0.762 被误判成已揭示** ✗✗
+                #   （真机实测：Redmi/1280×2772，雾格绝对亮度 139.5）
+                #   ⚠ `MAPBOT_RATIO_DEN=cell` = 退回旧口径（留作离线对拍/回滚开关 ✓）
+                _den = (self._map_luma_ref() if RATIO_DEN == 'map'
+                        else self._tpl_luma(eff))
+                ratio = float(g.mean()) / max(1e-6, _den)
+            # ⭐⭐ v1.36【双证据】：先把剪影算出来，供 `revealed` 与连锁判据**共用一份**
+            #   （原来剪影在下面单独算一遍；这里上移是为了让 `revealed` 能用双证据裁决 ✓）
+            _sil = None
+            if ratio and ratio < 0.78:
+                try:
+                    _sil = fog_silhouette(img, r, c, self)
+                except Exception:       # noqa: BLE001
+                    _sil = None
+            # ⭐⭐⭐ v1.36「已揭示」判定：**0.80**（不是 0.75）
+            #   2026-09-27 定的 0.75 是按"雾≈0.65 / 已揭示≈1.0"的空档拍的；
+            #   2026-10-02 两帧真机实测（Redmi/1280×2772 广袤草原，70 格）：
+            #     已揭示最低 **0.855**、雾格最高 **0.761** ⇒ 不重叠，干净带 **0.78~0.85**
+            #     而 **0.75 离雾格上界只差 0.011** ⇒ 雾格分布一漂就踩线 ⇒ 实测有 1 格被咬 ✗
+            #   ⇒ 移到干净带中段 0.80（两边都留余量 ✓）；
+            #     ⚠ 旧值 0.85 太高会把 0.80 的正常偏暗格误判成未揭示，别退回去 ✗
+            _rev = ratio >= REVEAL_RATIO_MIN
+            if (not _rev) and REVEAL_EVIDENCE == 'dual' and _sil is not None \
+                    and ratio >= DUAL_BAND_LO:
+                # 双证据：亮度处在低置信带 ⇒ 交给剪影裁决
+                #   剪影小 = 雾下**平坦空地** ⇒ 空地本来没东西，不该被雾压住 ⇒ 算已揭示 ✓
+                #   剪影大 = 雾下**有东西** ⇒ 必然还没揭示（东西还盖在雾里）✓
+                _rev = bool(_sil < FOG_SIL_MIN)
+                out_k_ev = 'dual'
+            else:
+                out_k_ev = 'luma'
             out[k] = {'sid': eff, 'name': (rows.get(eff) or {}).get('Name'),
                       'score': round(float(v), 3), 'ratio': round(ratio, 3),
-                      'revealed': ratio >= 0.75,   # ⭐ 2026-09-27：0.85 太高 ✗ 会把 0.80 的正常偏暗格误判成未揭示（未揭示≈0.65 ✓ 干净间隔 ✓）
+                      'revealed': _rev, 'rev_evidence': out_k_ev,
                       'anchor': anc, 'cells': cells, 'size': size,
                       'block_score': (round(blk['score'], 3) if blk else None),
                       'top': [(round(float(s), 3), s2, anch)
@@ -594,17 +663,14 @@ class Board:
             #     · 有物体的雾格 剪影占比 **0.064 ~ 0.292**（(2,2) 宝箱=0.169、(3,1) 石碑=0.292…）
             #     · 平坦雾格   剪影占比 **0.014 ~ 0.016**
             #   ⇒ 中间有 4 倍空档，阈值 0.04 判「雾下有没有东西」稳 ✓（判**非空地** ⇒ 连锁到此为止）
-            if ratio and ratio < 0.78:
-                try:
-                    sil = fog_silhouette(img, r, c, self)
-                    out[k]['fog_sil'] = sil
-                    out[k]['fog_object'] = bool(sil >= FOG_SIL_MIN)
-                    # ⭐ v1.05：**平坦**（剪影很小）= 雾下是空地 ⇒ 交给模型当 plain 用
-                    #   （雾格上的模板名字很不可信：真机这盘中位分只有 0.276，平坦格还被
-                    #    猜成「岩石/巨大木桩」✗ ⇒ 雾格的"是不是空地"以**剪影实测**为准 ✓）
-                    out[k]['fog_flat'] = bool(sil < FOG_SIL_MIN)
-                except Exception:       # noqa: BLE001
-                    pass
+            if _sil is not None:
+                sil = _sil
+                out[k]['fog_sil'] = sil
+                out[k]['fog_object'] = bool(sil >= FOG_SIL_MIN)
+                # ⭐ v1.05：**平坦**（剪影很小）= 雾下是空地 ⇒ 交给模型当 plain 用
+                #   （雾格上的模板名字很不可信：真机这盘中位分只有 0.276，平坦格还被
+                #    猜成「岩石/巨大木桩」✗ ⇒ 雾格的"是不是空地"以**剪影实测**为准 ✓）
+                out[k]['fog_flat'] = bool(sil < FOG_SIL_MIN)
         return out
 
     # ---------- 紫/橙探索大块（2026-09-26 新） ----------
@@ -674,6 +740,64 @@ class Board:
                         'size': (cw, ch), 'score': round(rec['score'], 3),
                         'votes': len(rec['votes'])})
         return out
+
+    def _map_luma_ref(self):
+        """⭐⭐ v1.35【本图模板亮度中位】—— `ratio` 的**统一分母**（治"换张图就废"）
+
+        ## 为什么必须改（2026-10-02 真机实测，Redmi 25053RT47C / 1280×2772）
+        旧口径：`ratio = 格子亮度 / _tpl_luma(该格所属地块)`，
+        再拿**写死的 0.75** 判"已揭示 vs 雾格" ⇒ **两个量纲对不上** ✗
+          · 模板亮度中位：夏日海滩 S00003 = **201**、广袤草原 S10002 = **183**（差 18 灰阶）
+          · 真机同一帧的雾格绝对亮度 139.5：
+              沙滩 ratio = 139.5/201 = **0.694** ⇒ <0.75 判雾格 ✓（能跑）
+              草原 ratio = 139.5/183 = **0.762** ⇒ ≥0.75 **被误判成"已揭示"** ✗
+        ⇒ 32 个雾格全被当成能点的格子，但每格都贴在地毯边缘 ⇒ 点不动
+          ⇒ 反复点同一个 boss 撞 `fogged_noop` ⇒ `finish: no_progress` 退图 ✗✗
+
+        ## 新口径
+        分母换成**本图全部地块模板亮度的中位** `L_map`（一张图一个数，自动算 ✓）
+        ⇒ 每张图的 `ratio` 分布形状一致，**同一道阈值 0.75 就能通吃所有图** ✓
+        ⇒ 以后新增地图**不需要再标定阈值**（分母自动跟着变）✓
+
+        ⚠ 保留 `_tpl_luma(sid)` 供**逐格相对比较**用（不动它，避免影响别的判据）✓
+        ⚠ 缓存：每 Board 实例算一次（几十个模板，几十毫秒）✓
+        """
+        if getattr(self, '_map_luma', None):
+            return self._map_luma
+        vals = []
+        try:
+            base = os.path.join(UNIT, self.code)
+            for sid in sorted(os.listdir(base)):
+                d = os.path.join(base, sid)
+                if not os.path.isdir(d):
+                    continue
+                fs = sorted(glob.glob(os.path.join(d, '*.png')))
+                if not fs:
+                    continue
+                im = imread(fs[0], cv2.IMREAD_UNCHANGED)
+                if im is None or im.ndim != 3:
+                    continue
+                gg = cv2.cvtColor(im[:, :, :3], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                ww = int(round(im.shape[1] / DESIGN_PITCH * self.px))
+                hh = int(round(im.shape[0] / DESIGN_PITCH * self.px))
+                gg = cv2.resize(gg, (ww, hh), interpolation=cv2.INTER_AREA)
+                if self.k:
+                    gg = gg[self.k:-self.k, self.k:-self.k]
+                if gg.size:
+                    vals.append(float(gg.mean()))
+        except Exception:       # noqa: BLE001
+            vals = []
+        # ⚠ 兜底：模板读不出来时退回**逐格口径的中位**（旧行为，不会更差 ✓）
+        if not vals:
+            try:
+                vals = [self._tpl_luma(s) for s in sorted(self._rows.keys())]
+                vals = [v for v in vals if v and v > 1e-6]
+            except Exception:       # noqa: BLE001
+                vals = []
+        self._map_luma = float(np.median(vals)) if vals else 1.0
+        if self._map_luma <= 1e-6:
+            self._map_luma = 1.0
+        return self._map_luma
 
     def _tpl_luma(self, sid):
         """该地块首帧贴图的平均亮度（用来算亮度比；缓存）"""

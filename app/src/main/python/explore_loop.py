@@ -77,6 +77,16 @@ INSTANCE_TAG = ''       # 多开实例名（空 = 单开，用共享目录）
 INSTANCE_DEV = DEV      # 该实例绑定的模拟器 adb 设备号
 _BOT = None             # 当前 Bot（统计要读它的耗时埋点）
 
+# ⭐⭐ v1.36【揭示口径的**单一来源**】—— 定在模块顶部，别放到文件后段
+#   · `spots.REVEAL_RATIO_MIN` = 0.80（2026-10-02 两帧真机实测标定，见 spots.py 注释）
+#     已揭示最低 0.855 / 雾格最高 0.761 ⇒ 干净带 0.78~0.85 ⇒ 0.75 踩在雾格那侧 ✗
+#   · 以前这里**自己写死 0.75**、`spots` 另写一份 ⇒ 两处漂移的典型 ✗✗
+#   · ⚠ 必须定义在**所有使用点之前**：v1.34 的 `_ready_boss_cells()` 在 1000 行就用它，
+#     放文件后段会 NameError（2026-10-02 当场踩过这个顺序坑两次 ✗）
+REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN
+# ⭐ 2026-10-02 v1.21：`board_hidden()` 判据② 的"被压暗"系数（实测标定见 `board_hidden` 注释）
+DIM_RATIO_MAX = 0.42
+
 
 def say(msg):
     if VERBOSE:
@@ -906,6 +916,8 @@ def eff_order(st, c, log=None, max_steps=20):
         # ⭐ stop_when_no_target=False：观测盘上目标可能还在雾里（targets 空 ≠ 图清完）
         #   ⇒ 没目标也继续开路（2026-09-28 离线验证抓到的坑，见 strategy.plan 注释 ✓）
         plan = _Eff().plan(sim, max_click=max_steps, stop_when_no_target=False)
+        # ⭐ v1.34：兜底路径**同样**"能点的首领优先"（与 solver 同一口径，不两处漂移 ✓）
+        plan = _hoist_ready_boss_first(st, plan, log=log, tag='eff')
         if log is not None:
             log.append({'eff': 'ok', 'steps': len(plan),
                         'order': ['%d,%d' % p for p in plan]})
@@ -927,27 +939,15 @@ def eff_order(st, c, log=None, max_steps=20):
 #     不会像旧版那样死抱着一个走不通的计划 ✗
 PLAN_STUCK_ROUNDS = 3
 
-# ⭐⭐ 2026-10-02 v1.29【探索模式】用户报「进图发了会呆就退出了」（realme RMX3800，v1.28）：
-#   没认出标记（近失分都低于闸门）⇒ 点序为空 ⇒ 判"盘空白"发呆 → `targets_done`
-#   **24 个暗格一格没开就退图** ✗
-#   ⇒ 没目标但盘还没探开时**先探图**（沿已揭示的可点格往外开，逼出标记/宝库 ✓）：
-#       `EXPLORE_MIN_GRAY` = 还剩这么多暗格就算"没探开"（要探）
-#       `EXPLORE_MAX_CLICKS` = 探图预算（防止为了探图无限花体力 ✗）
-EXPLORE_MIN_GRAY = 8
-EXPLORE_MAX_CLICKS = 40
-
-
-def need_explore(marked, pending_buy, grays_n, clicks):
-    """⭐ v1.29 纯函数：**该不该"先探图"**（没有目标、但盘还没探开）✓
-
-    真机包 `进图发了会呆就退出了.zip` 那一局就是这条判据缺失导致的：
-    `marked=0 / pending_buy=0 / grays=24 / clicks=0` ⇒ 旧代码 `order=[]` ⇒ 判"盘空白"发呆 →
-    再按 `targets_done(gray_left 24)` 退图 ✗（24 个暗格一格没开）
-    ⇒ 现在返回 True ⇒ 走探索模式（沿已揭示的可点格往外开）✓
-    """
-    return (not marked and not pending_buy
-            and int(grays_n) >= EXPLORE_MIN_GRAY
-            and int(clicks) < EXPLORE_MAX_CLICKS)
+# ⭐⭐⭐ 2026-10-02 v1.39【探索模式已**移除**】—— 用户定：「去掉探图模式」
+#   它本是 v1.29 为治「进图发呆就退出」加的兜底（没目标但暗格多 ⇒ 沿可点格开路逼标记），
+#   但真机反复**白烧体力**，且那几张盘人工核对**确实一个标记都没有**：
+#     v1.35：solver no_plan + grays=20 ⇒ 探，零产出
+#     v1.36：solver no_plan + grays=10 ⇒ 又探，零产出（用户目击「还在显示探索」✗）
+#   ⇒ 现在**没目标就退图**（`targets_done`）⇒ 标记清完立即收工，不再开路 ✓
+#   ⚠ 已删：`need_explore()` / `EXPLORE_MIN_GRAY` / `EXPLORE_MAX_CLICKS` /
+#     `EXPLORE_NO_YIELD_ROUNDS`（只服务于探索模式，留着会让人以为还有效 ✗）
+#   ⇒ 若日后又要「宁可多开几格也别提前退」，从 v1.38 的 git 历史取回 `need_explore()` 即可 ✓
 
 # ⭐⭐ 2026-10-02 v1.29：**规划口径开关**（用户 10-02 白天要"进图一次"、晚上又让"换回来" ⇒
 #   两条路都留代码，别再手改逻辑 ✗；环境变量 `MAPBOT_PLAN_ONCE=1` 可现场切）
@@ -1001,6 +1001,78 @@ def plan_next(st, rest_n, targets_left):
     if targets_left > 0:
         return 'eff', 'exhausted'
     return 'none', 'no_targets'
+
+
+def _ready_boss_cells(st, order):
+    """⭐ v1.34 纯函数：点序里**当下就能点**的首领/红装格（按原顺序）
+
+    「能点」= 该格在 `st['obs']`/本帧分类里是**已揭示**（`ratio` 落在揭示区间）
+    —— 分类器能看穿雾，所以**必须用 `ratio`** 判揭示，不能看 `score`（见
+    `_cells_for_model` 里那段踩坑注释：score≥0.8 的雾格是常见误判 ✗）。
+
+    ⚠ **点不动的首领（还在雾里）绝不返回** —— 提上来也点不动，
+      只会白花一体力并把真正该点的素材格挤掉 ⇒ 反而更差 ✗
+    """
+    # ⭐ v1.36：揭示口径**取模块级 `REVEAL_RATIO_MIN`**（它自己又来自 `spots`，单一来源 ✓）
+    #   ⚠ 不用 `globals().get(默认)` —— 那样常量名拼错会**静默吃默认值**、永远测不出
+    #     （2026-10-02 v1.34 踩过：`REVEALED_…` vs 真实的 `REVEAL_…`）✗
+    _min_ratio = REVEAL_RATIO_MIN
+    try:
+        _mk = st.get('marks') or {}
+        if not _mk:
+            return []
+        _obs = st.get('obs') or {}
+        _frame = st.get('frame_st') or {}
+        out = []
+        for _rc in order:
+            _k = (_rc[0], _rc[1])
+            _marks = list((_mk.get(_k) or {}).get('marks') or [])
+            if not any(m in ('boss', 'redEquip') for m in _marks):
+                continue                                   # 只管首领/红装 ✓
+            _cell = _obs.get(_k) or _frame.get(_k) or {}
+            _ratio = _cell.get('ratio')
+            try:
+                _ratio = float(_ratio) if _ratio is not None else None
+            except (TypeError, ValueError):
+                _ratio = None
+            if _ratio is None:
+                continue          # 认不出揭示状态 ⇒ 保守当"点不动"（fail-safe ✓）
+            # 已揭示格 ratio≈1.0，雾格≈0.65（真机实测间隔很干净）
+            if _ratio < _min_ratio:
+                continue
+            out.append(_rc)
+        return out
+    except Exception:       # noqa: BLE001
+        return []
+
+def _hoist_ready_boss_first(st, order, log=None, tag='solver'):
+    """⭐⭐ v1.34：把「当下能点的高价值格」提到点序**最前面**，其余顺序不动
+
+    用户 2026-10-02 报（朋友真机）：「会把能点的素材格全点开，**boss 格已经能打了**，
+    还是会先点 boss 格周围的素材格」✗
+    真机铁证（`fb_20261002_015406`）：`marks {"2,3": ["boss","recommend"]}` +
+    `solver order ["3,5","2,3"]`，同一轮 `popup: fight_panel` 已弹出 ⇒ boss **可打**
+    却被排在第 2 位 ✗
+
+    ⚠ 只调整**执行顺序**，不碰解算器的结果本身（cost/其余步骤一律不变 ✓）
+    ⚠ 任何异常都不改变点序（fail-open ✓）
+    """
+    try:
+        if not order:
+            return order
+        _ready = _ready_boss_cells(st, order)
+        if not _ready:
+            return order
+        _rest = [rc for rc in order if rc not in _ready]
+        _new = _ready + _rest
+        if log is not None and _new != list(order):
+            log.append({tag: 'boss_hoisted',
+                        'ready': ['%d,%d' % p for p in _ready],
+                        'was': ['%d,%d' % p for p in order],
+                        'now': ['%d,%d' % p for p in _new]})
+        return _new
+    except Exception:       # noqa: BLE001
+        return order
 
 
 def solver_order(st, c, log=None, max_steps=6, out=None):
@@ -1067,6 +1139,22 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
         for _rc, _bi, _w in prob.cells_for_plan(plan[:max_steps]):
             if _rc not in out:
                 out.append(_rc)
+        # ⭐⭐⭐ v1.34【能点的首领格必须**立刻打**，不许先点它周围的素材格】
+        #   用户 2026-10-02 报（朋友真机）：「会把能点的素材格全点开，**boss 格已经能打了**，
+        #   **还是会先点 boss 格周围的素材格**」✗
+        #   真机铁证（`fb_20261002_015406`，Redmi 1280×2772）：
+        #     `marks {"2,3": ["boss","recommend"]}` + `solver order ["3,5","2,3"]`
+        #     同一轮日志里 `popup: fight_panel` **弹出来了** ⇒ boss 当下**完全可打**，
+        #     可点序还是把它排在**第 2 位**、先点了一格素材 ✗
+        #   根因：解算器优化的是**总花费最小**，它不知道"这格现在就能直接打"有多重要
+        #     （且计划是**静态**的，排在后面的 boss 会被前面的动作挤到最后）✗
+        #   修法：**当下能点的首领/红装格一律提到最前面**（不动解算器给出的其余顺序 ✓）
+        #     · 只提「**已揭示**且**在点序里**」的 ⇒ 雾里点不动的 boss 不会被提上来
+        #       （提上来也点不动，只会把一格素材浪费掉 ⇒ 反而更差 ✗）
+        #     · 只提**高价值**目标（首领/红装），普通标记/幸运草维持原顺序 ✓
+        _hoisted = _hoist_ready_boss_first(st, out, log=log, tag='solver')
+        if _hoisted:
+            out = _hoisted
         try:
             _nt = len(sim.targets())
         except Exception:       # noqa: BLE001
@@ -1152,6 +1240,36 @@ def _candidate_codes(mapname):
     for k, v in mt.items():
         if (nm in k or k in nm) and v not in out:
             out.append(v)
+    if out:
+        return out
+    # ⭐⭐ v1.36【容忍 OCR 错一个字】—— 真机 2026-10-02 13:30 实测踩到的坑：
+    #   日志 OCR 把「广**袤**草原」读成「广**豪**草原」⇒
+    #     上面那条"包含"匹配**一个都不中** ⇒ 候选列表 **[]**
+    #     ⇒ `board_for()` 拿 `code=None` **回落成默认的夏日海滩模板集**
+    #     ⇒ 拿沙滩贴图去认草原的格子 ⇒ 整盘分类错 ⇒ `light=0`
+    #     ⇒ `board_hidden()` 判"全暗=面板挡住棋盘" ⇒ **连关 3 次面板** ✗✗✗
+    #   （用户目击：「显示有面板挡住，但实际上没有」——棋盘一直是好的）
+    #   ⚠ 症状与"真被面板挡住"**完全一样**，光看日志分不出来 ⇒ 必须容错 ✓
+    #   做法：**同长度或差 1 字**才当候选（OCR 错字几乎不改变长度）
+    _norm = lambda s: str(s or '').strip().replace(' ', '')
+    _n = _norm(nm)
+    for k, v in mt.items():
+        _k = _norm(k)
+        if not _k or not _n:
+            continue
+        if abs(len(_k) - len(_n)) > 1:
+            continue                   # 长度差 >1 ⇒ 不是错字，是别的图 ✗
+        # 逐位看差几个字；差 0（已被上面精确命中）或 1 才算候选 ✓
+        if len(_k) == len(_n):
+            diff = sum(1 for a, b in zip(_k, _n) if a != b)
+            if diff <= 1 and v not in out:
+                out.append(v)
+                continue
+        # 长度差 1：短的那方删掉任一字符后应能相等（OCR 常见"多/少一个字"）
+        short, lng = (_n, _k) if len(_n) < len(_k) else (_k, _n)
+        if any(lng[:i] + lng[i + 1:] == short for i in range(len(lng))):
+            if v not in out:
+                out.append(v)
     return out
 
 
@@ -1424,6 +1542,11 @@ BAG_STEPS = (
 _UI_TPL_CACHE = {}
 # ⭐ 2026-10-01：背包 UI 的关键帧落**公共目录**（诊断用；release 包不可 run-as ⇒ 私有拿不出来）
 BAG_PUB_DIR = '/sdcard/Download/autoexplore/bagdbg'
+# ⭐ v1.33：本次运行的标记文件（`_clear_stale_diag_frames()` 写的）
+#   Java 侧 `Feedback.java` 打包时读它 ⇒ 只收**本次运行**的帧 + 把新鲜度写进包 ✓
+RUN_MARKER = '_run_marker.json'
+# ⭐ v1.33：本次运行落过的诊断帧台账 [(文件名, 落盘时刻)]（`_pub_dump` 追加）
+_DIAG_DUMP_LOG = []
 # ⭐⭐ 落帧开关（**性能相关，用户 2026-10-01 问「跑一张图会不会变慢」**）：
 #   · BAG_DUMP=False ⇒ 完全不落帧（零 I/O 零编码开销 ✓ 稳定后建议关）
 #   · BAG_DUMP_ALL=False（默认）⇒ **只落"值得看"的帧**：每轮第一张起点帧 + 公会/背包结果帧
@@ -1508,9 +1631,101 @@ def _pub_dump(name, img, important=True):
         if not ok:
             return None
         buf.tofile(p)
+        # ⭐ v1.33：把落帧时刻**留在文件 mtime 上**（Java 侧按它过滤陈货 ✓）
+        #   并记到本模块的诊断台账里，打包时可逐张写清"这张图是哪一刻落的" ✓
+        try:
+            _DIAG_DUMP_LOG.append((str(name), time.time()))
+        except Exception:       # noqa: BLE001
+            pass
         return p
     except Exception:       # noqa: BLE001
         return None
+
+
+def _diag_frame_files():
+    """列出 bagdbg 目录里**本次可用于诊断**的帧（png），按新→旧排
+
+    ⚠ 只认"诊断帧"那一类文件名（`board_hidden_*` / `marks_none_*` / `dice_nobtn` /
+    `vault_no_hit_*`），**不含** `mgas_log.txt` / `_run_marker.json`（那不是帧）✓
+    """
+    try:
+        if not os.path.isdir(BAG_PUB_DIR):
+            return []
+        out = [f for f in os.listdir(BAG_PUB_DIR)
+               if f.lower().endswith('.png') and not f.startswith('_')]
+        out.sort()
+        return out
+    except Exception:       # noqa: BLE001
+        return []
+
+
+def _purge_diag_frames_in(bag_dir, device='', tag=''):
+    """⭐ v1.33 真正干活的核：清空 `bag_dir` 下的 `*.png` + 写运行标记
+
+    ⭐ 抽成独立函数是**为了能真跑验证**（门禁/手工都能直接调它 ✓）——
+    门禁只查字符串的话，"函数写了但从没被调起"这种错会一路绿到底 ✗
+    （教训见《错误教训》B2：先分清代码错还是环境错，别信"看着对"）
+
+    返回 (删掉几个, 写的标记路径 | None)；**失败绝不抛**（诊断不该影响开跑 ✓）
+    """
+    import json as _json
+    killed = 0
+    try:
+        if not os.path.isdir(bag_dir):
+            os.makedirs(bag_dir, exist_ok=True)
+        for n in os.listdir(bag_dir):
+            if n.lower().endswith('.png'):
+                try:
+                    os.remove(os.path.join(bag_dir, n))
+                    killed += 1
+                except Exception:       # noqa: BLE001
+                    pass
+    except Exception:       # noqa: BLE001
+        return killed, None
+    try:
+        _mark = {
+            # ⚠ 写成**整数秒**（不写浮点）：`json` 遇到小数可能输出科学计数法
+            #   （`1.790885417073e+09`），Java 侧解析要多担一份风险 ⇒ 源头掐掉 ✓
+            'run_started': int(time.time()),
+            'run_started_h': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'device': device,
+            'tag': tag,
+        }
+        p = os.path.join(bag_dir, RUN_MARKER)
+        with open(p, 'w', encoding='utf-8') as _f:
+            _json.dump(_mark, _f, ensure_ascii=False)
+        return killed, p
+    except Exception:       # noqa: BLE001
+        return killed, None
+
+
+def _clear_stale_diag_frames():
+    """⭐⭐⭐ v1.33【每次开跑先把上一次的诊断帧清干净】—— 治"反馈包里的图是陈货"
+
+    起因（用户 2026-10-02 原话）：「反馈包里的图**不是他刚刚运行的图**，和之前的图一样」
+    根因：诊断帧写**固定文件名**（`board_hidden_rN.png` …），而 `_pub_dump()` 静默覆盖、
+    **从不清理** ⇒ 这一局没触发那个分支就没新文件 ⇒ 目录里剩的**还是上次的旧帧**，
+    `Feedback.java` 又把 bagdbg 的 png 全塞进包 ⇒ 发出来就是陈货 ✗
+    （实证：realme 两包相隔 3 小时，`board_hidden_r0.png` 的 md5 完全相同）
+
+    做法：
+      ① 删掉 bagdbg 下的 `*.png`（只删 png ⇒ 日志/运行标记不动 ✓）
+      ② 写一份 `_run_marker.json`（本次运行起始时间戳）
+         ⇒ Java 侧打包时**只收比它新的帧**并把清单写进包，双保险 ✓
+    ⚠ 端上（Chaquopy，os.name=='posix'）以外直接跳过：PC 上 '/sdcard/...' 会污染工作区 ✗
+    ⚠ 真干活的核在 `_purge_diag_frames_in()`，可脱离端上直接验证 ✓
+    """
+    if os.name != 'posix':      # ⚠ 只在端上做（PC 跑门禁/对拍时不碰 /sdcard ✗）
+        return
+    try:
+        del _DIAG_DUMP_LOG[:]    # 本次运行的台账从零开始 ✓
+        killed, p = _purge_diag_frames_in(BAG_PUB_DIR, INSTANCE_DEV, INSTANCE_TAG)
+        if p:
+            say('   · 已清理上次的诊断帧（%d 张 · %s）' % (killed, BAG_PUB_DIR))
+        else:
+            say('   · ⚠ 清理旧诊断帧失败（不影响开跑）')
+    except Exception as _e:     # noqa: BLE001
+        say('   · ⚠ 清理旧诊断帧失败（不影响开跑）：%r' % (_e,))
 
 
 def _tpl_hit(img, name, region=None, scales=None, thr=0.80):
@@ -2493,12 +2708,21 @@ def in_map(b, img, items):
     #   （ratio≈1.0）；而"选图界面/进图动画"那种帧被兜底数出来的格子全是压暗的
     #   （朋友机日志实测：`light: 0/1, gray: 16/17`，全盘 ratio<0.55）
     #   ⇒ 旧写法"≥8 格就算在图里"正是那次误判的最后一根稻草 ✗
+    # ⭐⭐ v1.35【这条判据**不用** `spots` 的 0.75】：语义不同 ——
+    #   `spots` 的 0.75 判的是「这格是不是已揭示」（单格分类，允许边缘）；
+    #   这里判的是「**确凿**在图里」（要正证据，**不该被边缘格触发**）✗
+    #   起因：那张 fixture 的图名 OCR 是「清凉沙滩」⇒ 走 S40002 模板集，
+    #   有一格 ratio **0.757** 恰好压在 0.75 之上 ⇒ `bool(light)` 成立
+    #   ⇒ 选图界面被误判成"已在图里"（v1.15 ③ 当场红 ✓ 门禁抓到了真脆弱性）。
+    #   改成**独立阈值 0.85**：真棋盘的营地 ratio≈1.0 稳稳通过，
+    #   0.75~0.85 的边缘格（压暗/半揭示）**不再**冒充正证据 ✓
+    _IN_MAP_LIGHT_RATIO = 0.85
     try:
         _mx = max([float((v or {}).get('ratio') or 0)
                    for v in (c.get('st') or {}).values()] or [0.0])
     except Exception:       # noqa: BLE001
         _mx = 0.0
-    return bool(c['light']) and _mx >= 0.75
+    return bool(c['light']) and _mx >= _IN_MAP_LIGHT_RATIO
 
 
 def map_name(items):
@@ -3225,8 +3449,10 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None
                     log.append({'stat': 'exact_marks', 'near': mk, 'exact': _ex})
                 say('       · 战斗结算已关闭（%s）' % ('胜利' if win else '未确认胜利'))
                 # ⭐ v1.08：结算也带上"打的是什么格子"（用户口径：战斗日志要写清格子 ✓）
+                # ⚠ v1.37：`marks` 是**邻域兜底**（可能含邻居的 boss）⇒ 显示**只用 `_ex`**，
+                #   否则又出现「打完拦路的却显示打了首领格」✗；`_ex` 空就是"拦路格"✓
                 status('%s ✓ · %s' % ('战斗胜利' if win else '战斗结束',
-                                      tile_phrase(_ex or marks)))
+                                      tile_phrase(_ex)))
                 return True
         el = time.time() - t0
         centered = any(i['text'] in (L['win'], L['lose']) and LAYOUT.sx(200) < i['cx'] < LAYOUT.sx(900) for i in items)
@@ -3710,7 +3936,20 @@ def popups(b, items, log, ctx=None):
     #   ⇒ 改成和 `wait_end()` 里 `on_result` **同一套判据**（那边早就修过了 ✓）：
     #      ①（【正面】/【负面】 and 胜负）  ② 底部「关闭」  ③ 「回放战斗」
     # ⭐ 刚点那格的标记（本格精确命中优先；没有就取 ±1 邻域最近的）
+    #
+    # ⭐⭐ v1.37【邻域结果**不许**当成"这格是什么"】—— 治用户 2026-10-02 真机报
+    #   「打完拦路的却显示打了首领格，后面又打了首领格」✗
+    #   真机铁证（Redmi 1280×2772 广袤草原，v1.34 日志）：
+    #     点 (4,1) **拦路**格 ⇒ `cell_marks: ["boss"]`  ← 其实是 (5,1) 的 boss
+    #     同一轮日志 `{"stat":"exact_marks","near":["boss"],"exact":[]}` ← **exact 是空的** ✗
+    #     ⇒ 后面 `solver` 仍认为 (5,1) 有 boss ⇒ **又打一次真 boss**（重复扣体力）
+    #   根因：`near()` 找不到本格标记时**退而取 ±1 邻域最近的**（2026-09-25 加的兜底）
+    #     ⇒ 把**邻居**的 boss 记成自己的 ✗✗
+    #   修法：**邻域只用于"要不要打"（内部），不用于"记成什么"（显示/统计）** ✓
+    #     → `cell_marks` 与 `stat` 一律只用 **exact**；邻域另记为 `near_*` 供诊断 ✓
     def near():
+        """⚠ 返回的是**邻域兜底**结果（含邻居标记）—— 只用于内部判断，
+        **绝不**用于显示/统计；要"这格到底有什么"请用 `exact_marks()` ✓"""
         if not tapped:
             return []
         r0, c0 = cell_of(tapped[0], tapped[1])
@@ -3725,6 +3964,18 @@ def popups(b, items, log, ctx=None):
             if d <= 1 and d < best:
                 best, hit = d, v['marks']
         return list(hit)
+
+    def exact_marks():
+        """⭐⭐ v1.37：**本格**真实标记（认不出就是空，**不拿邻居的顶替** ✓）
+
+        用于 `cell_marks` 日志、`stat: exact_marks` 统计、以及
+        「打完显示成什么」的所有对外口径 ⇒ 杜绝"拦路格显示成首领格" ✗
+        """
+        if not tapped:
+            return []
+        r0, c0 = cell_of(tapped[0], tapped[1])
+        _e = markers.get((r0, c0))
+        return list((_e or {}).get('marks') or [])
 
     _res = bool(fb(items, *L['desc']) and fb(items, L['win'], L['lose'])) \
         or bool(bottom_close(items)) or bool(fb(items, '回放战斗'))
@@ -3990,7 +4241,8 @@ def popups(b, items, log, ctx=None):
             mk = list(mk) + ['explore_full_fight']
             log.append({'popup': 'fight_panel_explore_full',
                         'slots_free': _free_now, 'tapped_sid': _tapped_sid})
-        log.append({'popup': 'fight_panel', 'cell_marks': mk,
+        log.append({'popup': 'fight_panel', 'cell_marks': exact_marks(),
+                    'near_marks': mk,
                     'entry': 'title' if _fe_title else 'dlg_btn'})
         if not mk:
             # ⭐ 用户 2026-09-25：**跟「接近 boss」无关的战斗格一律不打**。
@@ -4091,7 +4343,9 @@ def popups(b, items, log, ctx=None):
                 btn = {'cx': a['cx'] if a else 806, 'cy': FIGHT_Y, 'text': 'normal'}
             log.append({'popup': 'fbtn_pos', 'at': (btn['cx'], btn['cy']),
                         'marks': list(mk)})
-        if not start_fight(b, log, btn, mk):
+        # ⚠ v1.37：`mk` 是**邻域兜底**（可能含邻居的 boss）⇒ 这里传 **exact_marks()**，
+        #   否则战斗日志又会把"拦路格"显示成"首领格"（用户 2026-10-02 真机报 ✗）✓
+        if not start_fight(b, log, btn, exact_marks()):
             close_x_panels(b, b.img())
             if not mk:
                 # ⚠ 普通格点不动 = 这格就是点不动，**绝不开清路模式**
@@ -5819,13 +6073,11 @@ def _close_bag(b, items, log):
 
 
 # ⭐ 2026-10-02 v1.21：`board_hidden()` 判据② 的两个口径（实测标定见函数注释）
-#   REVEAL_RATIO_MIN —— "已揭示"的 ratio 下限。**与 `spots.py` 的 `revealed` 同源**
-#     （`spots.py`：`'revealed': ratio >= 0.75`）⇒ 两边对"哪些格算已揭示"永远一致 ✓
-#   DIM_RATIO_MAX —— "被压暗" = ratio < 该系数 × 本帧已揭示格中位亮度。
-#     实测：**雾格/已揭示 = 0.487(realme)~0.61(nubia)**，**真面板/已揭示 = 0.25~0.35**(doc)
-#     ⇒ 取这条缝的中点 0.42（两侧余量 16% / 17%）。⚠ 别凭感觉调，改了要重跑标定脚本 ✓
-REVEAL_RATIO_MIN = 0.75
-DIM_RATIO_MAX = 0.42
+#   REVEAL_RATIO_MIN / DIM_RATIO_MAX —— ⚠ **已上移到模块顶部常量区**（v1.36）
+#     原因：本文件 1000 行处的 `_ready_boss_cells()` 也要用 `REVEAL_RATIO_MIN`，
+#     定义放这儿会 NameError（顺序坑，2026-10-02 连踩两次）✗
+#   `DIM_RATIO_MAX` = 0.42 的来历：真面板/已揭示 = 0.25~0.35、雾格/已揭示 = 0.49~0.61
+#     ⇒ 取这条缝的中点（两侧余量 16%/17%）。⚠ 别凭感觉调，改了要重跑标定脚本 ✓
 
 
 def board_hidden(c):
@@ -6742,13 +6994,28 @@ def one_round(b, log, rnd, prefix, st):
         pending_buy = [p for p in pending_buy if cell_of(*p) not in _consumed]
     # ⭐⭐⭐ 2026-10-01：把**跨轮记忆**里的宝库/商人也算进 pending ⇒ 这一帧被面板盖住
     #   也不会误判「没有目标了」直接退图（用户报的「盘上有宝库却没识别到就退了」✗）
+    # ⚠⚠ v1.37 修「打完首领、盘上没目标了还在打拦路格」（用户 2026-10-02 真机报）：
+    #   上一条只按 `buy_consumed`（**买过**的格）过滤，可 `buy_seen` 里的格子若是
+    #   **战斗消耗**的（没买过、也不在 buy_consumed）⇒ **逃过过滤、永久残留** ✗
+    #   真机铁证：`{"targets_ghost":{...,"sticky":["1,6"],"mem":["1,6"]}}`
+    #     而 (1,6) 早已在同图 `done_cells_dropped` 里被消耗 ⇒ 幽灵 ⇒ 退图判据永不成立 ✗
+    #   ⇒ 跨轮记忆**也**按 `buy_consumed` 过滤，且额外按**本局已消耗**(`done`)兜底 ✓
     try:
         _mem = st.get('buy_seen') or {}
         for _p in _mem:
-            if _p not in pending_buy:
-                pending_buy.append(_p)
-                st.setdefault('buy_mem_used', 0)
-                st['buy_mem_used'] = st['buy_mem_used'] + 1
+            if _p in pending_buy:
+                continue
+            try:
+                _rc_p = cell_of(*_p)
+                if _rc_p in _consumed:                    # 买过的 ⇒ 别再当目标 ✓
+                    continue
+                if marks_mod.cell_center(*_rc_p) in done:  # ⭐ v1.37：已消耗 ⇒ 幽灵 ✗
+                    continue
+            except Exception:       # noqa: BLE001
+                pass
+            pending_buy.append(_p)
+            st.setdefault('buy_mem_used', 0)
+            st['buy_mem_used'] = st['buy_mem_used'] + 1
     except Exception:       # noqa: BLE001
         pass
     # ⭐⭐⭐ 2026-10-02 v1.29【用户报「进图发了会呆就退出了」】—— 根因在下面 `order` 的构建条件
@@ -6759,11 +7026,38 @@ def one_round(b, log, rnd, prefix, st):
     #   ⇒ 因为点序只在「有标记 or 有商人/宝库」时才构建（见下面 `if not order and (marked or
     #     buy_any)`）⇒ 这一帧没认出任何标记（近失分 recommend 0.769 / boss 0.734，都低于闸门）
     #     ⇒ `order=[]` ⇒ 判"盘上空白" ⇒ 发呆 → 再按"目标做完"退图 ✗
-    #   修法：**没目标但盘还没探开** ⇒ 先探图（沿已揭示的可点格往外开，逼出标记/宝库），
-    #        只有真没得点、或探图预算用完，才允许判空白/收工 ✓
-    _explore = need_explore(marked, pending_buy, len(grays),
-                            st.get('explore_clicks', 0))
-    if vis and rnd >= 2 and not marked and not pending_buy and not _explore:
+    # ⭐⭐ v1.39：探索模式已移除 ⇒ 没有目标就退图（不再沿可点格开路逼标记 ✓）
+    #   （v1.29 当初是反着加的：没目标但暗格多就先探图，逼出雾里的标记。
+    #    真机证明它反复白烧体力且常无产出 ⇒ 用户定「去掉探图模式」✓）
+    # ⭐⭐ v1.37【solver 说"没目标了"就退图，不信 sticky 幽灵】——
+    #   用户 2026-10-02 真机报「打完首领、棋盘上没有目标了还在打拦路格子」✗
+    #   真机铁证（v1.34 日志，同一张图）：
+    #     `{"solver":"no_plan","cost":0}`                    ← 求解器明确：盘上没目标了 ✓
+    #     `{"targets_ghost":{...,"sticky":["1,6"],"mem":["1,6"]}}`  ← 但 sticky 残留 (1,6)
+    #     紧接着 `{"popup":"fight_panel","cell_marks":[]}` + 一场战斗  ← 白打拦路格 ✗✗
+    #   根因：(1,6) **早已消耗**（同一日志 `done_cells_dropped` 里有它），
+    #     可"宝库粘性记忆"没清 ⇒ `pending_buy` 一直非空 ⇒ 退图条件永不成立 ✗
+    #   修法：**已消耗格上的幽灵目标**直接清掉再判退图 ✓
+    #   ⚠ **不能等 `solver: no_plan`**：退图判据在求解器**之前**跑（`solver_order` 在 ~7207 行）⇒
+    #     此刻拿不到 no_plan ⇒ 改用**更硬的证据**：这个"目标"格**已经被消耗掉了** ✗
+    #   ⚠ 只清"中心已消耗"的幽灵 —— 真目标（还在盘上）绝不动 ✓
+    if not marked and pending_buy:
+        try:
+            _dead = set()
+            for _g in pending_buy:
+                _rc = cell_of(*_g)
+                if marks_mod.cell_center(*_rc) in done:
+                    _dead.add(_g)
+            if _dead and len(_dead) == len(pending_buy):
+                # 全部幽灵 ⇒ 盘上确实没目标了 ⇒ 清掉让退图判据生效 ✓
+                log.append({'targets_ghost_cleared':
+                            ['%d,%d' % cell_of(*g) for g in _dead],
+                            'why': '这些\"目标\"格**已消耗** ⇒ 幽灵，清掉后退图 ✓'})
+                pending_buy = []
+        except Exception:       # noqa: BLE001
+            pass
+    # ⭐ v1.39：没有目标 ⇒ **直接退图**（探索模式已移除，不再有"先探图"这条路 ✓）
+    if vis and rnd >= 2 and not marked and not pending_buy:
         log.append(entry)
         log.append({'finish': 'targets_done', 'gray_left': len(grays),
                     'content_skipped': len(nones_extra)})
@@ -6845,7 +7139,7 @@ def one_round(b, log, rnd, prefix, st):
             entry['opt_order'] = len(opt)
             road_all = list(opt)
             order = list(opt)
-    if not order and (marked or buy_any or _explore):
+    if not order and (marked or buy_any):
         # ⭐ 有标记格（或商人/宝库）未处理 -> 先把「出生地→目标」路上的可点格列出来，
         #   a) 优先沿路开路  b) 只有这些格弹出来的战斗才允许打（用户口径：无关战斗不打）
         if st.get('clear_clicks', 0) < 24:
@@ -7021,17 +7315,8 @@ def one_round(b, log, rnd, prefix, st):
         st['plain_road'] = []
     # ⭐ 待处理目标（供 popups 判「紧挨目标的战斗格 = 拦路」用）
     st['targets'] = list(marked) + list(buy_any)
-    # ⭐ v1.29：探索模式的记账 + 悬浮条提示（让用户看得见"它在探图、不是发呆"✓）
-    if _explore and order:
-        st['explore_clicks'] = st.get('explore_clicks', 0) + 1
-        log.append({'explore': 'mode', 'grays': len(grays),
-                    'clicks': st['explore_clicks'],
-                    'order': ['%d,%d' % cell_of(*p) for p in order[:4]]})
-        try:
-            status('第 %d 张图 · 没标记，先探图（还剩 %d 个暗格）'
-                   % (cur_map_no(), len(grays)))
-        except Exception:       # noqa: BLE001
-            pass
+    # ⭐ v1.39：探索模式的记账 + 「先探图」悬浮条提示**已一并移除**（用户定）
+    #   —— 这段就是用户目击「还在显示探索」的来源（`status('…没标记，先探图…')`）✓
     if not order and not marked:
         st['blank'] = st.get('blank', 0) + 1
         log.append(entry)
@@ -8082,6 +8367,17 @@ def android_run(maps=1, max_round=45, deadline=900,
         say('     处理完在界面上点「红装解锁」即可重新开跑')
         say('')
         return 'red_locked'
+    # ⭐⭐⭐ v1.33【反馈包里的图必须是「这一局」的】—— 用户 2026-10-02 报：
+    #   「反馈包里的图不是他刚刚运行的图，和之前的图一样」✗
+    #   根因（字节级实证）：诊断帧落在**公共目录的固定文件名**上
+    #   （`board_hidden_rN.png` / `marks_none_rN.png` / `dice_nobtn.png`），
+    #   而 `_pub_dump()` 用 `imencode().tofile()` **静默覆盖**旧文件、**从不清理** ⇒
+    #   这一局没触发那个分支 = 根本没写新文件 ⇒ 目录里剩的**还是上次那局的旧帧** ✗
+    #   ⇒ `Feedback.java` 把 bagdbg 里的 png 一股脑塞进包 ⇒ 发出来的是陈货 ✓
+    #   （实证：realme 两包相隔 3 小时，板 md5 完全相同 b6810e49…）
+    #   修法：**每次开跑先把上一次留下的诊断帧清干净** ⇒ 目录里的 png
+    #     只可能来自本次运行；顺便写一个运行标记文件，给包侧判新鲜度用 ✓
+    _clear_stale_diag_frames()
     say('   · 自动补给：' + ('开 ✓（没体力就进背包用结实补给）' if AUTO_SUPPLY else '关'))
     say('   · 装备升星：' + (('每 %d 张图一次' % BAG_EVERY) if BAG_EVERY else '关闭（0）'))
     # ⭐⭐⭐ v1.07 用户报「怎么连启动都启动不了了，完全用不了」——真因是**体力不足静默收工**：
