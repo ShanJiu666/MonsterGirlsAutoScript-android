@@ -63,8 +63,70 @@ except Exception:                       # noqa: BLE001  老版 mapbot 没有 ⇒
     def dlg_shift():
         return 0.0
 
+# ⭐⭐ v1.37 坐标说明（2026-10-02 真机 OCR 实测，Redmi 25053RT47C / 1280×2772）：
+#   `MERCHANT` 里的坐标**只是离线对拍/兜底**，**真机一律走 OCR 定位** ✗
+#   —— 面板是**弹窗系**（锚设备屏幕中心），y 会随分辨率整体漂移
+#      （1280×2772 实测 shift=496.4；写死的 1255 在真机上压根对不上）✗
+#   —— 真机 OCR 实测（**原帧坐标**）：右下角「购买」cx=1061 cy=1771；
+#      四个档位下方是「已购买」**状态标签**（cx=257/513/769/1024 cy=1615），
+#      **不是按钮** ⇒ 购买入口**只有右下角那一个**，靠"再点一次买下一档"推进 ✓
 MERCHANT = {'title': '旅行商人', 'x': (983, 602), 'buy': (895, 1255),
             'back': (539, 1212), 'times': 4}
+
+
+def _merchant_buy_btn(bot, log, i):
+    """⭐ v1.37：找右下角那个「购买」钮（**OCR 定位，绝不写死** ✓）
+
+    ⚠ 为什么不能写死：面板是**弹窗系**（锚设备中心）⇒ 同一份代码在
+      1280×2772 / 1264×2780 / 1216×2688 上 y 差好几百像素
+      （真机实测写死的 1255 对不上真实的 1771）✗
+    ⇒ OCR 出来的坐标是**参考系**，再走 `tap_dlg` 换算到设备 ⇒ 全分辨率成立 ✓
+
+    ⭐⭐ v1.38 修「商人一次都没买就显示买完」—— 选钮选错，点到**说明文字**上：
+      真机 v1.37 日志（Redmi/广袤草原）OCR 读到的是
+        `['4档','3档','2档','1档','购买','※依次在四个档位购买包罗万象的奖励内容']`
+      ⇒ 老代码「含'购买'且不含'已购买'」会同时命中 **`购买`** 和
+        **`※依次…购买…`**（**说明文字**，在面板左下角）⇒ 排序后选中了说明文字那行
+      ⇒ 实际点到 `(345, 1337)`（x=345 明显不是右下角）⇒ **一下都没买成** ✗
+      （我上一版注释写"真机只有右下角一个购买"—— 那是照着**全已购买**的截图下的结论；
+        **面板还有 4 档可买时，档位行会各带一个「购买」** ⇒ 结论不成立 ✗）
+    ⇒ 现在**三重过滤**：
+      ① 排除「已购买」  ② 排除说明文字（含「依次/※/奖励内容/包罗万象」等）
+      ③ 仍取**最靠右下**的（右下角总钮是 x 最大那个 ⇒ 真机 1061 vs 说明 443 ✓）
+    """
+    it = _items(bot)
+    cands = []
+    for t in it:
+        tx = t['text'].strip()
+        if '购买' not in tx or '已购买' in tx:
+            continue
+        # ⭐ v1.38：排除**说明文字**（它也含"购买"二字，但不是按钮 ✗）
+        # ⚠ v1.39 补词：真机 OCR 会把说明句**截断**（实测同一条被读成
+        #   「※依次在四个档位购买包罗万象的奖励内容」**和**「依次在四个档位购买包罗」两种）
+        #   ⇒ 只靠「奖励内容/包罗万象」会漏判 ⇒ **以「依次」为锚**（说明句必有），
+        #   再叠加「※ / 每档 / 包罗 / 万象 / 奖励」等碎片词兜底 ✓
+        if any(w in tx for w in ('依次', '※', '每档', '奖励', '包罗', '万象',
+                                 '包罗万象', '四叶草')):
+            continue
+        cands.append(t)
+    if not cands:
+        return None, it
+    # 取**最靠右下**的那个（cx 大、cy 大）⇒ 档位行的钮 x 小、右下角总钮 x 大 ✓
+    cands.sort(key=lambda t: (t['cy'], t['cx']))
+    return cands[-1], it
+
+
+def _merchant_bought_count(it):
+    """⭐ v1.37：这局面板**已购买**的档位数（数「已购买」标签 ✓）
+
+    真机 OCR 实测：每买一档，该档下方就多一个「已购买」标签
+    （cx=257/513/769/1024 cy=1615）⇒ **数标签个数**就知道买了几档 ✓
+    """
+    n = 0
+    for t in it:
+        if '已购买' in t['text']:
+            n += 1
+    return n
 
 
 def say(*a, **k):
@@ -218,26 +280,83 @@ def _confirm(bot, log, tag=''):
         log.append({'buy_confirm': tag, 'at': (ok['cx'], ok['cy'])})
     return True
 
-
 def merchant_flow(bot, log):
-    """旅行商人：购买 → 返回，重复 4 次 → 关 X（2026-09-25 实机验证过）"""
+    """旅行商人：点右下角「购买」→ 逐档推进 → 认到"全买完"就停（2026-10-02 真机重写）
+
+    ⭐⭐ v1.37 重写原因（用户 2026-10-02 真机报「第一次只买了三个格子，第二次又打开买第四格」）：
+      旧版**盲点 4 次同一个写死坐标**、靠循环次数记账 ⇒
+        ① 某次点击落空（面板在买后会动，`返回` 坐标在 1212/1267 间跳就是证据）
+           ⇒ 4 次点击只买成 3 档，却记 `bought=4` ✗
+        ② 下轮面板只剩 1 档可买，又盲点 4 次 ⇒ 3 次落空 ✗
+        ③ **完全不看「已购买」标签**（真机 OCR 明明读到了 3 个「已购买」）✗
+      ⇒ 现在**每买一档都重新 OCR 验证**：数「已购买」标签数，没增加就说明这次没买成 ⇒ 停 ✓
+    ⚠ 坐标一律 **OCR 定位 + tap_dlg 换算**（弹窗系），不写死 ✓
+    """
     bought = 0
     for i in range(MERCHANT['times']):
         it = _items(bot)
         if _has(it, '金币不足', '钻石不足'):
             log.append({'merchant': 'no_money', 'i': i})
             break
-        buy = _has(it, '购买')
-        if not buy and i > 0:
+        # ⭐⭐ v1.39【已经在奖励页 ⇒ 先退回商店，不能在这页找购买钮】
+        #   真机 v1.38：买完一档后面板变「恭喜获得」奖励页，那页**也有「购买」二字**
+        #   （在「依次在四个档位购买包罗」的说明句里）⇒ 旧代码点到了它 ⇒ 完全没买成 ✗
+        if _has(it, '恭喜获得'):
+            _b0 = _has(it, '返回')
+            _a0 = (_b0['cx'], _b0['cy']) if _b0 else MERCHANT['back']
+            bot.tap_dlg(_a0[0], _a0[1], wait=1.6)
+            log.append({'merchant': 'back_to_shop', 'i': i, 'at': _a0})
+            it = _items(bot)
+        # ⭐ 先数已买了几档（真机口径：数「已购买」标签 ✓）
+        n_bought = _merchant_bought_count(it)
+        if n_bought >= MERCHANT['times']:
+            log.append({'merchant': 'all_bought', 'i': i, 'bought': n_bought})
             break
-        bot.tap_dlg(*MERCHANT['buy'], wait=2.0)
+        btn, it = _merchant_buy_btn(bot, log, i)
+        if btn is None:
+            # ⭐ v1.37：`i == 0` 也**必须**停（旧版 `not buy and i > 0` 把第 0 次排除了
+            #   ⇒ 第 0 次没得买也照点，空转还记 bought=1 ✗）
+            log.append({'merchant': 'no_buy_btn', 'i': i,
+                        'texts': [t['text'] for t in it][:12]})
+            break
+        bot.tap_dlg(btn['cx'], btn['cy'], wait=2.0)
         _confirm(bot, log, 'merchant%d' % i)
         it = _items(bot)
+        # ⭐⭐ v1.39【买成功的判据要认「恭喜获得」，不能只数「已购买」】——
+        #   真机 v1.38 铁证：第一次点击**确实买成了**（弹出「恭喜获得」奖励页），
+        #   可我的验证是数「已购买」标签 ⇒ **奖励页上根本没有这个标签** ⇒ 读成 0
+        #   ⇒ `n_before=0 → n_after=0` ⇒ 误判 `tap_no_effect` ⇒ **只买1次就收手** ✗✗
+        #   （用户目击：「旅行商人只买了一次就显示购买完成」）
+        #   ⇒ 现在**两个信号任一**都算买成：① 弹出「恭喜获得」奖励页  ② 「已购买」标签 +1 ✓
+        _got_page = bool(_has(it, '恭喜获得', '恭喜', '获得'))
+        n_after = _merchant_bought_count(it)
+        _ok = _got_page or (n_after > n_bought)
+        log.append({'merchant': 'bought' if _ok else 'tap_no_effect',
+                    'i': i, 'btn': (btn['cx'], btn['cy']),
+                    'n_before': n_bought, 'n_after': n_after,
+                    'got_page': _got_page})
+        if not _ok:
+            # ⚠ 点了没生效（面板在动 / 金币不够 / 弹窗挡住）⇒ **不重复点**，
+            #   再点同一处大概率还是落空（真机实测落空率很高 ✗）⇒ 收手 ✓
+            log.append({'merchant': 'stop_no_effect', 'i': i, 'n_bought': n_bought})
+            break
+        # ⭐ v1.39：买成了要**按实际买到的档数 +1**（奖励页上读不到标签 ⇒ 不能用 n_after）
+        bought = n_after if n_after > n_bought else bought + 1
+        # ⭐⭐ v1.39【奖励页只点**一次**返回，直接进入下一轮】——
+        #   奖励页的「返回」= 回**商店**；商店的「返回」= **关掉面板**。
+        #   旧逻辑在"买完后"还要点一次商店的返回 ⇒ **连点两次** ⇒ 第二次把面板关了，
+        #   后面 3 档全买不了 ✗（2026-10-02 实跑日志里就出现这个形状）
+        #   ⇒ 走奖励页这条路时，点完返回就 `continue`（下一轮开头会重 OCR 商店面板）✓
+        if _got_page:
+            _back = _has(it, '返回')
+            _at = (_back['cx'], _back['cy']) if _back else MERCHANT['back']
+            bot.tap_dlg(_at[0], _at[1], wait=1.6)
+            log.append({'merchant': 'back_from_got', 'i': i, 'at': _at,
+                        'note': '只点这一次返回回商店；下一轮再买（别再点商店返回 ✗）'})
+            continue
         back = _has(it, '返回')
         at = (back['cx'], back['cy']) if back else MERCHANT['back']
         bot.tap_dlg(at[0], at[1], wait=1.6)
-        bought += 1
-        log.append({'merchant': 'bought', 'i': i, 'back': at})
     bot.tap_dlg(*MERCHANT['x'], wait=2.0)
     log.append({'merchant': 'done', 'bought': bought})
     return bought
