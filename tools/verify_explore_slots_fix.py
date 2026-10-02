@@ -159,6 +159,28 @@ def skip(name, detail=''):
     print('[SKIP] %s%s' % (name, ('  · ' + str(detail)) if detail else ''))
 
 
+def _find_javac():
+    """找 javac（门禁要**实跑** Java 判据；找不到就响亮跳过，绝不假装跑过 ✓）
+
+    ⚠ 2026-10-02：这个函数第一次写在了文件末尾、**定义在使用之后** ⇒ NameError
+      ⇒ ⑭ 那条 Java 实跑闸整个失效（还被 except 兜住报成"可运行失败"✗）
+      ⇒ 教训：工具函数一律放**公共工具区**（`skip()` 旁边），别塞在用它的段落里 ✓
+    """
+    import shutil as _sh
+    import glob as _gl
+    _p = _sh.which('javac')
+    if _p:
+        return _p
+    # Android SDK 常见的自带 JDK（本机实测 D:\\android-build\\jdk17\\jdk-17.0.20+8\\bin）
+    for _pat in (r'D:\android-build\jdk17\*\bin\javac.exe',
+                 r'C:\Program Files\Android\Android Studio\jbr\bin\javac.exe',
+                 r'C:\Program Files\Java\*\bin\javac.exe'):
+        _hit = sorted(_gl.glob(_pat))
+        if _hit:
+            return _hit[-1]
+    return None
+
+
 def item(text, cx, cy):
     return {'text': text, 'cx': cx, 'cy': cy, 'conf': 0.9,
             'x0': cx - 30, 'y0': cy - 10, 'x1': cx + 30, 'y1': cy + 10}
@@ -506,6 +528,14 @@ _ALLOWED_DRIFT = {
     'marks': 'v1.22 登记：手机端加了 `probe_top()`（标记"近失"诊断，给反馈包用），'
              'PC 端还没这个需求（PC 走 720p 固定锚点 + 自己的门禁）⇒ 有意分叉，'
              '单向新增、未回流。',
+    # ⭐ 2026-10-02 v1.35 登记：PC 端 `bot_gui` 的**点格拉黑**功能带进了一个
+    #   `is_blocked_cell(cell, cfg)`（按格坐标拉黑）。手机端**没有 GUI**（只有悬浮条
+    #   几个芯片 + 广播），拿不到"用户点了哪一格" ⇒ 这个函数在手机端**无调用方** ✗
+    #   其余 280→257 行的差异全是这一个函数及其文档/注释。
+    #   ⇒ 有意分叉（PC 端功能更全，手机端不需要），别拿 PC 那份覆盖手机端。
+    'targets_cfg': 'v1.35 登记：PC 端多一个 `is_blocked_cell(cell,cfg)`（`bot_gui` '
+                   '点格拉黑用）。手机端无 GUI、拿不到用户点格 ⇒ 无调用方、故意不加。'
+                   '有意分叉，勿覆盖。',
 }
 # ⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓不存在时整组跳过**（不是失败）。
 #   以前这条强制"生成物必须与 PC 逐字节一致" ⇒ 天然要求 PC 仓在场，
@@ -1613,7 +1643,9 @@ try:
     check('v1.15 ① `in_map` 补"选图界面专属文字"否定证据（深渊NN / 星界秘境 ✓）',
           "if any(('深渊' in it['text']) or ('星界秘境' in it['text'])" in _src15)
     check('v1.15 ② 格子兜底**要求有真·已揭示的亮格**（真棋盘营地恒 ratio≈1.0 ✓）',
-          "return bool(c['light']) and _mx >= 0.75" in _src15)
+          'return bool(c[\'light\']) and _mx >= _IN_MAP_LIGHT_RATIO' in _src15
+          and '_IN_MAP_LIGHT_RATIO = 0.85' in _src15,
+          '⚠ v1.35 起这条用**独立阈值 0.85**（不再与 spots 的 0.75 混用）')
     import importlib.util as _ilu15
     _spec15 = _ilu15.spec_from_file_location('el_v115', _el15)
     _el15m = _ilu15.module_from_spec(_spec15)
@@ -2028,8 +2060,11 @@ try:
           and '_lit.append(_r)' in _src21)
     _sp21 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
                  encoding='utf-8').read()
-    check('v1.21 ② "已揭示"口径与 `spots.py` 的 `revealed` 同源（0.75 ✓）',
-          'REVEAL_RATIO_MIN = 0.75' in _src21 and 'ratio >= 0.75' in _sp21
+    # ⚠ v1.36：不再是两处各写 0.75，而是**单一来源**（spots 定、explore_loop 引）
+    check('v1.21 ② "已揭示"口径与 spots 的 revealed **同源**（单一来源 ✓）',
+          'REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN' in _src21
+          and 'REVEAL_RATIO_MIN = 0.75' not in _src21
+          and 'ratio >= REVEAL_RATIO_MIN' in _sp21
           and '_r >= REVEAL_RATIO_MIN' in _src21)
     check('v1.21 ③ 系数 = 实测缝中点 0.42（雾格 0.487~0.61 vs 真面板 0.25~0.35）',
           'DIM_RATIO_MAX = 0.42' in _src21
@@ -2104,7 +2139,7 @@ try:
         ('dlg16（真·全盘被遮罩，不许放松）',
          os.path.join(PROJ, '_verify', 'dlg16.png'), True, None),
     ]
-    _fb21, _shape21 = [], []
+    _fb21, _shape21, _oldnote = [], [], []
     for (tag, p, want, old_want) in _frames21:
         if not os.path.exists(p):
             _fb21.append('%s: 缺 fixture' % tag)
@@ -2118,13 +2153,15 @@ try:
         _oldv21 = _old21(_c21.get('st') or {}, _c21['light'], _c21['gray'])
         if _got21 != want:
             _fb21.append('%s: 新的=%s(要%s)' % (tag, _got21, want))
-        if old_want is not None and _oldv21 != old_want:
-            _fb21.append('%s: 旧的=%s(预期%s)' % (tag, _oldv21, old_want))
+        # ⚠ v1.35：旧实现的**输入 ratio 已被新分母改变**（nubia 帧 light 4→14）
+        #   ⇒ 旧实现在这帧的返回值不再稳定 ⇒ **不再当断言**，只记进 detail ✓
+        #   （旧实现的"确实会误判"已由 ⑥ 那 5 条**合成**用例证明，数值可控 ✓）
+        _oldnote.append('%s旧=%s' % (tag[:4], _oldv21))
     check('v1.21 ⑦ 两帧真机反馈帧 + dlg16 都是**归一化 1080×1920**（喂错帧就当场红 ✓）',
           not _shape21, 'bad=%s' % (_shape21,))
-    check('v1.21 ⑧ 执行级：两帧真机"棋盘正常"判 **False**（旧实现判 True ✗）、'
-          'dlg16 真遮罩仍判 **True** ✓',
-          not _fb21, 'bad=%s' % (_fb21,))
+    check('v1.21 ⑧ 执行级：两帧真机"棋盘正常"判 **False**、dlg16 真遮罩仍判 **True** ✓'
+          '（旧实现仅记录，见 _oldnote）',
+          not _fb21, 'bad=%s  旧=%s' % (_fb21, '/'.join(_oldnote)))
 except Exception as _e21:       # noqa: BLE001
     check('v1.21 board_hidden 标定守门可运行（%r）' % (_e21,), False)
 
@@ -2591,6 +2628,7 @@ print('㊶ v1.28/v1.29 规划口径（开关 `PLAN_ONCE`；默认=每轮重解�
 try:
     _el28p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
     _src28 = open(_el28p, encoding='utf-8').read()
+    # ⚠ v1.38：`need_explore()` 多了 `no_yield_rounds`（探图无产出就收手）⇒ 签名已变
     check('v1.29 ① 新增 `PLAN_ONCE` 开关 + 纯函数 `plan_mode()`（两模式都可对拍 ✓）',
           'PLAN_ONCE = bool(int(os.environ.get(' in _src28
           and "MAPBOT_PLAN_ONCE" in _src28
@@ -2657,41 +2695,46 @@ except Exception as _e28:       # noqa: BLE001
 #   修法：`need_explore()` —— 没目标但盘还没探开 ⇒ **先探图**（沿已揭示的可点格往外开），
 #     只有真没得点、或探图预算（40 次）用完，才允许判空白/收工 ✓
 # ─────────────────────────────────────────────────────────────────────────
+# ㊷⏤ ㊳⏤ v1.29 + v1.38【探索模式已**移除**】—— 用户 2026-10-02 定：「去掉探图模式」
+#   探索模式（`need_explore()` + `EXPLORE_MIN_GRAY`/`EXPLORE_MAX_CLICKS`）是 v1.29
+#   为治「进图发呆就退出」加的兜底：没目标但暗格多 ⇒ 沿可点格开路逼出雾里的标记。
+#   真机反复证明它**白烧体力**且常无产出（那几张盘人工核对确实一个标记都没有）：
+#     v1.35：solver no_plan + grays=20 ⇒ 探，零产出
+#     v1.36：solver no_plan + grays=10 ⇒ 又探，零产出（用户目击「还在显示探索」✗）
+#   v1.38 曾加「连续 3 轮无产出就收手」缓解，**用户随后要求整个去掉** ✓
+#   ⇒ 现在：**没有目标就退图**（`targets_done`）⇒ 标记清完立即收工 ✓
+#   ⚠ 本组门禁现在**反向守护**：确认这些东西**确实不在了**（别被人又加回来 ✗）
+# ─────────────────────────────────────────────────────────────────────────
 print()
-print('㊷ v1.29 探索模式：没标记但盘没探开 ⇒ 先探图，不许发呆/空手退图')
+print('㊷⏤ v1.29/v1.38 探索模式已移除（反向守护：别再加回来）')
 try:
-    _el29p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
-    _src29 = open(_el29p, encoding='utf-8').read()
-    check('v1.29 ① 新增 `need_explore()` 判据 + 两个预算常量（`EXPLORE_MIN_GRAY`/`MAX_CLICKS` ✓）',
-          'def need_explore(marked, pending_buy, grays_n, clicks):' in _src29
-          and 'EXPLORE_MIN_GRAY = 8' in _src29 and 'EXPLORE_MAX_CLICKS = 40' in _src29)
-    _i_def29 = _src29.index('def need_explore(')
-    _i_use29 = _src29.index('_explore = need_explore(marked, pending_buy, len(grays),')
-    check('v1.29 ② 判据在**用到它之前**定义（顺序对 ✓）', _i_def29 < _i_use29)
-    check('v1.29 ③ `targets_done` 退图必须被探索模式拦住（`and not _explore` ✓）',
-          'if vis and rnd >= 2 and not marked and not pending_buy and not _explore:'
-          in _src29)
-    check('v1.29 ④ 点序构建也放行探索模式（`if not order and (marked or buy_any or _explore)` ✓）',
-          'if not order and (marked or buy_any or _explore):' in _src29)
-    check('v1.29 ⑤ 探索模式留日志 + 悬浮条提示（用户能看见"在探图"✓）',
-          "'explore': 'mode'" in _src29 and '没标记，先探图' in _src29)
+    _EL39 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    _code39 = '\n'.join(l for l in _EL39.split('\n') if not l.strip().startswith('#'))
+    check('v1.39 ① `need_explore()` **已删除**（探索模式去掉 ✓）',
+          'def need_explore(' not in _EL39)
+    # ⚠ 必须查**代码**（去注释）：`_EL39` 的注释里**故意**写着"已删 XXX"
+    #   （留给人看），直接全文搜会误判成"没删干净" ✗（2026-10-02 实测踩过）
+    check('v1.39 ② 三个预算常量在**代码**里已删除（注释里的"已删"说明不算 ✗）',
+          'EXPLORE_MIN_GRAY' not in _code39
+          and 'EXPLORE_MAX_CLICKS' not in _code39
+          and 'EXPLORE_NO_YIELD_ROUNDS' not in _code39)
+    check('v1.39 ③ 退图判据**没有**探索分支（没目标即退 ✓）',
+          'if vis and rnd >= 2 and not marked and not pending_buy:' in _EL39
+          and 'not marked and not pending_buy and not _explore' not in _EL39)
+    check('v1.39 ④ 开路判据**没有**探索分支（`marked or buy_any` ✓）',
+          'if not order and (marked or buy_any):' in _EL39
+          and 'marked or buy_any or _explore' not in _EL39)
+    # ⚠ 同上：那句"先探图"在**注释**里被引用（解释它被删了）⇒ 只能查代码 ✓
+    check('v1.39 ⑤ 「先探图」悬浮条提示在**代码**里已删除（用户目击的那句 ✗）',
+          '没标记，先探图' not in _code39)
+    check('v1.39 ⑥ 保留「已移除」说明 + 写明**可从 v1.38 取回**（别当成漏删 ✓）',
+          '探索模式已**移除**' in _EL39 and 'v1.38' in _EL39)
+    check('v1.39 ⑦ 代码里**不再引用**探索变量（`explore_clicks`/`explore_no_yield` ✗）',
+          'explore_clicks' not in _code39 and 'explore_no_yield' not in _code39)
+except Exception as _e39:       # noqa: BLE001
+    check('v1.39 移除守门可运行（%r）' % (_e39,), False)
 
-    import importlib.util as _ilu29
-    _spec29 = _ilu29.spec_from_file_location('el_v129', _el29p)
-    _el29m = _ilu29.module_from_spec(_spec29)
-    _spec29.loader.exec_module(_el29m)
-    _ne = _el29m.need_explore
-    # ⭐ 下面这组数字就是**真机日志里原样抄下来的**（r3 `targets_done, gray_left: 24`）
-    check('v1.29 ⑥ 执行级：真机那一局（无标记/无待买/24 暗格/0 次探索）⇒ **要探图** ✓',
-          _ne(0, 0, 24, 0) is True)
-    check('v1.29 ⑦ 执行级：暗格少（<8）⇒ **不要**为探图多花体力（正常收工 ✓）',
-          _ne(0, 0, 4, 0) is False and _ne(0, 0, 7, 0) is False)
-    check('v1.29 ⑧ 执行级：有标记或有待买目标 ⇒ 走正常目标逻辑（不当探索 ✓）',
-          _ne(1, 0, 24, 0) is False and _ne(0, 2, 24, 0) is False)
-    check('v1.29 ⑨ 执行级：探索预算用完（40 次）⇒ 停手（不会无限刷 ✓）',
-          _ne(0, 0, 24, 39) is True and _ne(0, 0, 24, 40) is False)
-except Exception as _e29:       # noqa: BLE001
-    check('v1.29 探索模式守门可运行（%r）' % (_e29,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
 # ㊸ v1.30【识别问题的取证闸】标记一个都没扫到时**把那一帧存下来**（反馈包自动带上）
@@ -2769,6 +2812,833 @@ print()
 print('㊱ PC 端提速层（fixed.py）不在本门禁 —— 属 PC 端自己的门禁（mapbot_pc/verify_gate.py）')
 check('手机端仓**不含** fixed.py（平行：PC 的东西不进本仓）',
       not os.path.exists(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'fixed.py')))
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊺ v1.33 ⭐⭐⭐【反馈包里的图必须是「这一局」的】—— 治"和之前的图一样"
+#   用户 2026-10-02 原话：「反馈包里的图**不是他刚刚运行的图**，和之前的图一样」✗
+#   **字节级实证**（`_fb/` 里 realme 的两包，md5 完全相同）：
+#     `fb_20261001_2337/board_hidden_r0.png` == `fb_20261002_0239/board_hidden_r0.png`
+#     = b6810e49ffa4187fba8d599e4cae5b02（相隔 3 小时，同一文件）
+#   根因：诊断帧写**固定文件名**（`board_hidden_rN` / `marks_none_rN` …），
+#     `_pub_dump()` 静默覆盖、**从不清理** ⇒ 这一局没触发该分支 = 没有新文件
+#     ⇒ 目录里剩的还是上次的旧帧；`Feedback.java` 又把 bagdbg 的 png 全塞进包 ✗
+#   修法（两端各一半）：
+#     ① Python：`_clear_stale_diag_frames()` **开跑先清空** bagdbg 的 png + 写运行标记 ✓
+#     ② Java：`collectFrames()` 按**运行标记时间**过滤，只收本次运行的帧 ✓
+#     ③ `device.txt` 写**逐帧清单**（时刻/尺寸/大小）⇒ 包能自证新鲜度 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊽ v1.33 反馈包只收「本次运行」的帧（治"图是陈货"）')
+try:
+    _el33 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    _fb33 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                               'autoexplore', 'Feedback.java'), encoding='utf-8').read()
+    check('v1.33 ① Python 侧**开跑先清旧帧**（`_clear_stale_diag_frames()` 调了 ✓）',
+          'def _clear_stale_diag_frames():' in _el33
+          and '_clear_stale_diag_frames()' in _el33
+          and "_import_missing_never_" not in _el33)
+    check('v1.33 ② 清理动作在 `android_run()` 里**真被调起**（不是只定义 ✓）',
+          _el33.index('def android_run(') < _el33.index('    _clear_stale_diag_frames()\n'))
+    check('v1.33 ③ 清的是 **png**（日志/运行标记不删，否则丢日志 ✗）',
+          "if n.lower().endswith('.png'):" in _el33
+          and 'os.remove(os.path.join(bag_dir, n))' in _el33)
+    check('v1.33 ④ 端上限定 `os.name != \'posix\'` 早退（PC 跑门禁不污染工作区 ✓）',
+          "if os.name != 'posix':" in _el33)
+    check('v1.33 ⑤ 写**运行标记**（`run_started`，整数秒 ⇒ Java 侧好换算 ✓）',
+          "RUN_MARKER = '_run_marker.json'" in _el33
+          and "'run_started': int(time.time())" in _el33)
+    check('v1.33 ⑥ Java 侧**按运行时间过滤**（`mtime < runStarted` 的旧帧不带 ✓）',
+          'private static long readRunStarted(File bagdbg)' in _fb33
+          and 'f.lastModified() + 1000L < runStarted' in _fb33)
+    check('v1.33 ⑦ 帧名走**白名单**（不夹带玩家自己的图片 ✓）',
+          'private static final String[] FRAME_PREFIXES' in _fb33
+          and '"marks_none_"' in _fb33
+          and '"dice_nobtn"' in _fb33
+          and '"vault_no_hit_"' in _fb33)
+    check('v1.33 ⑧ `device.txt` 带**逐帧清单**（时刻/尺寸/大小 ⇒ 包自证新鲜度 ✓）',
+          '本次运行的现场帧' in _fb33
+          and 'sizeOfPng(f)' in _fb33
+          and 'fmtMs(f.lastModified())' in _fb33)
+    check('v1.33 ⑨ 没落帧时**明说**"本次运行没落任何诊断帧"（不是丢包 ✓）',
+          '本次运行**没有落任何诊断帧**' in _fb33)
+    check('v1.33 ⑩ 老的 `deviceInfo(ctx)` 单参重载**已消失**（两处调用都传新鲜度参数 ✓）',
+          'private static String deviceInfo(Context ctx, long runStarted' in _fb33
+          and 'private static String deviceInfo(Context ctx) {' not in _fb33)
+    # ⚠ 以下两条是**离线实跑真抓出来的 bug**（2026-10-02），不是预防性猜测：
+    #   ① 数值解析只认"数字 + 小数点" ⇒ 遇到 `1.79E9` 截成 `1.79` ⇒ 毫秒=1790
+    #      ⇒ 时间闸**全程失效**、陈旧帧照收（症状与"根本没修"一模一样）✗
+    #   ② 量级阈值写成 `1e11` ⇒ 比真实毫秒(≈1.79e12)**还小**
+    #      ⇒ 所有**正常**标记都被误杀成"没有闸" ⇒ 同样等于没修 ✗
+    _i_rs = _fb33.index('private static long readRunStarted')
+    _i_rs_end = _fb33.index('private static String readText')
+    _rs_body = _fb33[_i_rs:_i_rs_end]
+    check("v1.33 ⑪b 数值解析**吃下科学计数法**（`E`/`+`/`-`）（实跑抓到的坑 ✗）",
+          "s.charAt(e) == 'e'" in _rs_body and "s.charAt(e) == 'E'" in _rs_body)
+    check('v1.33 ⑪c 量级阈值落在**真实毫秒区间**（2001~2100；`1e11` 会全误杀 ✗）',
+          '978307200000L' in _rs_body and '4102444800000L' in _rs_body)
+    check('v1.33 ⑪ `vault_no_hit_*` **不再硬编码**两行（改由白名单统一收 ✓）',
+          'addIfExists(extras, new File(pub, "vault_no_hit_L1.png"))' not in _fb33
+          and 'addIfExists(extras, new File(pub, "vault_no_hit_L2.png"))' not in _fb33)
+    # ⭐ 实施当场踩的坑：「函数写了但**从没被调起**」门禁照样全绿（因为只查字符串 ✗）
+    #   ⇒ 逼着把核心逻辑抽成**可脱离端上直接跑**的核，下面 ⑫ 就是**打这个真函数** ✓
+    check('v1.33 ⑪ 核心清理逻辑抽成**可独立实跑的核** `_purge_diag_frames_in()`',
+          'def _purge_diag_frames_in(bag_dir' in _el33
+          and '_purge_diag_frames_in(BAG_PUB_DIR' in _el33)
+except Exception as _e33:       # noqa: BLE001
+    check('v1.33 反馈包新鲜度守门可运行（%r）' % (_e33,), False)
+
+# ⑫ **实证闸 A**：仓库里留存的真实反馈帧，跑一遍"mtime 闸"（复刻 Java 判据）
+#   造出"一帧 10 天前的旧的 + 一帧刚落的新的" ⇒ 旧的必须被挡、新帧必须留下 ✓
+# ⑬ **实证闸 B**：`_fb/` 里两包**确实字节相同**（= 这条修法要治的那个现象本身）
+try:
+    import tempfile
+    import time as _t33
+    import shutil as _sh33
+    import json as _json33
+    import hashlib as _hl33
+    # ⭐ 调**真代码**的被测核（不是复刻）：门禁必须打真函数 ✓
+    _has_purge = hasattr(EL, '_purge_diag_frames_in')
+    if not _has_purge:
+        skip('v1.33 ⑫ 实证闸 A（`EL` 里没有 `_purge_diag_frames_in` ⇒ 没真验证）')
+    _el_purge = getattr(EL, '_purge_diag_frames_in', None)
+    _src33 = os.path.join(PROJ, '_verify', 'phone_friend_rmx3800', 'board_hidden_r0.png')
+    if not _has_purge:
+        pass
+    elif not os.path.exists(_src33):
+        skip('v1.33 ⑫ 实证闸 A（缺 fixture %s ⇒ 没真验证）' % _src33)
+    else:
+        _td = tempfile.mkdtemp(prefix='mgas_fb33_')
+        try:
+            # ⭐⭐ 调**真代码**（`explore_loop._purge_diag_frames_in`），不是复刻一份。
+            #   教训（2026-10-02 v1.33 实施当场）：门禁若只查字符串 + 复刻逻辑，
+            #   "函数写了但从没被调起"这类错会一路绿到底 ✗ ⇒ 必须打真函数 ✓
+            _old_t = _t33.time() - 10 * 86400
+            for _n in ('board_hidden_r0.png', 'marks_none_r0.png'):
+                _sh33.copyfile(_src33, os.path.join(_td, _n))
+                os.utime(os.path.join(_td, _n), (_old_t, _old_t))   # ← 10 天前落的那两张
+            with open(os.path.join(_td, 'mgas_log.txt'), 'w', encoding='utf-8') as _f:
+                _f.write('日志不许被删')
+            _killed, _mpath = _el_purge(_td)
+            _left = sorted(os.listdir(_td))
+            check('v1.33 ⑫ 实证闸 A：**真跑**清理核 ⇒ 旧帧全清、日志留下、标记已写',
+                  _killed == 2
+                  and not any(x.endswith('.png') for x in _left)
+                  and 'mgas_log.txt' in _left
+                  and _mpath is not None and os.path.exists(_mpath),
+                  '删=%d 剩=%s' % (_killed, _left))
+            # 标记里的时间戳必须能被 Java 侧换算成毫秒（量级校验，秒 ⇒ ×1000）✓
+            _mark = _json33.load(open(_mpath, encoding='utf-8'))
+            _ms = _mark['run_started'] * 1000.0
+            check('v1.33 ⑫ 实证闸 A2：标记的 `run_started` 是**秒级**（Java 侧 ×1000 ⇒ 毫秒 ✓）',
+                  1e11 < _ms < 4e12, 'run_started=%.0f' % _mark['run_started'])
+        finally:
+            _sh33.rmtree(_td, ignore_errors=True)
+
+    # ⑭ **Java 侧实跑**：`Feedback` 的过滤/解析判据（自测见 tools/FbLogic.java）
+    #   ⚠ 为什么单独跑而不是 import：`android.jar` 里的 `java.io.File` 是**裁剪桩**
+    #     （没有 getLastModified()），脱离 Gradle 起不来真类 ⇒ 判据等价复刻 + 独立实跑 ✓
+    #   ⚠ 这条**真抓过三个 bug**（2026-10-02）：科学计数法被截断、量级阈值过小、
+    #     以及"工具函数定义在使用之后"导致本条闸自己失效 ✓
+    _javat = os.path.join(PROJ, 'tools', 'FbLogic.java')
+    _javac = _find_javac()
+    # ⚠ 运行器要用**同目录的 `java.exe`**，不能拿 `javac.exe` 当（2026-10-02 实测：
+    #   那样会静默返回非 0 且 stdout 为空 ⇒ 看起来像"判据跑不过"✗）
+    _java = os.path.join(os.path.dirname(_javac), 'java') if _javac else None
+    if _java and not os.path.exists(_java + '.exe') and not os.path.exists(_java):
+        _java = None
+    if not os.path.exists(_javat):
+        skip('v1.33 ⑭ Java 过滤判据实跑（缺 tools/FbLogic.java）')
+    elif not _javac or not _java:
+        skip('v1.33 ⑭ Java 过滤判据实跑（本机没找到 javac/java ⇒ 没真验证）')
+    else:
+        import subprocess as _sp33
+        _od = tempfile.mkdtemp(prefix='mgas_java33_')
+        _od2 = tempfile.mkdtemp(prefix='mgas_fbdata33_')
+        try:
+            # ⚠ 不用 `text=True`：javac/java 的输出是**本地代码页**（GBK），
+            #   配 `text=True` 会在非 UTF-8 控制台上抛解码错 ⇒ 看起来像"跑挂了"✗
+            #   （2026-10-02 实测踩过）⇒ 一律按 bytes 收、errors='replace' 解 ✓
+            _cp = _sp33.run([_javac, '-nowarn', '-encoding', 'UTF-8', '-d', _od, _javat],
+                            capture_output=True)
+            if _cp.returncode != 0:
+                check('v1.33 ⑭ Java 自测**能编译**（%r）'
+                      % (_cp.stderr.decode('utf-8', 'replace')[-200:],), False)
+            else:
+                _rp = _sp33.run([_java, '-cp', _od, 'FbLogic', _od2], capture_output=True)
+                _out = _rp.stdout.decode('gbk', 'replace')   # javac/java 本地代码页 ✓
+                check('v1.33 ⑭ Java 侧过滤/解析判据**实跑全绿**'
+                      '（老帧被挡 / 科学计数法 / 量级 fail-safe）',
+                      _rp.returncode == 0 and 'ALL PASS' in _out,
+                      (_out.strip().splitlines() or [''])[-1])
+        finally:
+            _sh33.rmtree(_od, ignore_errors=True)
+            _sh33.rmtree(_od2, ignore_errors=True)
+
+    # ⑬ 实证闸 B：两个反馈包里的同一张图**字节完全相同**（这条修法治的就是它）
+    _a33 = os.path.join(PROJ, '..', '_fb', 'fb_20261001_2337', 'board_hidden_r0.png')
+    _b33 = os.path.join(PROJ, '..', '_fb', 'fb_20261002_0239', 'board_hidden_r0.png')
+    if not (os.path.exists(_a33) and os.path.exists(_b33)):
+        skip('v1.33 ⑬ 实证闸 B（缺 _fb/ 里的历史反馈包 ⇒ 没真验证）')
+    else:
+        _ha = _hl33.md5(open(_a33, 'rb').read()).hexdigest()
+        _hb = _hl33.md5(open(_b33, 'rb').read()).hexdigest()
+        # ⚠ 这里断言的是**"那两包确实带着同一张旧图"**（记录 v1.33 的起因事实）。
+        #   将来 `_fb/` 归档被清理后，这项会失真 ⇒ 保留可追溯性，不是行为断言 ✓
+        check('v1.33 ⑬ 起因存档：相隔 3 小时的两包带的是**同一张旧图**'
+              '（= 陈货铁证，v1.33 治的就是它）', _ha == _hb, 'md5=%s' % _ha[:12])
+except Exception as _e33b:      # noqa: BLE001
+    check('v1.33 ⑫⑬ 实证闸可运行（%r）' % (_e33b,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊾ v1.34 ⭐⭐⭐【能点的首领格必须立刻打，不许先点它周围的素材格】
+#   用户 2026-10-02 报（朋友真机 Redmi 1280×2772）：「会把能点的素材格全点开，
+#   **boss 格已经能打了**，还是会先点 boss 格周围的素材格」✗
+#   **真机铁证**（`fb_20261002_015406/mgas_log.txt`）：
+#     `marks {"2,3": ["boss","recommend"]}` + `solver order ["3,5","2,3"]`
+#     同一轮还有 `{"popup":"fight_panel","cell_marks":["boss","recommend"]}`
+#     ⇒ boss 当下**完全可打**（战斗面板都弹出来了），点序却把它排在**第 2 位** ✗
+#   根因：解算器优化的是**总花费最小**，不知道"这格现在就能直接打"的价值；
+#        加上计划是**静态**的，排后面的 boss 会被前面的动作一路挤到最后 ✗
+#   修法：`_hoist_ready_boss_first()` 把**当下能点**的首领/红装格提到最前，
+#        其余顺序不动；雾里（点不动）的首领**绝不提**（提了也白花体力）✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊾ v1.34 能点的首领格优先打（不许先点周围素材）')
+try:
+    _el34 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    check('v1.34 ① 重排函数在位（`_hoist_ready_boss_first` / `_ready_boss_cells`）',
+          'def _hoist_ready_boss_first(st, order' in _el34
+          and 'def _ready_boss_cells(st, order)' in _el34)
+    check('v1.34 ② **solver 与 eff 两条路径都调**（不两处漂移 ✓）',
+          _el34.count('_hoist_ready_boss_first(st,') >= 2
+          and "_hoist_ready_boss_first(st, _hoisted" not in _el34)
+    check('v1.34 ③ 只提**首领/红装**（普通标记/幸运草维持原顺序 ✓）',
+          "any(m in ('boss', 'redEquip') for m in _marks)" in _el34)
+    check('v1.34 ④ 雾里（ratio 低）的首领**不提出去**（提了也点不动，白花体力 ✗）',
+          'if _ratio < _min_ratio:' in _el34 and 'continue' in _el34)
+    # ⚠ 常量名陷阱：注释里写 `REVEALED_RATIO_MIN`，真名是 **`REVEAL_RATIO_MIN`**（少 ED）。
+    #   写成 `globals().get('REVEALED_RATIO_MIN', 0.75)` 会**静默吃默认值**、
+    #   拼错了也测不出来（2026-10-02 当场踩过）⇒ 这里断言**真名**在模块里 ✓
+    # ⚠ v1.36：改成**直接引用**模块常量 —— globals().get(默认) 会在
+    #   常量名拼错时**静默吃默认值**，永远测不出来（2026-10-02 已踩过 ✗）
+    check('v1.34 ⑤ 揭示阈值**直接引用**模块常量（不用 globals().get 兜底 ✗）',
+          '_min_ratio = REVEAL_RATIO_MIN' in _el34
+          and "globals().get('REVEAL_RATIO_MIN'" not in _el34)
+except Exception as _e34:       # noqa: BLE001
+    check('v1.34 源码守门可运行（%r）' % (_e34,), False)
+
+# ⑯ **实跑闸**：用**朋友那一局的真机数据**直接打真函数（不 mock、不复刻 ✓）
+try:
+    # 真机那一局：boss 在 (2,3) 且已揭示（ratio 0.958），点序被排成 ["3,5","2,3"]
+    _st34 = {
+        'marks': {(2, 3): {'marks': ['boss', 'recommend']}},
+        'obs': {(2, 3): {'ratio': 0.958}, (3, 5): {'ratio': 0.99}},
+    }
+    _out34 = EL._hoist_ready_boss_first(_st34, [(3, 5), (2, 3)])
+    check('v1.34 ⑥ 实跑：**真机那一局**的首领被提到第 1 位',
+          bool(_out34) and _out34[0] == (2, 3), '%s' % (_out34,))
+    check('v1.34 ⑦ 实跑：素材格**没被丢掉**（只是换到后面 ✓）',
+          set(_out34) == {(2, 3), (3, 5)}, '%s' % (_out34,))
+    # 雾里的首领：提上去也点不动 ⇒ 必须**原样不动**（否则白花体力、挤掉该点的格 ✗）
+    _stfog = {
+        'marks': {(4, 6): {'marks': ['boss']}},
+        'obs': {(4, 6): {'ratio': 0.65}, (1, 1): {'ratio': 0.99}},
+    }
+    _outfog = EL._hoist_ready_boss_first(_stfog, [(1, 1), (4, 6)])
+    check('v1.34 ⑧ 实跑：雾里的首领**不提出去**（点不动，提了更差 ✓）',
+          _outfog == [(1, 1), (4, 6)], '%s' % (_outfog,))
+    # 阈值边界：证明用的是真阈值 0.75，而不是别的数
+    _b = []
+    # ⚠ v1.36：阈值标定到 0.80，边界跟着走（0.76 已**低于**阈值 ⇒ 不该提）
+    for _r, _want in ((0.70, False), (0.84, True)):
+        _o = EL._hoist_ready_boss_first(
+            {'marks': {(2, 3): {'marks': ['boss']}},
+             'obs': {(2, 3): {'ratio': _r}, (3, 5): {'ratio': 0.99}}},
+            [(3, 5), (2, 3)])
+        _b.append((_o[0] == (2, 3)) == _want)
+    check('v1.34 ⑨ 实跑：阈值边界 **0.80**（0.70 雾不提 / 0.84 揭示提 ✓）',
+          all(_b), 'ratio 0.70/0.84 ⇒ %s' % (_b,))
+    # 没有首领标记时**一动不动**（绝不多余地重排点序 ✓）
+    _plain = EL._hoist_ready_boss_first(
+        {'marks': {(3, 5): {'marks': ['clover']}}, 'obs': {(3, 5): {'ratio': 0.99}}},
+        [(3, 5), (1, 1)])
+    check('v1.34 ⑩ 实跑：盘上没有首领/红装 ⇒ 点序**原样**（不瞎改 ✓）',
+          _plain == [(3, 5), (1, 1)], '%s' % (_plain,))
+except Exception as _e34b:      # noqa: BLE001
+    check('v1.34 实跑闸可运行（%r）' % (_e34b,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊿ v1.35 ⭐⭐⭐【`ratio` 分母换成本图模板亮度中位】—— 治「同一台机，换张地图就废」
+#   用户 2026-10-02 报：**夏日海滩能正常用，广袤草原就找不到目标**（同一台 Redmi）
+#   根因（真机实测钉死，不是推测）：`ratio = 格子亮度 / 该格所属地块的模板亮度`
+#     判"已揭示"却用**写死的 0.75** ⇒ **两个量纲对不上** ✗
+#     · 模板亮度中位：夏日海滩 **197**、广袤草原 **183**（差 14 灰阶）
+#     · 真机同一帧（Redmi 25053RT47C / 1280×2772）雾格绝对亮度 **139.5**：
+#         沙滩 139.5/197 = 0.708 ⇒ <0.75 判雾格 ✓（能跑）
+#         草原 139.5/183 = **0.762** ⇒ ≥0.75 **被误判成"已揭示"** ✗
+#     ⇒ 32 个雾格被当成能点的格 → 反复点同一个 boss 撞 `fogged_noop`
+#       → `finish: no_progress` 退图 ✗✗
+#   修法：分母换成**本图全部地块模板亮度的中位** `L_map`（一张图一个数，自动算 ✓）
+#   ⚠ 更狠的根因：旧分母是**逐格不同**的 ⇒ 同一张图内 ratio 被抖动 **25%~81%**
+#     （15 张图全部中招，熔岩通道 81.5% 最夸张）⇒ 0.75 夹在抖动区间里，
+#     **分母偏大一点就把雾格顶过线**。新口径图内不再抖动 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊿ v1.35 ratio 分母换成本图模板中位（治"换图就废"）')
+_FB35 = os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_r0.png')
+try:
+    _sp35 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
+                 encoding='utf-8').read()
+    check('v1.35 ① 开关 `MAPBOT_RATIO_DEN`（`map`=新 / `cell`=旧，留作回滚 ✓）',
+          "MAPBOT_RATIO_DEN" in _sp35 and "'map'" in _sp35 and "'cell'" in _sp35)
+    check('v1.35 ② 本图基准 `_map_luma_ref()` 在位（一张图算一个数 + 缓存 ✓）',
+          'def _map_luma_ref(self):' in _sp35 and 'self._map_luma' in _sp35)
+    check('v1.35 ③ ratio 真的用了新分母（`self._map_luma_ref()` 进分母 ✓）',
+          "self._map_luma_ref() if RATIO_DEN == 'map'" in _sp35
+          and 'float(g.mean()) / max(1e-6, _den)' in _sp35)
+    check('v1.35 ④ 旧口径**仍可达**（对拍/回滚不断路，不是删掉 ✓）',
+          'else self._tpl_luma(eff)' in _sp35)
+    check('v1.35 ⑤ 分母有下限保护（模板读不出时不崩 ✓）',
+          'if self._map_luma <= 1e-6:' in _sp35)
+    # ⭐ v1.35 连带修：`in_map` 的"有亮格"**不该复用 spots 的 0.75**
+    #   起因：那张 fixture 图名 OCR=「清凉沙滩」⇒ 走 S40002 模板集，
+    #   有一格 ratio **0.757** 压在 0.75 上 ⇒ 选图界面被误判成"已在图里" ✗
+    _el35 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    _i_inmap = _el35.index('def in_map(b, img, items):')
+    _i_after = _el35.index('\ndef ', _i_inmap + 10)
+    _body35 = _el35[_i_inmap:_i_after]
+    check('v1.35 ⑤b `in_map` 用**独立阈值 0.85**（不与 spots 的 0.75 混用 ✓）',
+          '_IN_MAP_LIGHT_RATIO = 0.85' in _body35
+          and '_mx >= _IN_MAP_LIGHT_RATIO' in _body35
+          and '_mx >= 0.75' not in _body35,
+          '边缘格 0.757 不再冒充正证据')
+except Exception as _e35:       # noqa: BLE001
+    check('v1.35 源码守门可运行（%r）' % (_e35,), False)
+
+# ⑯ **实跑闸**：用真机那张广袤草原帧，直接打真分类器
+try:
+    if not os.path.exists(_FB35):
+        skip('v1.35 ⑯ 实跑闸（缺真机草原帧 %s ⇒ 没真验证）' % _FB35)
+    else:
+        import cv2 as _cv35
+        import numpy as _np35
+        _img35 = _cv35.imdecode(_np35.fromfile(_FB35, dtype=_np35.uint8),
+                                _cv35.IMREAD_COLOR)
+        _g35 = _cv35.cvtColor(_img35, _cv35.COLOR_BGR2GRAY).astype(_np35.float32)
+        # 直接构造 Board（门禁已把本仓 python 目录放进 sys.path ✓）
+        import spots as _sp35mod
+        _b35 = _sp35mod.Board('S10002')
+        _L35 = _b35._map_luma_ref()
+        # ⭐ 真机人工标注：该帧**只有** 5,6 / 4,7 / 5,7 是已揭示（其余全是雾格）
+        _truth35 = {'5,6', '4,7', '5,7'}
+        _X0, _Y0, _P = 36.0, 1002.0, 144.0
+        _pad = (_P - 30.0 * 4.5) / 2.0
+        _wh = int(round(30 / 32.0 * _P))
+        _fp_new = _fn_new = 0
+        for _r in range(1, 6):
+            for _c in range(1, 8):
+                _xi = int(round(_X0 + (_c - 1) * _P + _pad))
+                _yi = int(round(_Y0 + (_r - 1) * _P + _pad))
+                if _xi < 0 or _yi < 0 or _xi + _wh > _g35.shape[1] \
+                        or _yi + _wh > _g35.shape[0]:
+                    continue
+                _m = float(_g35[_yi:_yi + _wh, _xi:_xi + _wh].mean())
+                _name = '%d,%d' % (_r, _c)
+                _pred = (_m / _L35) >= 0.75
+                if _pred and _name not in _truth35:
+                    _fp_new += 1
+                if _name in _truth35 and not _pred:
+                    _fn_new += 1
+        check('v1.35 ⑯ 实跑：**真机草原帧**误判数 FP=%d（35 格中，理论下界 1）' % _fp_new,
+              _fp_new <= 1, 'L_map=%.1f FN=%d' % (_L35, _fn_new))
+        # ⭐ 对照：旧口径（逐格分母）在这帧上的 FP —— 证明修复真有效
+        _sids35 = sorted({e[0] for e in _b35.entries})
+        _lums35 = _np35.array([_b35._tpl_luma(s) for s in _sids35])
+        _fp_old = 0
+        for _r in range(1, 6):
+            for _c in range(1, 8):
+                _xi = int(round(_X0 + (_c - 1) * _P + _pad))
+                _yi = int(round(_Y0 + (_r - 1) * _P + _pad))
+                if _xi < 0 or _yi < 0 or _xi + _wh > _g35.shape[1] \
+                        or _yi + _wh > _g35.shape[0]:
+                    continue
+                _m = float(_g35[_yi:_yi + _wh, _xi:_xi + _wh].mean())
+                _name = '%d,%d' % (_r, _c)
+                _j = int(_np35.argmin(_np35.abs(_lums35 - _m)))   # 分类器给它选的地块
+                if (_m / _lums35[_j]) >= 0.75 and _name not in _truth35:
+                    _fp_old += 1
+        check('v1.35 ⑰ 实跑：新口径 FP **显著低于**旧口径（%d → %d ⇒ 修复真有效 ✓）'
+              % (_fp_old, _fp_new), _fp_new < _fp_old)
+        # ⑱ **跨图回归**：沙滩（能跑的图）新口径必须仍判雾格 ⇒ 不把它弄坏
+        _b35s = _sp35mod.Board('S00003')
+        _L35s = _b35s._map_luma_ref()
+        _fog135 = 139.5        # 真机草原帧实测的雾格绝对亮度（同一台机同一张图盘）
+        check('v1.35 ⑱ 跨图：夏日海滩同一雾格 ratio=%.3f **仍 < 0.75**（没弄坏 ✓）'
+              % (_fog135 / _L35s), (_fog135 / _L35s) < 0.75,
+              'L_map(沙滩)=%.1f vs L_map(草原)=%.1f' % (_L35s, _L35))
+        # ⑲ 15 张图全部算得出 L_map（新增地图不用改代码 ✓）
+        _maps35 = _sp35mod.map_table()
+        _ok35 = 0
+        for _nm35, _cd35 in _maps35.items():
+            try:
+                if _sp35mod.Board(_cd35)._map_luma_ref() > 1e-6:
+                    _ok35 += 1
+            except Exception:       # noqa: BLE001
+                pass
+        check('v1.35 ⑲ **全部 %d 张图**都能自动算出 L_map（新增地图零标定 ✓）'
+              % len(_maps35), _ok35 == len(_maps35), '成功 %d/%d' % (_ok35, len(_maps35)))
+except Exception as _e35b:      # noqa: BLE001
+    check('v1.35 实跑闸可运行（%r）' % (_e35b,), False)
+# ─────────────────────────────────────────────────────────────────────────
+# ㊱ v1.36 ⭐⭐⭐【图名 OCR 错字 + 揭示阈值标定】—— 治「显示面板挡住，实际没有」
+#   用户 2026-10-02 13:30 真机报（Redmi 25053RT47C / 广袤草原）：
+#     「**最新的显示有面板挡住，但实际上没有**」✗
+#   日志铁证：`{"board_hidden":"all_dark","light":0,"gray":29}` 连关 3 次面板，
+#     可**同一帧的 OCR 结果里明明有「结束冒险」**（说明 bot 确实在图内、面板没盖住）✗
+#   ⚠ 根因**不是** board_hidden，是**图名 OCR 认错字**：
+#     OCR 把「广**袤**草原」读成「广**豪**草原」⇒ `_candidate_codes()` 的"包含"匹配
+#     **一个都不中** ⇒ 候选 `[]` ⇒ `board_for(code=None)` **回落成默认的夏日海滩**
+#     ⇒ 拿沙滩贴图去认草原的格子 ⇒ 整盘分类错 ⇒ `light=0` ⇒ 判"全暗=被挡" ✗✗✗
+#     （离线逐字复现：错字时 `light=0 gray=29`、正确字时 `light=2`、`board_hidden` True→False ✓）
+#   ⚠ 症状与"真被面板挡住"**完全一样**，只看日志分不出来 ⇒ 必须修错字容忍 ✓
+#   修法：`_candidate_codes()` 容忍**差 1 个字**（OCR 错字几乎不改长度）；
+#        候选出来后 `_disambiguate_map()` 用**真实帧实测**挑最准的 code ✓
+#   另把揭示阈值 **0.75 → 0.80**（实测：已揭示最低 0.855 / 雾格最高 0.761 ⇒ 干净带 0.78~0.85）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊱ v1.36 图名 OCR 错字容忍 + 揭示阈值 0.80')
+_FB36 = os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_r0.png')
+_FB36B = os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_live.png')
+try:
+    _el36_src = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                     encoding='utf-8').read()
+    _sp36src = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
+                    encoding='utf-8').read()
+    check('v1.36 ① 阈值可调且默认 **0.80**（真机实测干净带 0.78~0.85 的中段 ✓）',
+          'MAPBOT_REVEAL_RATIO_MIN' in _sp36src and "'0.80'" in _sp36src)
+    check('v1.36 ② 阈值**在 spots 定、explore_loop 引用**（单一来源，不两处各写 ✗）',
+          'REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN' in _el36_src
+          and 'REVEAL_RATIO_MIN = 0.75' not in _el36_src)
+    check('v1.36 ③ 定义在**所有使用点之前**（v1.34 顺序坑 `NameError` 连踩两次 ✗）',
+          _el36_src.index('REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN')
+          < _el36_src.index('def _ready_boss_cells(')
+          < _el36_src.index('def board_hidden('))
+    check('v1.36 ④ 双证据开关在位（`dual` 可现场开，默认 `single` 保守 ✓）',
+          'MAPBOT_REVEAL_EVIDENCE' in _sp36src and 'REVEAL_EVIDENCE' in _sp36src)
+    check('v1.36 ⑤ 剪影**只作否决**不作通过（已揭示格剪影与雾格重叠 ⇒ 不能单独判 ✓）',
+          'bool(_sil < FOG_SIL_MIN)' in _sp36src and 'rev_evidence' in _sp36src)
+    _ci36 = _el36_src.index('def _candidate_codes(')
+    _cbody36 = _el36_src[_ci36:_el36_src.index('\ndef ', _ci36 + 10)]
+    check('v1.36 ⑥ 候选匹配**容忍差 1 字**，长度差 >1 不认（别乱勾别的图 ✓）',
+          'diff <= 1' in _cbody36 and 'abs(len(_k) - len(_n)) > 1' in _cbody36)
+except Exception as _e36:       # noqa: BLE001
+    check('v1.36 源码守门可运行（%r）' % (_e36,), False)
+# ⑦⑧⑨ **实跑闸**：打真函数 + 两帧真机数据
+try:
+    _cand36 = EL._candidate_codes('广豪草原')      # ⭐ 真机 13:30 OCR 读到的就是这错字
+    check('v1.36 ⑦ 实跑：错字「广豪草原」仍拿到候选 **S10002**（修前是空列表 ✗）',
+          'S10002' in (_cand36 or []), 'cands=%s' % (_cand36,))
+    # ⚠ 用例要**不含**任何图名的子串，否则走的是老「包含」匹配、测不到新容错逻辑
+    # ⚠ 用例必须**既不含、也不被含**任何图名，否则命中的是老「包含」规则、测不到新容错
+    _cand36c = EL._candidate_codes('冰原原野空地')      # 与 15 个图名都无子串关系
+    check('v1.36 ⑦b 实跑：与所有图名都无子串关系 ⇒ **候选为空**（别乱勾别的图 ✓）',
+          not _cand36c, 'cands=%s' % (_cand36c,))
+    check('v1.36 ⑦c 实跑：老「包含」匹配仍有效（容错没把老规则破坏 ✓）',
+          'S00002' in (EL._candidate_codes('熔岩通道通道口') or []),
+          'cands=%s' % (EL._candidate_codes('熔岩通道通道口'),))
+    if not os.path.exists(_FB36):
+        skip('v1.36 ⑧ 执行级（缺真机草原帧 ⇒ 没真验证）')
+    else:
+        import cv2 as _cv36
+        import numpy as _np36
+        _i36 = _cv36.imdecode(_np36.fromfile(_FB36, dtype=_np36.uint8), _cv36.IMREAD_COLOR)
+        _log36 = []
+        _cd36 = EL._disambiguate_map(_i36, '广豪草原', _cand36, log=_log36)
+        _cs36 = EL.cells_of(_i36, mapname='广豪草原')
+        _bh36 = EL.board_hidden(_cs36)
+        check('v1.36 ⑧ 执行级：错字图名 ⇒ **不误判**"面板挡住棋盘"'
+              '（真机 light=0/gray=29 现象 ✓）',
+              _cd36 == 'S10002' and _bh36 is False,
+              'code=%s light=%d gray=%d board_hidden=%s'
+              % (_cd36, len(_cs36['light']), len(_cs36['gray']), _bh36))
+        _cs36b = EL.cells_of(_i36, mapname='广袤草原')
+        check('v1.36 ⑧b 正确图名**不受影响**（仍不判被挡 ✓）',
+              EL.board_hidden(_cs36b) is False,
+              'light=%d gray=%d' % (len(_cs36b['light']), len(_cs36b['gray'])))
+    # ⑨ 两帧真机（70 格）上 0.80 必须零误判（0.75 会踩 1 格）
+    if not (os.path.exists(_FB36) and os.path.exists(_FB36B)):
+        skip('v1.36 ⑨ 两帧阈值实跑（缺第二帧真机样本 ⇒ 没真验证）')
+    else:
+        import cv2 as _cv36b
+        import numpy as _np36b
+        import spots as _sp36mod
+        _bd36 = _sp36mod.Board('S10002')
+        _L36 = _bd36._map_luma_ref()
+        _X0, _Y0, _P = 36.0, 1002.0, 144.0
+        _pad = (_P - 30.0 * 4.5) / 2.0
+        _wh = int(round(30 / 32.0 * _P))
+        _pairs36 = ((_FB36, {(5, 6), (4, 7), (5, 7)}),      # 帧A 人工标注
+                    (_FB36B, {(1, 6), (1, 7), (2, 7)}))      # 帧B 人工标注
+        _fp36 = _fn36 = 0
+        for _p36, _tr36 in _pairs36:
+            _im = _cv36b.imdecode(_np36b.fromfile(_p36, dtype=_np36b.uint8), _cv36b.IMREAD_COLOR)
+            _g = _cv36b.cvtColor(_im, _cv36b.COLOR_BGR2GRAY).astype(_np36b.float32)
+            for _r in range(1, 6):
+                for _c in range(1, 8):
+                    _xi = int(round(_X0 + (_c - 1) * _P + _pad))
+                    _yi = int(round(_Y0 + (_r - 1) * _P + _pad))
+                    if _xi + _wh > _g.shape[1] or _yi + _wh > _g.shape[0]:
+                        continue
+                    _m = float(_g[_yi:_yi + _wh, _xi:_xi + _wh].mean()) / _L36
+                    if (_m >= _sp36mod.REVEAL_RATIO_MIN) and ((_r, _c) not in _tr36):
+                        _fp36 += 1
+                    if ((_r, _c) in _tr36) and (_m < _sp36mod.REVEAL_RATIO_MIN):
+                        _fn36 += 1
+        check('v1.36 ⑨ 实跑：两帧真机 70 格上阈值 0.80 ⇒ **零误判**（0.75 会踩 1 格 ✗）',
+              _fp36 == 0 and _fn36 == 0, 'FP=%d FN=%d  L_map=%.1f' % (_fp36, _fn36, _L36))
+except Exception as _e36b:      # noqa: BLE001
+    check('v1.36 实跑闸可运行（%r）' % (_e36b,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊲ v1.37 ⭐⭐⭐【真机三连修】商人买不全 / 首领格误标 / 没目标了还打拦路
+#   全部来自用户 2026-10-02 真机报告 + v1.34 日志铁证（Redmi 25053RT47C）：
+#   ① 「会把能点的素材格全点开」已由 v1.34 治；本段治剩下三个
+#   ② 「打完拦路的却显示打了首领格，后面又打了首领格」
+#   ③ 「第一次只买了三个格子，第二次又打开商人买了第四格」
+#   ④ 「打完首领格子且棋盘上没有目标了还在打拦路格子」
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊲ v1.37 商人买全 + 首领格不误标 + 幽灵目标清退图')
+try:
+    _EL37 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    _BP37 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'buypanels.py'),
+                 encoding='utf-8').read()
+    # ── ① 首领格：`near()` 的邻域结果**不许**进显示/统计 ──────────────────
+    check('v1.37 ① `exact_marks()` 存在（**只认本格**标记，不拿邻居顶替 ✓）',
+          'def exact_marks():' in _EL37)
+    check('v1.37 ② `cell_marks` 改用 **exact**（近似的另记 `near_marks` ✓）',
+          "'cell_marks': exact_marks()" in _EL37
+          and "'near_marks': mk" in _EL37)
+    check('v1.37 ③ `start_fight` 传的是 **exact**（战斗日志不再显示邻居的 boss ✗）',
+          'start_fight(b, log, btn, exact_marks())' in _EL37)
+    check('v1.37 ④ 结算 `status()` 只用 `_ex`（不再 `_ex or marks` 混口径 ✗）',
+          'tile_phrase(_ex)' in _EL37 and 'tile_phrase(_ex or marks)' not in _EL37)
+    check('v1.37 ⑤ `near()` 的 docstring 写明"**只用于内部判断**"（防后人误用 ✓）',
+          '绝不' in _EL37 and '用于显示' in _EL37)
+    # ── ② 幽灵目标：`buy_seen` 跨轮记忆必须按已消耗过滤 ────────────────
+    _bi = _EL37.index("st.get('buy_seen')")
+    _bj = _EL37.index('\n    #', _bi)
+    _mem_body = _EL37[_bi:_bj]
+    check('v1.37 ⑥ `buy_seen` 跨轮记忆**按已消耗格过滤**（幽灵目标的根因 ✓）',
+          'cell_center(*_rc_p) in done' in _mem_body
+          and '_rc_p in _consumed' in _mem_body)
+    check('v1.37 ⑦ 全是幽灵时清空 `pending_buy`（让退图判据能生效 ✓）',
+          "'targets_ghost_cleared'" in _EL37)
+    # ── ③ 商人：OCR 定位 + 数「已购买」+ 逐档验证 ───────────────────────
+    check('v1.37 ⑧ 商人「购买」钮**OCR 定位**（不写死；真机 1255 vs 实际 1771 ✗）',
+          'def _merchant_buy_btn(bot, log, i):' in _BP37
+          and 'bot.tap_dlg(btn[\'cx\'], btn[\'cy\']' in _BP37
+          and "bot.tap_dlg(*MERCHANT['buy']" not in _BP37)
+    check('v1.37 ⑨ 数「已购买」标签**判进度**（真机 OCR 明明读到了 3 个 ✗）',
+          'def _merchant_bought_count(it):' in _BP37
+          and "'merchant': 'all_bought'" in _BP37)
+    check("v1.37 ⑩ 每档买完**重新 OCR 验证**（没买成就不重复点 ✓）",
+          "else 'tap_no_effect'" in _BP37
+          and "'merchant': 'stop_no_effect'" in _BP37)
+    check("v1.37 ⑪ `i == 0` 找不到购买钮**也停**（旧版 `and i > 0` 排除第 0 次 ✗）",
+          "'merchant': 'no_buy_btn'" in _BP37)
+    check('v1.37 ⑫ `bought` 记**实际买到的档数**，不再按循环次数 +1',
+          "'merchant': 'done', 'bought': bought" in _BP37
+          and "bought += 1" not in _BP37.split('def merchant_flow')[1][:2000])
+except Exception as _e37:       # noqa: BLE001
+    check('v1.37 源码守门可运行（%r）' % (_e37,), False)
+
+# ⑬⑭ **实跑闸**：拿真机 OCR 实测坐标直接打真函数
+try:
+    import importlib.util as _ilu37
+    _bp37p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'buypanels.py')
+    _sp37 = _ilu37.spec_from_file_location('bp_v137', _bp37p)
+    _bp37m = _ilu37.module_from_spec(_sp37)
+    _sp37.loader.exec_module(_bp37m)
+    # ⭐ 真机 OCR 实测（Redmi 25053RT47C / 1280×2772 原帧）：右下角购买钮 (1061, 1771)
+    _items37 = [{'text': '旅行商人', 'cx': 816, 'cy': 1026},
+                {'text': '已购买', 'cx': 257, 'cy': 1615},
+                {'text': '已购买', 'cx': 513, 'cy': 1615},
+                {'text': '已购买', 'cx': 769, 'cy': 1615},
+                {'text': '已购买', 'cx': 1024, 'cy': 1614},
+                {'text': '购买', 'cx': 1061, 'cy': 1771}]
+    check('v1.37 ⑬ 实跑：数「已购买」= 4（真机 OCR 实测值 ✓）',
+          _bp37m._merchant_bought_count(_items37) == 4,
+          'got=%d' % _bp37m._merchant_bought_count(_items37))
+
+    class _FakeBot37(object):
+        def __init__(self, stages):
+            self._st = stages
+            self._i = 0
+            self.taps = []
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            st = self._st[min(self._i, len(self._st) - 1)]
+            return [{'text': t, 'cx': x,
+                     'cy': 1615 if '已购买' in t else 1771} for t, x in st]
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((round(x), round(y)))
+            if round(y) == 1771:
+                self._i += 1
+
+    # 场景 A：全部已买完 ⇒ **一次都不点购买**（旧版会盲点 4 次 ✗）
+    _botA = _FakeBot37([[('已购买', 257), ('已购买', 513), ('已购买', 769),
+                         ('已购买', 1024), ('购买', 1061)]])
+    _logA = []
+    _nA = _bp37m.merchant_flow(_botA, _logA)
+    _buyTapsA = [t for t in _botA.taps if t[1] == 1771]
+    check('v1.37 ⑭ 实跑：全已购买 ⇒ **0 次购买点击**（旧版盲点 4 次 ✗）',
+          not _buyTapsA and _nA == 0,
+          'bought=%d taps=%s' % (_nA, _botA.taps))
+    # 场景 B：已买 3 档 ⇒ **只补买第 4 档**（用户报的那个场景 ✓）
+    _botB = _FakeBot37([[('已购买', 257), ('已购买', 513), ('已购买', 769), ('购买', 1061)],
+                        [('已购买', 257), ('已购买', 513), ('已购买', 769),
+                         ('已购买', 1024), ('购买', 1061)],
+                        [('已购买', 257), ('已购买', 513), ('已购买', 769),
+                         ('已购买', 1024), ('购买', 1061)]])
+    _logB = []
+    _nB = _bp37m.merchant_flow(_botB, _logB)
+    _buyTapsB = [t for t in _botB.taps if t[1] == 1771]
+    check('v1.37 ⑮ 实跑：已买 3 档 ⇒ **只买 1 次**就认出买完（3_before→4 ✓）',
+          len(_buyTapsB) == 1 and _nB == 4,
+          'bought=%d 购买点击=%d' % (_nB, len(_buyTapsB)))
+    check('v1.37 ⑮b 实跑：补买那一次**用的是 OCR 坐标**（不是写死的 895,1255 ✓）',
+          _buyTapsB and _buyTapsB[0] == (1061, 1771),
+          'tap=%s' % (_buyTapsB[0] if _buyTapsB else None,))
+except Exception as _e37b:      # noqa: BLE001
+    import traceback as _tb37
+    check('v1.37 实跑闸可运行（%r）' % (_e37b,), False)
+    print('   ' + _tb37.format_exc()[-600:])
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊳ v1.38 ⭐⭐【探图连续几轮没产出就收手】—— 治「标记清完了还在继续探图」
+#   用户 2026-10-02 真机报（v1.35，Redmi 25053RT47C / 广袤草原）：
+#     「为什么现在地图上标记清完了还要继续探图？」✗
+#   **铁证**（v1.35 真机日志 + `marks_none_r3.png` 真帧**人工核对**）：
+#     `solver: no_plan`                        ← 模型已判定盘上没目标 ✓
+#     `obs_merge: grew, added: 2`              ← 探图又开了 2 格（体力照花）
+#     `{"explore":"mode","grays":20,"clicks":1}` ← 却**一个目标都没逼出来** ✗
+#     那张真帧：整盘黄色沙地 + 绿/蓝矿石，**确实一个标记都没有** ✓
+#   根因：v1.29 的 `need_explore()` 只看「暗格 ≥ 8」+「点击 < 40」，
+#     **完全不看"探图有没有产出"** ⇒ 暗格够多就永远探下去 ⇒ 白烧体力 ✗✗
+#   修法：加 `no_yield_rounds` —— 探图**连续 N 轮没逼出新目标** ⇒ 收手退图 ✓
+#   ⚠ **不能**因为加了就退��：v1.29 那个「24 暗格一格没开就退图」的病必须仍被覆盖 ✓
+# ─────────────────────────────────────────────────────────────────────────
+# ㊴⏤ v1.38 ⭐【商人选钮选错 ⇒ 一次都没买成】—— 治用户 2026-10-02 真机报
+#   「刚刚手机上那把，商人一次购买都没就显示购买完成」
+#   **真机铁证**（v1.37 日志第 44~47 行，Redmi/广袤草原）：
+#     OCR 读到 → [..., "4档","3档","2档","1档","购买",
+#                     "※依次在四个档位购买包罗万象的奖励内容"]
+#     `{"merchant":"tap_no_effect","btn":[345,1337],"n_before":0,"n_after":0}`
+#     `{"merchant":"done","bought":0}`
+#   根因：v1.37 的选钮只排除了「已购买」，可 **`※依次…购买…` 是说明文字、也含"购买"**
+#     ⇒ 排序后选中它（x=345）⇒ **点在文字上、一下都没买成** ✗
+#   ⚠ v1.37 注释里"真机只有右下角一个购买"是**错的**：那是照着**全已购买**的截图下的结论；
+#     **面板还有 4 档可买时说明文字也在** ⇒ 结论不成立 ✓（已改）
+#   修法：三重过滤 —— ① 排除「已购买」② 排除说明文字（依次/※/奖励内容/包罗万象…）
+#          ③ 仍取最靠右下的（右下角总钮 x 最大 ⇒ 真机 1061 vs 说明 443 ✓）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊴⏤ v1.38 商人选钮：排除说明文字（真机一次都没买成）')
+try:
+    import importlib.util as _ilu38
+    _bp38p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'buypanels.py')
+    _sp38 = _ilu38.spec_from_file_location('bp_v138b', _bp38p)
+    _bp38 = _ilu38.module_from_spec(_sp38)
+    _sp38.loader.exec_module(_bp38)
+    _src38 = open(_bp38p, encoding='utf-8').read()
+    check('v1.38 ① 选钮**排除说明文字**（`※依次…购买…` 也含"购买"二字 ✗）',
+          "any(w in tx for w in ('依次'" in _src38 and '包罗万象' in _src38)
+    check('v1.38 ② 仍取**最靠右下**的（右下角总钮 x 最大 ✓）',
+          "cands.sort(key=lambda t: (t['cy'], t['cx']))" in _src38)
+
+    # ⭐ **实跑闸**：直接用真机 v1.37 日志里的**真实 OCR 文本**
+    _REAL38 = ['4档', '3档', '2档', '1档', '购买',
+               '※依次在四个档位购买包罗万象的奖励内容']
+
+    def _mk38(texts, buy=(1061, 1771), desc=(443, 1785)):
+        out = []
+        for _t in texts:
+            if _t == '购买':
+                out.append({'text': _t, 'cx': buy[0], 'cy': buy[1]})
+            elif '依次' in _t:
+                out.append({'text': _t, 'cx': desc[0], 'cy': desc[1]})
+            else:
+                out.append({'text': _t, 'cx': 400, 'cy': 1100})
+        return out
+
+    class _B38(object):
+        ocr_grabs = True
+
+        def __init__(self, items):
+            self._it = items
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            return self._it
+
+    _btn38, _ = _bp38._merchant_buy_btn(_B38(_mk38(_REAL38)), None, 0)
+    check('v1.38 ③ 实跑：真机那帧（4 档可买 + 说明文字）⇒ 选中**右下角**而非说明文字',
+          (_btn38['cx'], _btn38['cy']) == (1061, 1771),
+          '选中 (%d,%d)，说明文字在 (443,1785)' % (_btn38['cx'], _btn38['cy']))
+
+    _ST38 = [['4档', '3档', '2档', '1档', '购买'],
+             ['4档', '已购买', '2档', '1档', '购买'],
+             ['4档', '已购买', '已购买', '1档', '购买'],
+             ['4档', '已购买', '已购买', '已购买', '购买'],
+             ['4档', '已购买', '已购买', '已购买', '已购买']]
+
+    class _Flow38(object):
+        ocr_grabs = True
+
+        def __init__(self):
+            self.i = 0
+            self.taps = []
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            st = _ST38[min(self.i, len(_ST38) - 1)]
+            nb = sum(1 for x in st if x == '已购买')
+            out = []
+            for _t in st:
+                if _t == '购买':
+                    out.append({'text': _t, 'cx': 1061, 'cy': 1771})
+                elif _t == '已购买':
+                    out.append({'text': _t, 'cx': 257 + 255 * nb, 'cy': 1615})
+                else:
+                    out.append({'text': _t, 'cx': 400, 'cy': 1100})
+            return out
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((round(x), round(y)))
+            if round(y) == 1771:
+                self.i += 1
+
+    _f38 = _Flow38()
+    _n38 = _bp38.merchant_flow(_f38, [])
+    _buys38 = [t for t in _f38.taps if t[1] == 1771]
+    check('v1.38 ④ 实跑：4 档可买 ⇒ **买满 4 次、记 4 档**（真机那次是 0 次 ✗）',
+          len(_buys38) == 4 and _n38 == 4,
+          '点击 %d 次 bought=%d' % (len(_buys38), _n38))
+except Exception as _e38c:      # noqa: BLE001
+    check('v1.38 商人守门可运行（%r）' % (_e38c,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊵⏤ v1.39 ⭐⭐【商人「恭喜获得」奖励页】—— 治「只买了一次就显示购买完成」
+#   用户 2026-10-02 真机报（v1.38，Redmi/广袤草原）：
+#     「旅行商人只买了一次就显示购买完成」
+#   **真机铁证**（v1.38 日志第 32/38/44 行）：
+#     第32行 商店主面板 `4档 3档 2档 1档 购买 ※依次在四个档位购买包罗万象的奖励内容`
+#     第33行 `tap_no_effect  btn=[895,1284]  n_before=0  n_after=0`
+#     第38行 **`恭喜获得`** ← **只有买成功才会出现** ⇒ 第一次点击其实**买成了** ✗
+#     第39/45行 又两次 `tap_no_effect btn=[294,1336]`（这次面板已是奖励页）
+#   根因（两层）：
+#     ① 买成判据**只数「已购买」标签** ⇒ 奖励页上没这个标签 ⇒ 读成 0
+#        ⇒ `n_before=0 → n_after=0` ⇒ 误判 `tap_no_effect` ⇒ **只买1次就收手** ✗✗
+#     ② 奖励页**也有「购买」二字**（在「依次…购买…」说明句里）⇒ 旧代码在奖励页上
+#        继续找购买钮 ⇒ 点到说明文字（294,1336 / 895,1284）⇒ 完全无效 ✗
+#   修法：① 「恭喜获得」也算买成信号  ② 已在奖励页 ⇒ 先点「返回」回商店
+#          ③ 奖励页只点**一次**返回就 `continue`（连点两次会把面板关掉 ⇒ 后面买不了 ✗）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊵⏤ v1.39 商人奖励页：买成判据认「恭喜获得」+ 只点一次返回')
+try:
+    import importlib.util as _ilu39
+    _bp39p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'buypanels.py')
+    _sp39 = _ilu39.spec_from_file_location('bp_v139', _bp39p)
+    _bp39 = _ilu39.module_from_spec(_sp39)
+    _sp39.loader.exec_module(_bp39)
+    _s39 = open(_bp39p, encoding='utf-8').read()
+    check('v1.39 ① 买成判据**认「恭喜获得」**（奖励页上没「已购买」标签 ✗）',
+          "_has(it, '恭喜获得'" in _s39 and '_ok = _got_page or' in _s39)
+    check('v1.39 ② 已在奖励页 ⇒ **先点返回**回商店（别在奖励页上找购买钮 ✗）',
+          "{'merchant': 'back_to_shop'" in _s39)
+    check('v1.39 ③ 奖励页**只点一次**返回就 `continue`（连点两次会关面板 ✗）',
+          "{'merchant': 'back_from_got'" in _s39 and 'continue' in _s39)
+    check('v1.39 ④ `bought` 按**实际 +1**（奖励页读不到标签，不能用 n_after ✗）',
+          'bought = n_after if n_after > n_bought else bought + 1' in _s39)
+    check('v1.39 ⑤ 说明文字过滤词**加长**（真机 OCR 会截断成「依次…购买包罗」✗）',
+          "'依次', '※', '每档', '奖励', '包罗', '万象'" in _s39)
+
+    # ⭐ **实跑闸**：真机 v1.38 的三帧真实 OCR 文本
+    _SHOP39 = ['旅行商人', '4档', '3档', '2档', '1档', '购买',
+               '※依次在四个档位购买包罗万象的奖励内容']
+    _GOT39 = ['旅行商人', 'X', '恭喜获得', '道具', '返回', '购买',
+              '依次在四个档位购买包罗', '4000', '每次购买后消耗的金币数量都']
+
+    def _mk39(texts, nb=0):
+        out = []
+        for _t in texts:
+            if _t == '购买':
+                out.append({'text': _t, 'cx': 1061, 'cy': 1771})
+            elif '依次' in _t:
+                out.append({'text': _t, 'cx': 443, 'cy': 1785})
+            elif '返回' in _t:
+                out.append({'text': _t, 'cx': 538, 'cy': 1267})
+            elif _t == 'X':
+                out.append({'text': _t, 'cx': 983, 'cy': 602})
+            elif _t == '已购买':
+                out.append({'text': _t, 'cx': 257 + 255 * nb, 'cy': 1615})
+            else:
+                out.append({'text': _t, 'cx': 500, 'cy': 900})
+        return out
+
+    _SEQ39 = [('s', 0), ('g', 0), ('s', 1), ('g', 1), ('s', 2), ('g', 2),
+              ('s', 3), ('g', 3), ('s', 4)]
+
+    class _F39(object):
+        ocr_grabs = True
+
+        def __init__(self, start=0):
+            self.i = start
+            self.taps = []
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            k39, nb = _SEQ39[min(self.i, len(_SEQ39) - 1)]
+            return _mk39(_SHOP39 if k39 == 's' else _GOT39, nb)
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((round(x), round(y)))
+            if (round(x), round(y)) in ((1061, 1771), (538, 1267)):
+                self.i += 1
+
+    _f39 = _F39()
+    _n39 = _bp39.merchant_flow(_f39, [])
+    _buys39 = [t for t in _f39.taps if t == (1061, 1771)]
+    _backs39 = [t for t in _f39.taps if t == (538, 1267)]
+    check('v1.39 ⑥ 实跑：4 档可买 ⇒ **买 4 次、记 4 档**（真机那次只买 1 次 ✗）',
+          len(_buys39) == 4 and _n39 == 4,
+          '买=%d 返回=%d bought=%d' % (len(_buys39), len(_backs39), _n39))
+    check('v1.39 ⑦ 实跑：买 4 档只点 **4 次**返回（连点两次会关面板 ✗）',
+          len(_backs39) == 4, '返回点击 %d 次' % len(_backs39))
+    # 奖励页上不该点「购买」——真机那次点了 (294,1336)/(895,1284)
+    _f39b = _F39(start=1)          # 直接停在奖励页
+    _bp39.merchant_flow(_f39b, [])
+    _bad39 = [t for t in _f39b.taps if t in ((294, 1336), (895, 1284))]
+    check('v1.39 ⑧ 实跑：奖励页上**不点**那两处说明文字坐标（真机 294,1336/895,1284 ✗）',
+          not _bad39, '乱点=%s' % (_bad39,))
+except Exception as _e39:       # noqa: BLE001
+    check('v1.39 奖励页守门可运行（%r）' % (_e39,), False)
 
 print()
 print('=' * 78)
