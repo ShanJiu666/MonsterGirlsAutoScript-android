@@ -127,6 +127,9 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(tick);
         ui.postDelayed(tick, TICK_MS);        // 界面可见时才轮询（别在后台白烧电/白跑 Python）
         announceHotUpdate();                  // ⭐ v1.45g：刚热更过就**弹窗**告诉用户
+        // ⭐ v1.45g 兜底：补丁也可能**刚在后台**被激活（悬浮条服务先起了 Python
+        //   ⇒ bootRecover 比 onResume 晚一点）⇒ 3 秒后再查一次，避免"擦肩而过" ✗
+        ui.postDelayed(this::announceHotUpdate, 3000);
     }
 
     /**
@@ -781,7 +784,14 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 AppLog.i("[" + label + "] ⚠ " + t);
             }
-            ui.post(this::refreshStatus);
+            ui.post(() -> {
+                refreshStatus();
+                // ⭐ v1.45g：热更补丁是在 `ensureStarted → bootRecover` 里激活的
+                //   ⇒ **弹窗必须在这里也查一次**，否则会错过时机：
+                //   进界面时补丁还没激活（onResume 查了个空），
+                //   点了「准备启动/自检」才激活 —— 那时若不查，就再也没人查了 ✗
+                announceHotUpdate();
+            });
         }, "py-" + label).start();
     }
 
