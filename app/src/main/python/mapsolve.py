@@ -291,6 +291,8 @@ class Problem:
               "当下已揭示"的格；片里必有一个已揭示格（否则它进不了 visible ✓）
 
         返回 [((r, c), block_idx, 体力)…]（1 基行列，与 visible()/rc_of 同坐标系 ✓）
+
+        ⚠ v1.61：本函数**未改**（保持与 PC 逐字一致）—— 详情见下面 `pick is None` 段的撤回说明 ✓
         """
         consumed = set(self.consumed_cells(frozenset()))   # ⭐ 含观测里本来就是空的格 ✓
         out = []
@@ -313,7 +315,20 @@ class Problem:
                 if self.block_revealed(self.board[c], consumed):
                     pick = c
                     break
-            if pick is None:                  # 兜底：整片都没揭示（不该发生）
+            # ⚠⚠ v1.61 实测结论：**这里保持 PC 原样，不要改**（曾试过"兜底不许挑雾格"，已撤回）
+            #   PC 原文（`mapbot_pc/mapsolve.py:218`）：
+            #        if pick is None:                  # 兜底：整片都没揭示（**不该发生**）
+            #            pick = cells[0]
+            #   我一度以为"真机点雾格"就是这道兜底被走到（并写了受控实验"证实"它可被走到），
+            #   但**回代真机那局日志后否掉了**：`1,5` 是被"**已消耗邻格**"选中的
+            #   （上一步 `1,6` 点过后 `consumed |= cells` ⇒ 邻格 `1,6 ∈ consumed`
+            #    ⇒ `block_revealed` 返回 True）—— **不是**兜底 ✗
+            #   ⇒ 改这道兜底既**偏离 PC**（本项目口径是"照抄"），又**会破坏揭示链推演**
+            #     （中途 `continue` 后，后续步的 `consumed` 推演与实际点击脱节）
+            #   ⇒ 真机"卡在雾格"的**真正缺口**是**执行期的两条机制**：
+            #     `fog_noop_streak`（连点雾格 ⇒ 强制重算）与 `plan_given_up`（摘掉的步记住）
+            #     —— 见 `explore_loop.py` 的 v1.61 两段 ✓
+            if pick is None:
                 pick = cells[0]
             out.append((rc_of(pick), bi, w))
             # ⚠⚠ 2026-10-01 修：原来 `consumed |= (self.plain_group(bi) if b.plain else {bi})`

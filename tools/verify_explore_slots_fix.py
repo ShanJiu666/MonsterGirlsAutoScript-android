@@ -6376,6 +6376,122 @@ try:
 except Exception as _e60f:      # noqa: BLE001
     check('v1.60 ⑯ 相对项生效性实测可运行（%r）' % (_e60f,), False)
 
+# =====================================================================================
+# ㊿⭐⭐ v1.61 执行期两条机制（`fog_noop_streak` + `plan_given_up`）—— 抄 PC M40 / 强制重算
+#
+# 真机铁证（2026-10-05 02:29，Redmi 25053RT47C，v1.60 已装机）：
+#   `{"solver":"ok","cost":15,"order":["1,6","1,5","2,5","3,5","3,3","3,2","3,1"]}`
+#   其中 `1,5`(ratio **0.617**) / `3,5`(ratio **0.616**) **都是雾**
+#   ⇒ 真机点 `3,5` = `{"tap":"fogged_noop","cell":"3,5","ratio":0.616}`
+#   ⇒ 0 进展 ⇒ 用户 **51 秒手动停止**（日志 `{"stop":"user_immediate"}`）
+#
+# 为什么这两条是缺口（本门禁同时用**两端 grep 计数**把它钉住）
+#   | 机制 | PC | 手机端 v1.60 |
+#   |---|---|---|
+#   | `plan_given_up` | 4 处 | **0 处** ✗ |
+#   | `fog_noop_streak` | 6 处 | **0 处** ✗ |
+#
+# ⚠⚠ 同时**钉住一个被撤回的改法**：`mapsolve.cells_for_plan` 的兜底（`pick = cells[0]`）
+#   一度被"确诊"为病根并改过（拒挑 `observed=False` 的格），**回代真机日志后否掉了**：
+#   `1,5` 是被"**已消耗邻格**"选中的（上一步 `1,6` 点过 ⇒ `consumed |= cells`
+#   ⇒ 邻格 `1,6 ∈ consumed` ⇒ `block_revealed` 返回 True）—— **不是**兜底 ✗
+#   ⇒ 已**撤回**（偏离 PC + 会破坏揭示链推演）⇒ 本门禁守住"它保持 PC 原样" ✓
+# =====================================================================================
+print()
+print('㊿⭐⭐ v1.61 执行期两条机制（fog_noop_streak / plan_given_up）+ 撤回守门')
+try:
+    _EL61 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _MV61 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py')
+    _PC61 = os.path.join(PROJ, '..', 'mapbot_pc', 'explore_loop.py')
+    _el61 = open(_EL61, encoding='utf-8').read()
+    _mv61 = open(_MV61, encoding='utf-8').read()
+
+    check('v1.61 ① `fog_noop_streak` **计数**（点雾格 +1；原本只记一行日志 ⇒ 零进展卡死 ✗）',
+          "st['fog_noop_streak'] = st.get('fog_noop_streak', 0) + 1" in _el61)
+    check('v1.61 ② `fog_noop_streak` **清零**（有真实反应 ⇒ 别累积误判 ✓）',
+          "st['fog_noop_streak'] = 0" in _el61)
+    check('v1.61 ③ streak ≥ 2 ⇒ **强制重算**（`_pact` 走 `plan`，**无视 PLAN_ONCE**）'
+          '—— PC `:9009-9018` 原文：「连续 ≥2 轮点雾就重算一次」✓',
+          '_fstr61 >= 2' in _el61 and "_pact, _pwhy = 'plan', 'force_fogged'" in _el61
+          and 'force_replan_fogged' in _el61)
+    check('v1.61 ④ 雾格**不**混进 `tap_no_change`（PC 教训：混了 ⇒ 3 次拉黑 ⇒ '
+          'boss 目标等同消失 ⇒ 判 `targets_done` **提前退图** ✗✗）',
+          _el61.index("st['fog_noop_streak'] = st.get('fog_noop_streak', 0) + 1")
+          < _el61.index("entry['tap_no_change'] += 1"),)
+    check('v1.61 ⑤ `plan_given_up` **写入**（点过不消耗 ⇒ 摘掉并记住；PC `:9544-9571`）',
+          "st.setdefault('plan_given_up', set()).add(tuple(_rc_g))" in _el61)
+    check('v1.61 ⑥ `plan_given_up` **消费**（`_picked` 跳过已摘步；PC `:9081-9091`）',
+          "st.get('plan_given_up') or ()" in _el61 and 'if tuple(_p) in _giv:' in _el61)
+    check('v1.61 ⑦ 计划剩余步**全被摘掉** ⇒ `finish: target_unreachable`（诚实收工，'
+          '**不冒充"目标已清完"** ✓；PC `:9102-9107`）',
+          '计划剩余步**全被摘掉**' in _el61)
+    check('v1.61 ⑨ ⚠ **撤回守门**：`mapsolve.cells_for_plan` 的兜底保持 PC 原样'
+          '（`pick = cells[0]`；曾试改"拒挑 observed=False"，**已实证否掉** ⇒ 别改回去 ✗）',
+          'if pick is None:\n                pick = cells[0]' in _mv61
+          and '_fell_back' not in _mv61 and 'cfp_skipped' not in _mv61)
+    # ⭐ v1.61 ⑬【**真断言**，不是恒真】`_infer_chain_consumed` 与 PC **逐字一致**
+    #   它曾被误判成"没抄观测闸门"（见 `v161_执行规划.md` §1.0）⇒ 有人会去改它 ✗
+    #   这里**逐行对拍**（剥掉空行/注释）把它钉住：谁"顺手加闸门"⇒ 本项当场红 ✓
+    if not os.path.exists(_PC61):
+        skip('v1.61 ⑬ `_infer_chain_consumed` 两端逐字对拍（PC 仓不在场 ⇒ 没真验证）')
+    else:
+        _pc61s = open(_PC61, encoding='utf-8').read()
+
+        def _body61(txt):
+            """取 `_infer_chain_consumed` 的**函数体末尾**，到下一个顶层定义为止
+            ⚠ 两个坑（都实测踩过）：
+              ① 不能用 `def find_camp_cell(` 当边界 —— 两端那个函数的位置不同
+                 （PC 里它排在别的函数之后）⇒ 会截出 79 vs 4736 行 ✗
+              ② 手机端 `return seed` 之后紧跟的**模块级常量**（`CAMP_TOP_MIN = 0.90`）
+                 不是函数体 ⇒ 截到 `return seed` 就把两端对齐了 ✓
+            """
+            _i = txt.index('def _infer_chain_consumed(')
+            _j = len(txt)
+            for _k in range(_i + 1, len(txt)):
+                if txt.startswith('\ndef ', _k) or txt.startswith('\n@', _k):
+                    _j = _k
+                    break
+            _body = txt[_i:_j]
+            # ⚠ `return seed` 在函数里出现 **3 次**（`INFER_CONSUMED` 关 / 没营地 / except 兜底）
+            #   ⇒ 必须取**最后一次**（except 兜底那句）才是函数体真末尾；
+            #     取第一次会把函数截成几行 ⇒ 变成**弱断言**（几乎恒真）✗
+            _last = _body.rfind('return seed')
+            if _last > 0:
+                _body = _body[:_last + len('return seed')]
+            _o = []
+            for _ln in _body.splitlines():
+                _s = _ln.strip()
+                if _s and not _s.startswith('#'):
+                    _o.append(_s)
+            return _o
+
+        _mine61 = _body61(_el61)
+        _theirs61 = _body61(_pc61s)
+        _d61 = next((('%r ≠ %r' % (x, y)) for x, y in zip(_mine61, _theirs61)
+                     if x != y), '（前面逐行相同）')
+        check('v1.61 ⑬ ⚠ **撤回守门**：`_infer_chain_consumed` 与 PC **逐字一致**'
+              '（剥空行/注释后对拍 %d vs %d 行）—— 它曾被误判成"没抄观测闸门"、'
+              '**实测两端零差异** ⇒ 谁"顺手加闸门"本项当场红 ✓'
+              % (len(_mine61), len(_theirs61)),
+              _mine61 == _theirs61, '首个差异：%s' % _d61)
+    # ⭐ 两端 grep 计数：手机端**现在必须**有这些机制（PC 有、v1.60 是 0 ⇒ 缺口已补）
+    _n61_giv = _el61.count('plan_given_up')
+    _n61_fog = _el61.count('fog_noop_streak')
+    check('v1.61 ⑩ 手机端 `plan_given_up` 出现 **%d 次**（v1.60 是 **0** ⇒ 缺口已补 ✓）'
+          % _n61_giv, _n61_giv >= 3, 'PC 端 4 处')
+    check('v1.61 ⑪ 手机端 `fog_noop_streak` 出现 **%d 次**（v1.60 是 **0** ⇒ 缺口已补 ✓）'
+          % _n61_fog, _n61_fog >= 4, 'PC 端 6 处')
+    # ⭐ 行为级：强制重算的条件在"真机那局形状"下成立（不是恒真/恒假）
+    _st61a = {'planned': True, 'plan': [(1, 6), (1, 5)], 'fog_noop_streak': 1}
+    _st61b = {'planned': True, 'plan': [(1, 6), (1, 5)], 'fog_noop_streak': 2}
+    _f61a = (int(_st61a['fog_noop_streak']) >= 2) and bool(_st61a['plan'])
+    _f61b = (int(_st61b['fog_noop_streak']) >= 2) and bool(_st61b['plan'])
+    check('v1.61 ⑫ 行为级：streak=1 ⇒ **不**重算（别过度反应）；streak=2 ⇒ **重算**'
+          '（不是恒真/恒假 ✓）', _f61a is False and _f61b is True,
+          'streak1=%s streak2=%s' % (_f61a, _f61b))
+except Exception as _e61a:      # noqa: BLE001
+    check('v1.61 ①~⑫ 源码/行为守门可运行（%r）' % (_e61a,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

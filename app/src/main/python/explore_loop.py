@@ -8565,8 +8565,35 @@ def one_round(b, log, rnd, prefix, st):
         _rest = [p for p in (st.get('plan') or [])
                  if marks_mod.cell_center(p[0], p[1]) not in done]
         _tleft = len(marked) + len(pending_buy)
+        # ⭐⭐⭐ v1.61【连续点雾格 ⇒ **强制重算计划**（无视 PLAN_ONCE）】——
+        #   抄 PC `explore_loop.py:9009-9018`。PC 注释原文（摘要）：
+        #     「真机 23:30 那把：计划 `["1,2","2,4"]` 两格都是雾 ⇒ 两轮全 `fogged_noop`
+        #       ⇒ `plan_reused` 让它**一直沿用** ⇒ 0 进展卡死 ✗
+        #       ⇒ 连续 ≥2 轮点雾就重算一次（配合 A 的观测闸门，新计划不会再排雾格）✓」
+        #
+        #   ⚠⚠ 手机端真机铁证（2026-10-05 02:29，Redmi）：
+        #     进图规划一次 ⇒ `order` 里 `1,5`(0.617) / `3,5`(0.616) **都是雾**
+        #     ⇒ 点 `3,5` = `fogged_noop` ⇒ 用户 51 秒手动停止
+        #     ⇒ 而手机端**只有** `plan_stuck`（`rest_n` 不降 ≥3 轮才切 EffPolicy）——
+        #       要等 3 轮，用户根本等不到 ✗✗
+        #   ⇒ 补这条：**连点 2 轮雾格 ⇒ 当场重算**（比 3 轮 `plan_stuck` 快一轮）✓
+        #   ⚠ 它与 `PLAN_ONCE`（一图一次）**不矛盾** —— PC 也是两者并存：
+        #     正常路径照样"算一次就沿用"；**只有"点在雾上"这个明确坏信号**才重算 ✓
+        _fstr61 = int(st.get('fog_noop_streak', 0) or 0)
+        _force61 = (_fstr61 >= 2) and bool(_rest)
+        if _force61 and st.get('plan_src') != 'eff':
+            log.append({'solver': 'force_replan_fogged', 'streak': _fstr61,
+                        'left': len(_rest),
+                        'note': '连续点雾格无反应 ⇒ **强制重算**计划'
+                                '（不再沿用；PC `:9009-9018` ✓）'})
+            say('       · 连着 %d 轮点到的都是雾格 ⇒ 强制重算计划 ✓' % _fstr61)
+            st['plan_stuck'] = 0
+            st['plan_prev_len'] = 0
+            st['fog_noop_streak'] = 0          # 重算一次就清（否则会连着重算 ✗）
         if st.get('plan_src') == 'eff':
             _pact, _pwhy = 'keep', 'eff_mode'          # 已在兜底模式 ⇒ 不再规划 ✓
+        elif _force61:
+            _pact, _pwhy = 'plan', 'force_fogged'      # ⭐ v1.61 强制重算 ✓
         else:
             _pact, _pwhy = plan_mode(st, len(_rest), _tleft)
         if _pact == 'plan':
@@ -8657,14 +8684,44 @@ def one_round(b, log, rnd, prefix, st):
             _eff_pick = []
         _picked = []
         _plan = list(st.get('plan') or [])
+        # ⭐⭐⭐ v1.61【已摘掉的步**不再进点序**】—— 抄 PC `explore_loop.py:9081-9091`
+        #   为什么要记住（PC `:9077-9080` 原文）：
+        #     「真机现象：每轮都重算出**同样的 4 步** `['4,5','4,6','4,7','5,6']`
+        #       ⇒ 又立刻被"已试过 ⇒ 摘掉"全摘掉 ⇒ **一步都没点** ⇒ 下一轮再算同样的
+        #       ⇒ 无限循环、0 进展 ✗✗」
+        #   ⇒ 摘掉的步存进 `st['plan_given_up']`，本图内**不再进点序**；
+        #     若整份计划**全是**已摘步 ⇒ 说明这图推不动 ⇒ 由下面 `_picked` 空的分支
+        #     落 `target_unreachable`（诚实收工，**不冒充"目标已清完"** ✓）
+        #   ⚠ 不是拉黑：下一张图 `st` 是新建的 ⇒ 照样会重排 ✓（"永不丢"口径 ✓）
+        _giv = set()
+        try:
+            _giv = set(st.get('plan_given_up') or ())
+        except Exception:           # noqa: BLE001
+            _giv = set()
         if _plan:
-            # 取"接下来还没做完的几步" ✓（已完成的跳过 ✓）
+            # 取"接下来还没做完的几步" ✓（已完成的跳过 ✓；**已摘掉的也跳过** ✓）
             for _p in _plan:
                 if marks_mod.cell_center(_p[0], _p[1]) in done:
+                    continue
+                if tuple(_p) in _giv:
                     continue
                 _picked.append(_p)
                 if len(_picked) >= 4:
                     break
+            # ⭐ v1.61：计划里还有未完成项，但**全是被摘掉的** ⇒ 明确收工 ✓
+            if not _picked:
+                _left61 = [p for p in _plan
+                           if marks_mod.cell_center(p[0], p[1]) not in done]
+                if _left61:
+                    log.append(entry)
+                    log.append({'finish': 'target_unreachable',
+                                'targets_left': len(_left61),
+                                'cells': ['%d,%d' % (p[0], p[1]) for p in _left61[:6]],
+                                'note': '计划剩余步**全被摘掉**（点过不消耗）⇒ 明确收工 ✓'
+                                        '（**不是"目标已清完"** ✗；抄 PC `:9102-9107`）'})
+                    say('   · 计划剩余步都点不动（已摘）⇒ 本图收工'
+                        '（标记为 **target_unreachable** ✓ 不是"目标已清完"）')
+                    return 'done'
             if _picked:
                 _sol_px = [marks_mod.cell_center(r, cc) for (r, cc) in _picked]
                 order = _sol_px + order
@@ -8871,11 +8928,26 @@ def one_round(b, log, rnd, prefix, st):
             _ratio = _tv.get('ratio')
             _fogged = (_ratio is not None and float(_ratio) < 0.8) or (_tap_rc not in _cells_now)
             if _fogged:
+                # ⭐⭐⭐ v1.61【雾格空转要**跨轮记账**】—— 抄 PC `explore_loop.py:9374-9383`
+                #   原来这条只记一行日志（"未揭示格点不动=正常"）⇒ 计划若整条都点在雾上，
+                #   下一轮 `PLAN_ONCE` 还会**沿用同一份错计划**（真机 2026-10-05 02:29 那把：
+                #   `plan` 里 `1,5`(ratio 0.617) / `3,5`(ratio 0.616) 都是雾 ⇒
+                #   真机点 `3,5` = `fogged_noop` ⇒ 0 进展 ⇒ 用户 51 秒手动停止 ✗✗）
+                #   ⇒ 记一个**跨轮连续计数**；连续 ≥2 轮都点雾 ⇒ **强制重算计划**（见规划入口）✓
+                #   ⚠ 与 `_nc`（`tap_no_change` 按格拉黑）**分工不同**：
+                #     · `_nc` 管"点了没反应**但不是雾**"（面板挡/被挡）
+                #     · 本计数管"点的是雾格"（游戏本来就不让点）—— **不能混进 `_nc`**
+                #       （PC `:9362-9367` 原文：混了 ⇒ 雾格被记 nochange ⇒ 3 次拉黑 ⇒
+                #        boss 目标等同消失 ⇒ 判 targets_done **提前退图** ✗✗）
+                st['fog_noop_streak'] = st.get('fog_noop_streak', 0) + 1
                 log.append({'tap': 'fogged_noop', 'at': (cx, cy),
                             'cell': '%d,%d' % _tap_rc,
                             'ratio': _ratio,
+                            'streak': st['fog_noop_streak'],
                             'note': '未揭示格点不动=正常 ⇒ 不计 nochange ✓'})
             else:
+                # ⭐ v1.61 抄 PC `:9385`：有真实反应（非雾）⇒ 计数清零 ✓
+                st['fog_noop_streak'] = 0
                 entry.setdefault('tap_no_change', 0)
                 entry['tap_no_change'] += 1
                 # ⭐ 2026-09-26：**按格**记「点了画面完全没反应」
@@ -8997,6 +9069,45 @@ def one_round(b, log, rnd, prefix, st):
             done.add((cx, cy))
             log.append({'tap_no_change_blacklist': '%d,%d' % (cx, cy),
                         'n': _nc[(cx, cy)]})
+        # ⭐⭐⭐ v1.61【计划里"点了不消耗"的步 ⇒ **试过就摘掉，并记住**】——
+        #   抄 PC `explore_loop.py:9535-9571`（`plan_given_up`）。
+        #
+        #   ## PC 用户口径（原话）
+        #     「**应该只需要在退图前扫一次确认有没有莱姆或者新装备吧？三轮纯浪费**」
+        #     ＋「既然点了不消耗的步全删了不影响退图流程，**就全删了**」
+        #
+        #   ## 为什么必需（PC 真机事故）
+        #     受保护的格（**标记格 / 商人宝库**）被上面那句
+        #     `not in marked_px and not in buy_px` 排除在 `cold>=2 ⇒ done` 之外
+        #     （用户口径"永不拉黑"✓）⇒ 于是它**每轮都被重新排进点序** ⇒ 真机连着 3 轮
+        #     「计划还剩 1 步」、每轮 marks 2.0s + 分类 0.5s + 点击 ≈4s ✗✗
+        #     而且**摘掉的步必须记住**（否则下一轮重算出同样的步 ⇒ 又立刻摘掉 ⇒
+        #     **一步没点、无限循环** ✗✗ —— PC `:9552-9554` 原文）
+        #
+        #   ## 手机端现状（v1.60）
+        #     `plan_given_up` / `give_up_step` **全仓 0 处**（已 grep 证实）⇒ 缺口 ✓
+        #
+        #   ⚠ 语义边界（照 PC `:9541`）：**不是拉黑** ——
+        #     只是"本图不再排这一步"（下一张图照样会重排 ✓，保持"永不丢"口径 ✓）
+        #     ⚠ 触发条件 = **走到了这一步**（本轮真的点过它、且**没弹面板**）⇒
+        #       要么被连锁消耗了（该摘 ✓）、要么真没反应（也该摘 ✓）
+        #       （"弹面板"那条在上面 `panel_seen` 分支里 `break` 掉了 ⇒ 到不了这里 ✓）
+        if not hit and not tapped_progress:
+            try:
+                _rc_g = cell_of(cx, cy)
+                st.setdefault('plan_given_up', set()).add(tuple(_rc_g))
+                _pl_g = list(st.get('plan') or [])
+                if _rc_g in _pl_g:
+                    _pl_g.remove(_rc_g)
+                    st['plan'] = _pl_g
+                    log.append({'plan': 'give_up_step',
+                                'cell': '%d,%d' % _rc_g,
+                                'nochange': int(_nc.get((cx, cy), 0)),
+                                'cold': int(cold.get((cx, cy), 0)),
+                                'note': '试过一次就摘（不拉黑、下张图重排 ✓）'
+                                        ' 抄 PC `:9544-9571`'})
+            except Exception:       # noqa: BLE001
+                pass
     entry['tried'] = tried
     entry['clear_clicks'] = st.get('clear_clicks', 0)
     # ⭐⭐ 整轮"点了都没反应" ⇒ 十有八九是**盖着面板** ⇒ 连续 2 轮就清面板/脱困，
