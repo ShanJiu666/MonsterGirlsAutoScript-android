@@ -101,7 +101,13 @@ def tpl_dirs():
     if env:
         return [env]
     pub = os.environ.get('MAPBOT_TPL_PUB') or '/sdcard/Download/autoexplore/templates/ui'
-    return [os.path.join(_MAPBOT_ROOT, *TPL_SUBDIR), pub]
+    # ⚠ v1.45e：`/sdcard/Download/…` 这个落点**真机实测 App 看不见**
+    #   （`adb push` 进去的文件，App 的 listFiles() 列不出来 ⇒ 模板永远加载不到 ✗；
+    #     证据见 `explore_loop.flag_dirs()` 的长注释）。
+    #   ⇒ 补一条 **App 自己的外部私有目录**（adb 能写、App 必然看得见 ✓）
+    ext = os.environ.get('MAPBOT_TPL_EXT') or \
+        '/sdcard/Android/data/com.fantasy.autoexplore/files/templates/ui'
+    return [os.path.join(_MAPBOT_ROOT, *TPL_SUBDIR), ext, pub]
 
 
 def load(name):

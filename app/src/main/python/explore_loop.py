@@ -939,6 +939,13 @@ def eff_order(st, c, log=None, max_steps=20):
 #     不会像旧版那样死抱着一个走不通的计划 ✗
 PLAN_STUCK_ROUNDS = 3
 
+# ⭐⭐ v1.45【规划步数上限 4 → 10】（学 PC 端 `42c65a1`，用户口径「上限改为 10 步」）
+#   与 `PLAN_ONCE` 是**配套**的：只有"一图只规划一次"才需要足够长的计划 ——
+#   截得太短 ⇒ 走完就切兜底 ⇒ 那次规划等于白算 ✗
+#   ⏱ 成本可忽略（solver p50 0.65ms）⇒ 纯粹是"要够长"的问题，不是"快慢"问题 ✓
+#   环境变量 `MAPBOT_PLAN_MAX_STEPS` 可现场调 ✓
+PLAN_MAX_STEPS = int(os.environ.get('MAPBOT_PLAN_MAX_STEPS', '10') or 10)
+
 # ⭐⭐⭐ 2026-10-02 v1.39【探索模式已**移除**】—— 用户定：「去掉探图模式」
 #   它本是 v1.29 为治「进图发呆就退出」加的兜底（没目标但暗格多 ⇒ 沿可点格开路逼标记），
 #   但真机反复**白烧体力**，且那几张盘人工核对**确实一个标记都没有**：
@@ -949,11 +956,21 @@ PLAN_STUCK_ROUNDS = 3
 #     `EXPLORE_NO_YIELD_ROUNDS`（只服务于探索模式，留着会让人以为还有效 ✗）
 #   ⇒ 若日后又要「宁可多开几格也别提前退」，从 v1.38 的 git 历史取回 `need_explore()` 即可 ✓
 
-# ⭐⭐ 2026-10-02 v1.29：**规划口径开关**（用户 10-02 白天要"进图一次"、晚上又让"换回来" ⇒
-#   两条路都留代码，别再手改逻辑 ✗；环境变量 `MAPBOT_PLAN_ONCE=1` 可现场切）
-#     False（默认）= **每轮用最新观测重解** —— 省体力（离线 96 张对拍 +9.2%~+26.1% 的优势）
-#     True         = 进图只规划一次 + 走完/推不动切兜底 —— 可预期，但多花体力
-PLAN_ONCE = bool(int(os.environ.get('MAPBOT_PLAN_ONCE', '0') or 0))
+# ⭐⭐ 2026-10-02 v1.29 / v1.45：**规划口径开关**（历史上已来回翻两次）
+#   两条路都留代码，别再手改逻辑 ✗；环境变量 `MAPBOT_PLAN_ONCE=0` 可现场切回旧口径
+#     True（**v1.45 起默认**）= 进图只规划一次 + 走完/推不动切兜底 —— 可预期 ✓
+#     False = 每轮用最新观测重解 —— 09-30 离线对拍说省 9.2%~26.1% 体力
+#   ⚠⚠ v1.45 **默认翻回 True**，学 PC 端 `0abbbdf`（用户口径：「怎么还在多次规划？
+#     我不是说过一次规划就行」）。PC 端真机铁证（用户贴的第 5 张图 ✓）：
+#       r0 计划 3 步（2,3/1,5/4,4）⇒ 点 2,3 打首领 ⇒ 胜利
+#       r2 **又算** 3 步（4,3/2,2/1,1）✗
+#       r5 **又算** 4 步（1,4/1,3/1,2/1,1）✗
+#       ⇒ 本图 71 秒，最后落到 `target_unreachable` ✗
+#   ⚠ 手机端 09-30/10-02 的对拍结论（每轮重解更省体力）**仍然成立**，
+#     但**用户 10-04 实测：一图一次并不多花体力** ⇒ 以用户口径为准 ✓
+#   ⇒ 安全网保留：计划连着 `PLAN_STUCK_ROUNDS` 轮推不动 / 走完还有目标 ⇒ 切兜底 ✓
+PLAN_ONCE = (os.environ.get('MAPBOT_PLAN_ONCE', '1') or '1') \
+    not in ('0', '', 'no', 'false')
 
 
 def plan_mode(st, rest_n, targets_left, once=None):
@@ -2511,16 +2528,53 @@ _PAR_LAST = None
 # ══════════════════════════════════════════════════════════════════════════
 
 def flag_dir():
-    """开关文件目录（**每次现读环境变量** ⇒ 门禁/测试可运行时改）"""
-    return os.environ.get('MAPBOT_FLAG_DIR') or BAG_PUB_DIR
+    """开关文件目录（**每次现读环境变量** ⇒ 门禁/测试可运行时改）
+
+    ⚠ v1.45e 起**主落点换成了 App 的外部私有目录**，原因见 `flag_dirs()` 的注释。
+    这个函数保留"单个目录"语义给门禁/旧调用方（返回列表里第一个存在的，否则第一个候选）。
+    """
+    env = os.environ.get('MAPBOT_FLAG_DIR')
+    if env:
+        return env
+    for d in flag_dirs():
+        try:
+            if os.path.isdir(d):
+                return d
+        except Exception:       # noqa: BLE001
+            pass
+    return flag_dirs()[0]
 
 
-def flag_path(name):
-    return os.path.join(flag_dir(), str(name) + '.flag')
+def flag_dirs():
+    """开关文件的**候选目录**（任一目录里有 `<名字>.flag` ⇒ 算开）
+
+    ⭐⭐⭐ v1.45e【为什么不能只用 `/sdcard/Download/…`】—— 2026-10-04 真机实测：
+      用 `adb push` 把 `menu_tpl.flag` / 模板推进
+      `/sdcard/Download/autoexplore/bagdbg/`，App **根本看不见**：
+        · 一键反馈包的收集账写着「诊断帧: 收 0 张；**非诊断 png 0 张未收**」，
+          而我 10 分钟前确实推了一张 `board_hidden_adbprobe.png` 进去 ⇒
+          **`listFiles()` 既没列出它、也没把它算成"非诊断"** ⇒ 那份目录在 App 眼里是空的 ✗
+        · 后果：A/B 的 flag **全都等于没开**、模板也**永远加载不到**
+          ⇒ 那次"44 秒/张"的 A/B 结论作废（不是变慢，是**根本没生效**）✗✗
+      ⇒ 落点改成 **App 自己的外部私有目录** `/sdcard/Android/data/<pkg>/files/`：
+        · `adb push` 能写（实测 ✓）
+        · App **必然**看得见（那是它自己的目录，文件组 `ext_data_rw` 它就在里面，
+          且它自己的 `dump/` 就住在这儿 ✓）
+      ⚠ 包名写死：本 App 的 applicationId 固定（`com.fantasy.autoexplore`），
+        而且这只是**排障/A-B 落点**，不是产品路径（正式模板进资源包）✓
+    """
+    env = os.environ.get('MAPBOT_FLAG_DIR')
+    if env:
+        return [env]
+    return [os.path.join(PUB_FILES, 'flags'), PUB_FILES, BAG_PUB_DIR]
+
+
+def flag_path(name, d=None):
+    return os.path.join(d or flag_dir(), str(name) + '.flag')
 
 
 def flag_on(name, default=False):
-    """开关文件在 ⇒ True；不在 ⇒ **default**（读不到/异常也走 default）
+    """**任一候选目录**里有 `<name>.flag` ⇒ True；都没有 ⇒ **default**
 
     ⚠ 语义容易写错（我第一版就写错了）：**必须回落到 default**，
       否则"环境变量那条路"会被这个函数**静默掐死**（`_par_on()` 用的是
@@ -2528,9 +2582,12 @@ def flag_on(name, default=False):
       门禁 v1.45 ⑧c 当场把这个错抓住了 ✓
     """
     try:
-        return True if os.path.exists(flag_path(name)) else bool(default)
+        for d in flag_dirs():
+            if os.path.exists(os.path.join(d, str(name) + '.flag')):
+                return True
     except Exception:       # noqa: BLE001
         return bool(default)
+    return bool(default)
 
 
 def _par_on():
@@ -3463,6 +3520,9 @@ SETTLE_TPL_THR = 0.80
 SETTLE_TPL_HALF = (160, 60)                 # 定点搜索半径（参考系像素）
 # 距上次"真正 OCR"超过这么多秒 ⇒ 无论模板说什么都强制 OCR 一次（安全网）
 SETTLE_FORCE_SEC = 6.0
+
+# ⭐ v1.45e：A/B 落点/模板落点的"App 外部私有目录"（见 `flag_dirs()` 的长注释）
+PUB_FILES = '/sdcard/Android/data/com.fantasy.autoexplore/files'
 
 
 def _settle_tpl_on():
@@ -7602,8 +7662,15 @@ def one_round(b, log, rnd, prefix, st):
             _pact, _pwhy = plan_mode(st, len(_rest), _tleft)
         if _pact == 'plan':
             _so = {}
-            # ⭐ 只要**前 4 步**（每轮真机就点 4 下；多要步数没有意义，还拖慢 ✓）
-            _sol = solver_order(st, c, log=log, max_steps=4, out=_so)
+            # ⭐⭐ v1.45 规划步数上限 4 → **10**（学 PC 端 `42c65a1`，用户口径「上限改为 10 步」）
+            #   原来只要前 4 步的理由是「每轮就点 4 下，多要步数没意义」——
+            #   但 `PLAN_ONCE=1`（一图一次）之后这个前提**不成立**了：
+            #     计划被 4 步截断 ⇒ 日志只看得到前 4 步 ⇒ 走完就得切兜底 ⇒ 规划白算 ✗
+            #   改 10 步后一次规划能覆盖更长的走法 ✓
+            #   ⏱ 成本可忽略：真机 solver 自报 `secs: 0.0`；离线 96 张真机盘
+            #     p50 **0.65ms** / p99 1.9ms（A* 重构后）⇒ 步数上限不是"快慢"问题 ✓
+            #   （`eff_order` 的兜底上限本来就是 20，这里保持一致量级 ✓）
+            _sol = solver_order(st, c, log=log, max_steps=PLAN_MAX_STEPS, out=_so)
             if _sol:
                 st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**（v1.29 恢复到这个口径 ✓）
                 st['plan_src'] = 'solver'

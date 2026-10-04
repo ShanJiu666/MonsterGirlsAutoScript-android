@@ -2636,13 +2636,15 @@ try:
     _el28p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
     _src28 = open(_el28p, encoding='utf-8').read()
     # ⚠ v1.38：`need_explore()` 多了 `no_yield_rounds`（探图无产出就收手）⇒ 签名已变
-    check('v1.29 ① 新增 `PLAN_ONCE` 开关 + 纯函数 `plan_mode()`（两模式都可对拍 ✓）',
-          'PLAN_ONCE = bool(int(os.environ.get(' in _src28
-          and "MAPBOT_PLAN_ONCE" in _src28
+    # ⚠ v1.45：**默认口径已翻转**（v1.29 定的是"默认每轮重解"，v1.45 按用户口径
+    #   改成"默认一图一次"，学 PC 端 0abbbdf）⇒ 下面两条改为守护**新默认**，
+    #   但"两条路都留着、可现场切"这一点仍然要守 ✓
+    check('v1.29 ① `PLAN_ONCE` 开关 + 纯函数 `plan_mode()` 都在（两条路都留着，可现场切 ✓）',
+          "MAPBOT_PLAN_ONCE" in _src28
           and 'def plan_mode(st, rest_n, targets_left, once=None):' in _src28
           and "return 'plan', 'each_round'" in _src28)
-    check('v1.29 ② 默认口径 = **每轮重解**（`PLAN_ONCE` 默认 0 ⇒ 省体力那条 ✓）',
-          "os.environ.get('MAPBOT_PLAN_ONCE', '0')" in _src28
+    check('v1.29 ② 默认口径（v1.45 起翻转为**一图一次**，见 v1.45 那组门禁 ✓）',
+          "MAPBOT_PLAN_ONCE', '1'" in _src28
           and "_pact, _pwhy = plan_mode(st, len(_rest), _tleft)" in _src28)
     check('v1.29 ③ 每轮重解要**覆盖**旧计划（`st[\'plan\'] = list(_sol)` ✓）',
           "st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**" in _src28)
@@ -2668,8 +2670,9 @@ try:
     check('v1.29 ⑥ 执行级：默认模式（`once=False`）⇒ **每轮都去重解** ✓',
           _pm({}, 3, 2, once=False) == ('plan', 'each_round')
           and _pm({}, 0, 0, once=False) == ('plan', 'each_round'))
-    check('v1.29 ⑦ 执行级：默认 `PLAN_ONCE` 就是 False（省体力口径 ✓）',
-          _pm({}, 3, 2) == ('plan', 'each_round'), 'PLAN_ONCE=%s' % _el28m.PLAN_ONCE)
+    check('v1.29 ⑦ 执行级：默认 `PLAN_ONCE` 就是 **True**'
+          '（v1.45 起翻转 = 一图一次；旧默认 False 守护的是"每轮重解"那条 ✗）',
+          _pm({}, 0, 3) == ('plan', 'first'), 'PLAN_ONCE=%s' % _el28m.PLAN_ONCE)
     _s = {}
     check('v1.28 ⑧ 执行级：`PLAN_ONCE=1` 第一轮 ⇒ `plan/first`（进图那一下 ✓）',
           _pm(_s, 0, 3, once=True) == ('plan', 'first'))
@@ -4441,10 +4444,111 @@ try:
     check('v1.45 ⑪e 短路都接了安全网（`MENU_SKIP_MAX` 内才允许跳 OCR）',
           'MENU_SKIP_MAX' in _el45_src and '_last_ocr_enter' in _el45_src)
     check('v1.45 ⑪f 开关默认关（`menu_tpl`）', EL._menu_tpl_on() is False)
+
+    # ── ⑫ 诊断出口：App 自报"看不看得见 flag 与模板"（A/B 没命中时用来定位） ──
+    _fd52 = _tf49.mkdtemp(prefix='mgas_diag_')
+    open(os.path.join(_fd52, 'menu_tpl.flag'), 'w').close()
+    _old52 = os.environ.get('MAPBOT_FLAG_DIR')
+    os.environ['MAPBOT_FLAG_DIR'] = _fd52
+    try:
+        import explore_android as _ea52
+        _d52 = _ea52._diag_caps()
+    finally:
+        if _old52 is None:
+            os.environ.pop('MAPBOT_FLAG_DIR', None)
+        else:
+            os.environ['MAPBOT_FLAG_DIR'] = _old52
+    check('v1.45 ⑫ `explore_android._diag_caps()` 真跑得出"开关目录/开关值/模板目录"',
+          isinstance(_d52, dict) and 'flag_dir' in _d52 and 'flags_on' in _d52
+          and 'tpl_dirs' in _d52,
+          {k: _d52.get(k) for k in ('flag_dir', 'flag_files', 'flags_on')})
+    check('v1.45 ⑫b 诊断里报了 `menu_tpl` 开关**已开**（这条就是 A/B 没生效时的一线证据）',
+          bool((_d52.get('flags_on') or {}).get('menu_tpl')) is True,
+          str(_d52.get('flags_on')))
+    check('v1.45 ⑫c 诊断里带**当前帧模板原始分**这个字段（区分"没加载"与"没匹配上"）',
+          'tpl_score_now' in _d52, str(_d52.get('tpl_score_now'))[:80])
+    check('v1.45 ⑫d `pyinfo` 也带这些字段（`adb broadcast … pyinfo` 一条命令就能看）',
+          'out.update(_diag_caps())' in open(
+              os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_android.py'),
+              encoding='utf-8').read())
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)
     print(_tb45.format_exc()[-900:])
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊻ v1.45【一图只规划一次 + 规划步数上限 10】（学 PC 端两条用户口径）
+#   ① `0abbbdf`「**一图只规划一次**」
+#      PC 端真机铁证（用户贴的第 5 张图 ✓）：
+#        r0 计划 3 步（2,3/1,5/4,4）⇒ 点 2,3 打首领 ⇒ 胜利
+#        r2 **又算** 3 步（4,3/2,2/1,1）✗
+#        r5 **又算** 4 步（1,4/1,3/1,2/1,1）✗
+#        ⇒ 本图 71 秒、最后落到 `target_unreachable` ✗
+#      根因 = 沿用**条件**太窄：`_plan_left_rc` 空（步都点过）会重算、
+#        `fog_noop_streak>=2`（连续点雾）也强制重算 ⇒ 一张图里反复出现 ✗
+#      手机端 `plan_next` 的结构不同，但**语义必须一样**：
+#        `planned=True` 之后**任何状态**都不得再返回 `'plan'` ✓
+#   ② `42c65a1`「**上限改为 10 步**」
+#      与 ① **配套**：一图一次 ⇒ 计划被 4 步截断就等于白算（走完即切兜底）✗
+#      ⏱ 成本可忽略（solver p50 0.65ms）⇒ 纯粹是"要够长"，不是快慢问题 ✓
+#   ⚠ 手机端 09-30/10-02 的对拍结论（每轮重解省 9.2%~26.1% 体力）仍然成立，
+#     但**用户 10-04 实测：一图一次并不多花体力** ⇒ 以用户口径为准 ✓
+#     环境变量 `MAPBOT_PLAN_ONCE=0` / `MAPBOT_PLAN_MAX_STEPS=N` 可现场切回 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊻ v1.45 一图只规划一次 + 步数上限 10')
+try:
+    import explore_loop as _el45
+    check('v1.45 ① `PLAN_ONCE` **默认 True**（一图一次；旧默认是 0=每轮重解 ✗）',
+          _el45.PLAN_ONCE is True, 'PLAN_ONCE=%s' % _el45.PLAN_ONCE)
+    check('v1.45 ② `PLAN_MAX_STEPS` = **10**（旧值 4 ⇒ 计划被截断、白算 ✗）',
+          int(_el45.PLAN_MAX_STEPS) == 10, 'PLAN_MAX_STEPS=%s' % _el45.PLAN_MAX_STEPS)
+    check('v1.45 ③ 兜底安全网还在（`PLAN_STUCK_ROUNDS` 推不动就切兜底 ✓）',
+          int(getattr(_el45, 'PLAN_STUCK_ROUNDS', 0)) >= 1,
+          'PLAN_STUCK_ROUNDS=%s' % getattr(_el45, 'PLAN_STUCK_ROUNDS', None))
+    # ④ ⭐ 核心：`planned=True` 之后**任何**组合都不得重规划（PC 0abbbdf 修的正是这个）
+    _rep45 = []
+    for _rest45 in range(0, 8):
+        for _tl45 in (0, 1, 3):
+            for _ps45 in (0, 1, 2, 3, 5):
+                _st45 = {'planned': True, 'plan_stuck': _ps45,
+                         'plan_prev_len': _rest45}
+                _a45, _w45 = _el45.plan_next(_st45, _rest45, _tl45)
+                if _a45 == 'plan':
+                    _rep45.append((_rest45, _tl45, _ps45))
+    check('v1.45 ④ 扫描 120 个 `planned=True` 组合 ⇒ **0 次重规划**'
+          '（PC 那个「r0/r2/r5 各算一次」的坑 ✓）',
+          not _rep45, '重规划=%s' % (_rep45[:5] if _rep45 else '无 ✓'))
+    # ⑤ 五个可达状态的行为对拍
+    _cases45 = [
+        ('进图第一次', {'planned': False}, 0, 2, 'plan', 'first'),
+        ('已规划有剩余', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 4},
+         4, 2, 'keep', 'has_rest'),
+        ('走完还有目标', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 0},
+         0, 2, 'eff', 'exhausted'),
+        ('走完且无目标', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 0},
+         0, 0, 'none', 'no_targets'),
+        ('连着没推进', {'planned': True, 'plan_stuck': 3, 'plan_prev_len': 5},
+         5, 2, 'eff', 'stuck'),
+    ]
+    _bad45 = []
+    for _lbl45, _st45, _rest45, _tl45, _wa45, _ww45 in _cases45:
+        _s45 = dict(_st45)
+        _a45, _w45 = _el45.plan_next(_s45, _rest45, _tl45)
+        if _a45 != _wa45:
+            _bad45.append('%s: %s≠%s' % (_lbl45, _a45, _wa45))
+    check('v1.45 ⑤ 五个可达状态行为全对（进图算一次→照走→走完切兜底→无目标不动 ✓）',
+          not _bad45, 'bad=%s' % (_bad45,) if _bad45 else '5/5')
+    # ⑥ 调用点真的用上了 PLAN_MAX_STEPS（不是只定义不用）
+    _src45 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                  encoding='utf-8').read()
+    _code45 = '\n'.join(l for l in _src45.split('\n')
+                        if not l.strip().startswith('#'))
+    check('v1.45 ⑥ 规划调用点用的是 `PLAN_MAX_STEPS`（不是写死的 4 ✗）',
+          'max_steps=PLAN_MAX_STEPS' in _code45
+          and 'max_steps=4' not in _code45)
+except Exception as _e45:       # noqa: BLE001
+    check('v1.45 守门可运行（%r）' % (_e45,), False)
 
 print()
 print('=' * 78)

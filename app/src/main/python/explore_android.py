@@ -115,11 +115,92 @@ def _install_log_tee():
     sys._mapbot_tee = True
 
 
+def _diag_caps():
+    """⭐⭐ v1.45e 诊断：**开关文件与定点模板，App 到底看不看得见**
+
+    为什么要有这一段：真机 A/B 跑完发现「短路一次都没命中」（日志里
+    `still_menu_tpl` / `back_to_menu_tpl` / `settle_tpl` 全 0 条），而**从外面完全看不出**
+    是哪一环断的 —— ① flag 没被读到？② 模板没加载？③ 模板加载了但没匹配上？
+    ⇒ 必须让 App 自己说。挂在 `pyinfo` 广播上，`adb broadcast … pyinfo` 一条命令就能看。
+
+    ⚠ 全部包 try/except：诊断**绝不允许**把 pyinfo 弄崩（它是排障入口）。
+    """
+    out = {}
+    try:
+        import explore_loop as _EL
+        try:
+            _fd = _EL.flag_dir()
+            out['flag_dir'] = _fd
+            out['flag_dir_exists'] = os.path.isdir(_fd)
+            try:
+                out['flag_files'] = sorted(f for f in os.listdir(_fd)
+                                           if f.endswith('.flag'))
+            except Exception as _e:      # noqa: BLE001
+                out['flag_files'] = 'ERR:%r' % (_e,)
+            # ⭐ 关键：**每个候选目录，App 到底看得见什么**（决定 A/B 有没有生效）
+            _lst = {}
+            for _d in _EL.flag_dirs():
+                try:
+                    _lst[_d] = (sorted(os.listdir(_d))[:14] if os.path.isdir(_d)
+                                else 'NO_DIR')
+                except Exception as _e:  # noqa: BLE001
+                    _lst[_d] = 'ERR:%r' % (_e,)
+            out['flag_dir_listing'] = _lst
+            out['flags_on'] = {n: _EL.flag_on(n)
+                               for n in ('parallel', 'settle_tpl', 'menu_tpl')}
+        except Exception as _e:          # noqa: BLE001
+            out['flag_err'] = repr(_e)
+    except Exception as _e:              # noqa: BLE001
+        out['el_err'] = repr(_e)
+    try:
+        import fixed_ref as _FR
+        _dirs = list(_FR.tpl_dirs())
+        out['tpl_dirs'] = _dirs
+        _cnt = {}
+        for _d in _dirs:
+            try:
+                _cnt[_d] = len(os.listdir(_d)) if os.path.isdir(_d) else 'NO_DIR'
+            except Exception as _e:      # noqa: BLE001
+                _cnt[_d] = 'ERR:%r' % (_e,)
+        out['tpl_dir_files'] = _cnt
+        _names = ('settle_replay_btn.png', 'settle_close_btn.png', 'settle_skip_btn.png',
+                  'enter_map_btn.png', 'quick_sweep_btn.png')
+        out['tpl_loaded'] = {n: (_FR.load(n) is not None) for n in _names}
+        # ⭐ 最关键的一条：模板在**当前这一帧**上的原始匹配分（不受阈值影响）
+        try:
+            _EL_mod = __import__('explore_loop')
+            from java import jclass
+            _png = jclass('com.fantasy.autoexplore.DeviceApi').grabRefPng()
+            if _png:
+                import cv2 as _cv
+                import numpy as _np
+                _arr = _cv.imdecode(_np.frombuffer(bytes(_png), dtype=_np.uint8),
+                                    _cv.IMREAD_COLOR)
+                _raw = {}
+                _boxes = {}
+                _boxes.update({k: (v, (140, 60)) for k, v in _EL_mod.MENU_TPL.items()})
+                _boxes.update({k: (v, _EL_mod.SETTLE_TPL_HALF)
+                               for k, v in _EL_mod.SETTLE_TPL.items()})
+                for _n, (_c, (_hx, _hy)) in _boxes.items():
+                    _g = _FR.find(_arr, _n, thr=0.0,
+                                  region=(_c[0] - _hx, _c[1] - _hy,
+                                          _c[0] + _hx, _c[1] + _hy))
+                    _raw[_n] = (round(_g[2], 3) if _g else None)
+                out['tpl_score_now'] = _raw
+            else:
+                out['tpl_score_now'] = '没有帧'
+        except Exception as _e:          # noqa: BLE001
+            out['tpl_score_now'] = 'ERR:%r' % (_e,)
+    except Exception as _e:              # noqa: BLE001
+        out['fxr_err'] = repr(_e)
+    return out
+
+
 def info():
     """当前环境快照（自检/诊断用）"""
     _bootstrap()
     import mapbot as _mb
-    return {
+    out = {
         'root': _BOOTED['root'],
         'runs': _BOOTED['runs'],
         'hot': _BOOTED.get('hot', ''),
@@ -130,6 +211,8 @@ def info():
         'unit_codes': sorted(os.listdir(os.path.join(_mb.TPL, 'unit'))) if os.path.isdir(os.path.join(_mb.TPL, 'unit')) else [],
         'save_first': os.environ.get('MAPBOT_SAVE_FIRST', '1') != '0',
     }
+    out.update(_diag_caps())
+    return out
 
 
 # ───────────────────────── v1.41 热更新 ─────────────────────────
@@ -211,6 +294,15 @@ def selftest(with_board=True):
         out.append('         datatable=%s (%s)' % (i['dt_exists'], os.path.basename(i['dt'])))
         out.append('         templates/unit 地图码 %d 个 %s' % (len(i['unit_codes']), i['unit_codes'][:6]))
         out.append('         MAPBOT_TPL_FRAMES=%s' % os.environ.get('MAPBOT_TPL_FRAMES'))
+        # ⭐ v1.45e 诊断：A/B 开关与定点模板（`pyinfo` 里也有，这里多行更好读）
+        out.append('[1b] 开关目录 = %s（在=%s）' % (i.get('flag_dir'), i.get('flag_dir_exists')))
+        out.append('         目录里的 flag = %s' % (i.get('flag_files'),))
+        out.append('         各候选目录 App 看得见什么 = %s' % (i.get('flag_dir_listing'),))
+        out.append('         开关值 = %s' % (i.get('flags_on'),))
+        out.append('[1c] 模板目录 = %s' % (i.get('tpl_dirs'),))
+        out.append('         各目录文件数 = %s' % (i.get('tpl_dir_files'),))
+        out.append('         模板能加载 = %s' % (i.get('tpl_loaded'),))
+        out.append('[1d] 当前帧模板**原始分** = %s' % (i.get('tpl_score_now'),))
     except Exception as e:      # noqa: BLE001
         out.append('[1] 资源 ✗ %r' % (e,))
         return '\n'.join(out)
