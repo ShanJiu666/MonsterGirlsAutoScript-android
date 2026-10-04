@@ -107,7 +107,43 @@ class Block:
         self.name = spot.get('name') if isinstance(spot, dict) else str(spot)
         self.special = int(spot.get('SpecialSpot') or 0) if isinstance(spot, dict) else 0
         self.size = int(spot.get('SpotSize') or 1) if isinstance(spot, dict) else 1
+        # ⭐⭐⭐ v1.51【尺寸受**实际占几格**约束】—— 抄 PC 端 `1d6b687`
+        #   PC 用户口径（原话）：「**16 为什么是 18 体？两块不应该是 4 体吗**」✓
+        #   ⇒ 块的大小不能只看数据表 `SpotSize`（海边小屋模板写 9 ✓），
+        #     还要受**这一块实际占了几格**约束：数据表 9 + 实际 2 格
+        #     ⇒ 应按 **2 格**计价（战斗 ⇒ 2×2 = **4 体** ✓；原来按 9 算 ⇒ 18 体 ✗）
+        #   ⚠ 与"按分数降级"**不同**（那条已被用户否掉 ✗「别随意降门槛」）——
+        #     这里**不碰分数**，只用"块实际占几格"这个**几何事实** ✓
+        #   回归影响：单格内容格 ⇒ min(表值,1)=1 ✓；真 4 格游乐设施 ⇒ min(5,4)=4 ✓
+        if isinstance(spot, dict):
+            _obs_cells = spot.get('cells')
+            if isinstance(_obs_cells, (list, tuple)) and len(_obs_cells) > 0:
+                self.size = max(1, min(self.size, len(_obs_cells)))
         self.revealed = revealed          # 已揭示（不压暗、可点）
+        # ⭐⭐⭐ v1.51【观测值】—— **建块时从观测读到的 revealed，此后永不改动**（抄 PC）
+        #   为什么要单独存一份：`_infer_revealed()` / `reveal_neighbours()` 会用
+        #   **邻接推演**把某些块的 `revealed` 改成 True（"邻格是空地 ⇒ 该块被揭示"）——
+        #   可一旦模型对"哪些格已消耗"的判断有偏差（真机 23:30 那把：4 格被推断成
+        #   已消耗并被删出模型 ⇒ board<0 ⇒ 求解器当成空地），它**旁边的雾格**就会被
+        #   推演成"已揭示/可点" ⇒ **计划里出现点不动的格** ✗✗
+        #   ⇒ `mapsolve.Problem.block_revealed` 用这个 `observed` 做**观测闸门**，
+        #     推演出来的 revealed **不再有资格**让一个块"变成可点" ✓
+        self.observed = bool(revealed)
+        # ⭐⭐⭐ v1.51【营地标记】—— 抄 PC 端（用户口径：「营地应该最好认吧，稳定是
+        #   揭示状态的，**先固定下来营地**？」）
+        #   为什么必须喂给模型：`mapsolve.Problem` 原来**只按块名含"营地"**找营地，
+        #   而营地格经常被多格块吞掉 ⇒ `Problem.camp = None` ⇒ 揭示规则
+        #   「与**营地**或已消耗格 4 邻接」**没有起点** ⇒ 求解器 `exhausted`（无解）
+        #   ⇒ **整张图干等/退图** ✗✗
+        #   ⇒ 循环侧认出来后给那一格打 `camp=True`，这里接住它 ✓
+        self.camp = bool(spot.get('camp')) if isinstance(spot, dict) else False
+        # ⭐⭐⭐ v1.51【营地到底是哪一格】（可多格块）—— 抄 PC 端
+        #   离线铁证（r_233023_0.png）：营地格 (2,1) 属于 4 格块 `巨大沙堡`
+        #   (1,1)(2,1)(2,2)(2,3) ⇒ 若拿**整块**当"揭示源"，boss(1,2) 与 (1,1)/(2,2)
+        #   相邻 ⇒ 被捷径判"可点" ⇒ 又排进计划（真机就是雾格）✗✗
+        #   ⇒ 只记带 camp 标记的那一格 ✓
+        self.camp_cells = ([int(x) for x in (spot.get('camp_cells') or [])]
+                           if isinstance(spot, dict) else [])
         self.mark = mark                  # 'boss' | 'redEquip' | 'recommend' | 'clover' | None
         self.gone = gone                  # 已消耗
         self.cells = []                   # 占用的格子（0 基 cell 索引）
@@ -224,6 +260,11 @@ class MapSim:
         self.clicks = 0
         self.stamina = 0            # ⭐ 累计体力（源码口径，见 charge()）
         self.log = []
+        # ⭐ v1.51：**观测格里出现过哪些格** —— `mapsolve._build_cache` 的 `EMPTY_ADJ`
+        #   闸门要用它：观测里没有的格**不许**当"已消耗"去揭示邻居 ✓
+        #   ⚠ 默认 `None` ⇒ 闸门**不启用**（老调用/全知盘/内存盘行为一字不变 ✓）
+        #     —— 与 PC 同口径（`obs_cells` 只在 `from_observation` 那条路被赋值 ✓）
+        self.obs_cells = None
 
     # ---------- 体力（源码 82956-82992） ----------
     @staticmethod
@@ -277,9 +318,16 @@ class MapSim:
         if any(isinstance(v, dict) and v.get('anchor') for v in cells.values()):
             return cls._from_anchors(cells, spot_table)
         board = [-1] * NCELL
+        # ⭐⭐⭐ v1.51【观测格集合】—— 抄 PC：**观测里真的有哪几格**
+        #   `mapsolve._build_cache` 的 `EMPTY_ADJ` 用它做闸门：观测里没有的格
+        #   **不许**当"已消耗"去揭示邻居（真机 23:30 那把：4 格被推断成已消耗并
+        #   **删出观测** ⇒ `board<0` ⇒ 邻居被判"开局已揭示" ⇒ **计划点雾格** ✗✗）
+        #   ⚠ 只有拿到观测格集合时才启用 ⇒ 老调用/全知盘（`mapgen`）行为一字不变 ✓
+        obs_cells = set()
         idx_of = {}
         blocks = []
         for (r, c) in sorted(cells):
+            obs_cells.add(cell_of(r, c))        # ⭐ v1.51：这一格**观测里真的有** ✓
             sid = cells[(r, c)].get('sid') or cells[(r, c)].get('name')
             # ⚠ 只有 **SpotSize>1 的大地块**才跨格；1 格地块（草地/海螺…）各自独立 ✗
             #   （否则相邻同 sid 的草地会被并成一大块，块数/体力/揭示全算错）
@@ -310,6 +358,13 @@ class MapSim:
             row['name'] = cells[(r, c)].get('name') or sid
             if 'target' in cells[(r, c)]:              # ⭐ 目标白名单（targets_cfg）✓
                 row['want'] = bool(cells[(r, c)].get('target'))
+            # ⭐⭐⭐ v1.51 抄 PC（与 `_from_anchors` 那条**同步** ✓）：
+            #   · `camp` / `camp_cells` ⇒ `Problem.camp` 的兜底锚点（营地被吞时必须有 ✓）
+            #   · `cells`               ⇒ `Block.size` 按**实际格数**封顶 ✓
+            if cells[(r, c)].get('camp'):
+                row['camp'] = True
+                row['camp_cells'] = [cell_of(r, c)]
+            row['cells'] = [cell_of(r, c)]
             # ⭐ v1.44 拉黑标（与 `_from_anchors` 那条**同步** ✓）：
             #   row 是从数据表构造的 ⇒ 观测字段必须**显式搬过来**，否则到不了 Block ✗
             if 'blocked' in cells[(r, c)]:
@@ -320,7 +375,9 @@ class MapSim:
             b.cells = [cell_of(r, c)]
             idx_of[(r, c)] = b.idx
             blocks.append(b)
-        return cls(board, blocks)
+        _sim = cls(board, blocks)
+        _sim.obs_cells = obs_cells        # ⭐ v1.51：观测格集合（EMPTY_ADJ 闸门用 ✓）
+        return _sim
 
     @classmethod
     def _from_anchors(cls, cells, spot_table):
@@ -333,13 +390,26 @@ class MapSim:
         grp = {}
         for k, v in cells.items():
             a = tuple(v.get('anchor') or k)
-            grp.setdefault(a, []).append(k)
+            # ⭐⭐⭐ v1.51【分组键 = `(anchor, sid)`】—— 抄 PC 端 `279d311`
+            #   PC 根因修复（用户口径：「**只有相连的空地才能连锁**」✓）
+            #   真机实证（`runs/r_184822_0.png`）：同一 anchor 里混了 **001 草地** 与
+            #   **211 巨大沙堡** ⇒ 块 sid 取 head 的 `_001` ⇒ `plain=True` ⇒
+            #   **`plain_group` 连锁穿过它** ✗ ⇒ 模型"草地片"=18 格、**10 格非草地**
+            #   （含 boss (1,4) 椰树、宝箱 (4,3) 0.999 …）⇒ 模型以为
+            #   "点 (4,1) 一步连锁吃整片（含 boss）"⇒ **计划直接点雾里的 boss
+            #   ⇒ 漏打 boss** ✗✗
+            #   ⇒ 同 anchor 内不同 sid ⇒ **各建一块** ✓
+            #     （不动函数体、不重新缩进 ⇒ 出错面最小 ✓；每组仍按原路径完成
+            #      row → Block() → board[] → blocks.append 的全套记账 ✓）
+            _sid_k = str(v.get('sid') or '')
+            grp.setdefault((a, _sid_k), []).append(k)
         board = [-1] * NCELL
         blocks = []
-        for a in sorted(grp):
-            members = sorted(grp[a])
+        for _key in sorted(grp):
+            a = _key[0]                          # ⭐ 键 = (anchor, sid) ✓
+            members = sorted(grp[_key])
             head = dict(cells.get(a) or cells[members[0]] or {})
-            sid = head.get('sid') or head.get('name')
+            sid = (_key[1] or head.get('sid') or head.get('name'))     # ⭐ 用本组的 sid ✓
             row = dict(spot_table.get(sid) or {})
             marks = list(head.get('marks') or [])
             for m in members:
@@ -373,6 +443,23 @@ class MapSim:
             # ⭐ v1.44 拉黑标（与单格那条**同步** ✓，见 Block.blocked 的说明）
             if 'blocked' in head:
                 row['blocked'] = bool(head.get('blocked'))
+            # ⭐⭐⭐ v1.51 抄 PC：这三个字段要在**成员上聚合**再搬进 row ✗ 只看 head 会漏
+            #   （`row` 是**单独从地块表构造**的 ⇒ 观测字段必须显式搬，否则到不了 Block ✗）
+            #   · `cells` ⇒ `Block.size` 按**实际格数**封顶（治「16 为什么是 18 体」✓）
+            #   · `camp` / `camp_cells` ⇒ `Problem.camp` 的兜底锚点 ——
+            #     ⚠⚠ **真机铁证（PC 离线复算 r_233023_0.png）**：营地格 (2,1) 属于多格块
+            #       `巨大沙堡`（anchor=(1,1)）⇒ **走的就是这条路**，而 `head` 是**锚点那一格**、
+            #       `camp=True` 常常打在**成员格**上 ⇒ 只看 head ⇒ `Block.camp=False`
+            #       ⇒ `Problem.camp=None` ⇒ 揭示链**没有起点** ⇒ 求解器 `exhausted`
+            #       （**整张图干等/退图**）✗✗
+            #     ⇒ **锚点或任一成员带 camp 标记 ⇒ 标到整块上** ✓
+            #     ⇒ 而 `camp_cells` 只收**真正带标记的那几格**（不是整块 ✓，
+            #        否则 boss 会被整块邻接误判"开局可点" ✗）
+            row['cells'] = [tuple(x) for x in members]
+            if head.get('camp') or any((cells.get(m) or {}).get('camp') for m in members):
+                row['camp'] = True
+                row['camp_cells'] = [cell_of(*m) for m in members
+                                     if (cells.get(m) or {}).get('camp')]
             b = Block(len(blocks), row, revealed=bool(grew),
                       mark=(marks[0] if marks else None))
             b.cells = [cell_of(*m) for m in members
@@ -380,7 +467,11 @@ class MapSim:
             for c in b.cells:
                 board[c] = b.idx
             blocks.append(b)
-        return cls(board, blocks)
+        _sim2 = cls(board, blocks)
+        # ⭐ v1.51：观测格集合 = 观测里**出现过的格**（`cells` 的键就是"看到了的格"✓）
+        _sim2.obs_cells = {cell_of(r, c) for (r, c) in cells
+                           if 0 <= r - 1 < ROWS and 0 <= c - 1 < COLS}
+        return _sim2
 
     @classmethod
     def from_memory_dump(cls, bin_path, spot_table):

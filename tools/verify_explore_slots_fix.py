@@ -3913,15 +3913,15 @@ try:
         (2, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
                  'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
         (3, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
-                 'ratio': 0.9, 'marks': []},
+                 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
         (4, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
-                 'ratio': 0.9, 'marks': []},
+                 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
         (1, 4): {'sid': 'S00003_001', 'name': '草地', 'revealed': True,
                  'ratio': 0.9, 'marks': [], 'anchor': (1, 4)},
         (2, 3): {'sid': 'S00003_222', 'name': '巨大沙堡', 'revealed': True,
                  'ratio': 0.9, 'marks': ['boss'], 'anchor': (2, 3)},
         (3, 3): {'sid': 'S00003_222', 'name': '巨大沙堡', 'revealed': True,
-                 'ratio': 0.9, 'marks': ['boss']},
+                 'ratio': 0.9, 'marks': ['boss'], 'anchor': (2, 3)},
     }
     _sim43 = _sim43.MapSim.from_observation(_cells43, _sp43.spot_rows())
     _prob43 = _ms43.Problem(_sim43)
@@ -5116,6 +5116,160 @@ try:
           'stale-' in _up49 and 'stale-pend-' in _up49)
 except Exception as _e49:       # noqa: BLE001
     check('v1.49 守门可运行（%r）' % (_e49,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊿⏤ v1.51【抄 PC 的规划算法】—— 五处实质缺口（通读 PC 规划栈后逐条对出来的）
+#   ⚠⚠⚠ **本组门禁的第一原则：必须从 `solve()` 真跑** ✗ 不许只测中间函数
+#     教训（我自己踩的）：v1.44 我加了"拉黑块不进规划"，改的是
+#     `Problem.visible()`（集合版）并**测了它**；可 **`solve()` 用的是它自己那份
+#     位掩码版 `visible(m)`** ⇒ 修了等于没修、**门禁还全绿** ✗✗
+#     ⇒ 本组每条都尽量调 `solve()`（并在注释里写明为什么 ✓）
+#
+#   ① 拉黑块**真的**不进求解器（`_build_cache` 的 `blocked_mask` + `solve` 内部消费）
+#   ② 分组键 **`(anchor, sid)`** —— 治「**漏打 boss**」
+#      PC 真机实证：同 anchor 混了 001 草地 与 211 巨大沙堡 ⇒ 块 sid 取成 `_001`
+#      ⇒ `plain=True` ⇒ `plain_group` **连锁穿过它** ⇒ 模型"草地片"=18 格、
+#      **10 格非草地**（含 boss）⇒ 以为"一步连锁吃掉含 boss 的整片"
+#      ⇒ **计划直接点雾里的 boss** ✗✗
+#   ③ 尺寸按**实际格数**封顶 —— 治「**16 为什么是 18 体**」
+#   ④ 营地锚点：`Block.camp` 兜底 + `camp_cells`（**那一格**，不是整块）
+#      · 无兜底 ⇒ 营地被多格块吞掉时 `Problem.camp=None` ⇒ 揭示链没起点
+#        ⇒ 求解器 `exhausted` ⇒ **整图干等/退图** ✗
+#      · 用整块 ⇒ boss 被整块邻接误判"开局可点" ⇒ 计划点雾格 ✗
+#   ⑤ `step_cost` 委托 `block_cost`（消掉**双真相源**）
+#   ⑥ 观测闸门（`obs_consumed` / `obs_cells` / `Block.observed` / `EMPTY_ADJ` 闸门）
+#      —— 治「**计划点雾格**」：模型相信某格已消耗（其实是雾）⇒ 旁边雾格被判可点 ✗
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊿⏤ v1.51 抄 PC 规划算法（全部**从 solve() 真跑** ✓）')
+try:
+    import importlib as _il51
+    _il51.invalidate_caches()
+    import spots as _sp51
+    import mapsim as _sim51
+    import mapsolve as _ms51
+
+    def _c51(sid, name, marks=(), anchor=None, target=None, **kw):
+        _d = {'sid': sid, 'name': name, 'revealed': True, 'ratio': 0.9,
+              'marks': list(marks), 'anchor': anchor or (0, 0)}
+        if target is not None:
+            _d['target'] = target
+        _d.update(kw)
+        return _d
+
+    # ⚠ 真实观测**包含棋盘每一格**（`_cells_for_model` 覆盖 5×7 全部）
+    #   ⇒ 测试盘也必须铺满，否则 `obs_cells` 闸门会把"没给的格"当不存在 ✗
+    def _full51(over=None):
+        _c = {}
+        for _r in range(1, 6):
+            for _cc in range(1, 8):
+                _c[(_r, _cc)] = _c51('S00003_001', '草地', anchor=(_r, _cc))
+        _c.update(over or {})
+        return _c
+
+    # ① 拉黑块真的不进求解器
+    _cells51 = _full51({
+        (1, 1): _c51('S00003_000', '营地', anchor=(1, 1)),
+        (2, 1): _c51('S10001_001', '勇者之墓', anchor=(2, 1), target=False,
+                     blocked=True),
+        (3, 3): _c51('S00003_002', '沙地', marks=['boss'], anchor=(3, 3),
+                     target=True),
+    })
+    _sim51v = _sim51.MapSim.from_observation(_cells51, _sp51.spot_rows())
+    _prob51 = _ms51.Problem(_sim51v)
+    _blk51 = [bi for bi, b in _prob51.blocks.items()
+              if getattr(b, 'blocked', False)]
+    _cost51, _acts51 = _ms51.solve(_prob51)
+    check('v1.51 ① 实跑 `solve()`：计划**不含拉黑块**（v1.44 那次修没进求解器 ✗）',
+          _acts51 is not None and not any(a in _blk51 for a, _ in _acts51),
+          '拉黑=%s 计划=%s' % (_blk51, _acts51))
+    _src51 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
+                  encoding='utf-8').read()
+    check('v1.51 ①b `solve()` 内部那份 visible 里有 `blocked_mask`'
+          '（**不是**只改 `Problem.visible()` ✗ —— 求解器用的是前者）',
+          "out &= ~ch.get('blocked_mask', 0)" in _src51)
+    _ch51 = _ms51._build_cache(_prob51)
+    check('v1.51 ①c `_build_cache` 真的产出了 `blocked_mask`（非 0 ✓）',
+          _ch51.get('blocked_mask', 0) != 0, 'mask=%s' % _ch51.get('blocked_mask'))
+
+    # ② 分组键 (anchor, sid)
+    _cells52 = _full51({
+        (1, 1): _c51('S00003_000', '营地', anchor=(1, 1)),
+        (2, 1): _c51('S00003_001', '草地', anchor=(2, 1)),
+        (3, 1): _c51('S00003_211', '巨大沙堡', marks=['boss'], anchor=(2, 1),
+                     target=True),
+    })
+    _sim52 = _sim51.MapSim.from_observation(_cells52, _sp51.spot_rows())
+    _by52 = {b.sid: b for b in _sim52.blocks.values()}
+    _castle52 = _by52.get('S00003_211')
+    check('v1.51 ② 实跑：同 anchor 不同 sid ⇒ **各建一块**（草地与巨大沙堡不并 ✓）',
+          'S00003_001' in _by52 and _castle52 is not None,
+          'sid=%s' % sorted(_by52))
+    check('v1.51 ②b 实跑：巨大沙堡**不可能是 plain**'
+          '（否则连锁穿过它 ⇒ 一步吃掉含 boss 的整片 ⇒ 漏打 boss ✗）',
+          _castle52 is not None and not _castle52.plain)
+
+    # ③ 尺寸按实际格数封顶
+    _big53 = None
+    for _sid53, _row53 in (_sp51.spot_rows() or {}).items():
+        if int(_row53.get('SpotSize') or 0) >= 5:
+            _big53 = _sid53
+            break
+    _nm53 = (_sp51.spot_rows() or {})[_big53].get('Name')
+    _sim53 = _sim51.MapSim.from_observation(_full51({
+        (1, 1): _c51('S00003_000', '营地', anchor=(1, 1)),
+        (2, 1): _c51(_big53, _nm53, anchor=(2, 1)),
+        (3, 1): _c51(_big53, _nm53, anchor=(2, 1)),
+    }), _sp51.spot_rows())
+    _b53 = [b for b in _sim53.blocks.values() if b.sid == _big53]
+    check('v1.51 ③ 实跑：块 size 按**实际格数**封顶'
+          '（表 %s 格 → 实占 2 格 ⇒ 2；治「16 为什么是 18 体」✗）'
+          % (_sp51.spot_rows() or {})[_big53].get('SpotSize'),
+          _b53 and _b53[0].size == 2,
+          'size=%s' % (_b53[0].size if _b53 else None))
+
+    # ④ 营地兜底 + camp_cells
+    _sim54 = _sim51.MapSim.from_observation(_full51({
+        (1, 1): _c51('S00003_211', '巨大沙堡', anchor=(1, 1)),
+        (2, 1): _c51('S00003_211', '巨大沙堡', anchor=(1, 1), camp=True),
+        (3, 1): _c51('S00003_002', '沙地', marks=['boss'], anchor=(3, 1),
+                     target=True),
+    }), _sp51.spot_rows())
+    _prob54 = _ms51.Problem(_sim54)
+    check('v1.51 ④ 实跑：营地被多格块吞掉时，靠 `Block.camp` **兜底认出**'
+          '（块名不是"营地"也认 ✓；否则揭示链没起点 ⇒ 求解器无解 ⇒ 整图干等 ✗）',
+          _prob54.camp is not None, 'camp=%s' % _prob54.camp)
+    check('v1.51 ④b 实跑：`camp_cells` = **营地那一格**（不是整块 ✓'
+          '——整块会让 boss 被误判"开局可点" ✗）',
+          _prob54.camp_cells and len(_prob54.camp_cells) == 1,
+          'camp_cells=%s' % sorted(_prob54.camp_cells))
+    _cost54, _acts54 = _ms51.solve(_prob54)
+    check('v1.51 ④c 实跑：求解器**不再无解**（营地锚点在 ⇒ 有揭示起点 ✓）',
+          _acts54 is not None, 'cost=%s' % _cost54)
+
+    # ⑤ step_cost 单一真相源
+    _seg55 = _src51[_src51.find('def step_cost'):][:1400]
+    check('v1.51 ⑤ `step_cost` 委托 `block_cost`（不再抄一遍定价 ⇒ 无双真相源 ✓）',
+          'return self.block_cost(self.blocks[bi])' in _seg55)
+
+    # ⑥ 观测闸门（治"计划点雾格"）
+    check('v1.51 ⑥ `Problem` 有 `obs_consumed` / `obs_cells`（观测闸门的地基 ✓）',
+          hasattr(_prob51, 'obs_consumed') and hasattr(_prob51, 'obs_cells'))
+    check('v1.51 ⑥b `block_revealed` 有观测闸门'
+          '（观测说它是雾 ⇒ **不许**因"邻格被推断为已消耗"而判可点 ✗）',
+          'if n in self.obs_consumed and not _obs:' in _src51)
+    check('v1.51 ⑥c `_build_cache` 的 `EMPTY_ADJ` 有 `obs_cells` 闸门'
+          '（观测里没有的格不许当"已消耗"去揭示邻居 ✓）',
+          'if _obs_cells and c not in _obs_cells:' in _src51)
+    _sm51 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py'),
+                 encoding='utf-8').read()
+    check('v1.51 ⑥d `Block` 有 `observed`（**建块时固定**的观测值，推演不改它 ✓）',
+          'self.observed = bool(revealed)' in _sm51)
+    check('v1.51 ⑥e `MapSim` 默认 `obs_cells = None`'
+          '（老调用/全知盘行为一字不变 ✓）',
+          'self.obs_cells = None' in _sm51)
+except Exception as _e51:       # noqa: BLE001
+    check('v1.51 守门可运行（%r）' % (_e51,), False)
 
 print()
 print('=' * 78)

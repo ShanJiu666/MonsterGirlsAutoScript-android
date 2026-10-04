@@ -77,9 +77,41 @@ class Problem:
             if bi >= 0:
                 self.cells_of[bi].append(c)
         self.camp = None
+        # ⭐⭐⭐ v1.51【观测地基】—— 抄 PC（这是"观测闸门"那一族的前提）
+        #   `obs_consumed`：**观测里本来就是空的格**（`board<0`）——
+        #     用于区分「观测时就已经消耗」和「搜索推演过程中才消耗」：
+        #     · 前者（观测消耗）揭示过的块，**观测里本应看得见** ⇒ 若观测说是雾，
+        #       说明"它被消耗"是模型自己的推断（幻影）⇒ **不许据此判"可点"** ✓
+        #     · 后者（推演消耗）是**多步揭示链**的正常推演 ⇒ **必须放行**，
+        #       否则目标一旦藏在雾里就永远不可达 ⇒ `exhausted`（无解、整图干等）✗✗
+        #   （这两条是 PC 用真机帧 A/B 出来的：只做前者 ⇒ 无解；只做后者 ⇒ 点雾格 ✓）
+        self.obs_consumed = {c for c in range(NCELL) if self.board[c] < 0}
+        #   `obs_cells`：**观测里真的有哪几格**（`MapSim.from_observation` 记的）——
+        #     `_build_cache` 的 `EMPTY_ADJ` 用它做闸门：观测里没有的格
+        #     **不许当"已消耗"** ✓（⚠ 拿不到 ⇒ 闸门不启用，行为一字不变 ✓）
+        self.obs_cells = set(getattr(sim, 'obs_cells', None) or ())
         for b in self.blocks.values():
             if '营地' in (b.name or ''):
                 self.camp = b.idx
+        # ⭐⭐⭐ v1.51 兜底：按块名找不到营地时，用观测里**明确标了 camp** 的块 ✓
+        #   （用户口径：「营地应该最好认吧，稳定是揭示状态的，**先固定下来营地**？」）
+        #   为什么必须有这条：营地格常被多格块吞掉 ⇒ 块名不是"营地" ⇒ `camp=None`
+        #   ⇒ 揭示规则「与营地/已消耗格 4 邻」**没有起点** ⇒ 求解器 `exhausted`（无解）
+        #   ⇒ **整张图干等/退图** ✗✗（PC 真机 23:30 那把铁证）
+        if self.camp is None:
+            for b in self.blocks.values():
+                if getattr(b, 'camp', False):
+                    self.camp = b.idx
+                    break
+        # ⭐⭐⭐ v1.51 **营地的揭示源 = 营地那一格**（不是整个多格块）—— 抄 PC
+        #   离线铁证：营地 (2,1) 属于 4 格块 `巨大沙堡` ⇒ 拿整块当揭示源时，
+        #   boss(1,2)（与 (1,1)/(2,2) 相邻）会被判"可点" ⇒ 又排进计划、真机是雾格 ✗✗
+        #   ⇒ 优先用 `Block.camp_cells`（真正带 camp 标记的格）；没有就退回整块 ✓
+        self.camp_cells = set()
+        if self.camp is not None:
+            _cb2 = self.blocks.get(self.camp)
+            self.camp_cells = (set(getattr(_cb2, 'camp_cells', None) or ())
+                               or set(self.cells_of.get(self.camp, ())))
         self.targets = set()
         for b in self.blocks.values():
             # ⭐⭐⭐ 2026-09-28 用户要求（「勾选某一种方块，后续就专门去拿；不勾就不规划」）：
@@ -120,7 +152,23 @@ class Problem:
             return False
         if self.camp is not None and bi == self.camp:
             return True
-        camp_cells = self.cells_of.get(self.camp, ()) if self.camp is not None else ()
+        # ⭐⭐⭐ v1.51【观测闸门】—— 抄 PC，治「**计划去点雾格**」
+        #   原来这条判据**纯邻接推演**（只与营地/已消耗格 4 邻接），**完全不看观测**：
+        #   只要模型相信"某个格已被消耗"（哪怕它其实还是雾），它**旁边的雾格**就会被判
+        #   "已揭示/可点" ⇒ 计划里出现点不动的格 ⇒ 真机 `fogged_noop` 空转 ⇒
+        #   **整条计划错位、漏目标** ✗✗
+        #   真机铁证（PC gui_20261002_232950）：
+        #     #11 done_cells_dropped: 4 格 (1,1 2,1 2,2 2,3)  ← 被推断成"已消耗"并删出模型
+        #     #12 solver ok: order ["1,2","2,4"]
+        #     #13/#14 tap: fogged_noop (1,2) ratio 0.665 / (2,4) ratio 0.717  ← 真机是雾 ✗
+        #   ⇒ 块内必须**在观测里就有一格是已揭示的**（`Block.observed`，
+        #     由建块时的观测值固定，`_infer_revealed()` 推演出来的**不算**）才允许判"可点" ✓
+        #   ⚠ 方向安全：观测说"已亮"但实际点不动（如被面板挡）仍会在计划里 —— 那是
+        #     `tap` 的 nochange/拉黑逻辑管的（这里只管"观测说它是雾"的那一类）✓
+        _bb = self.blocks.get(bi)
+        _obs = bool(getattr(_bb, 'observed', False)) if _bb is not None else True
+        # ⚠ 营地揭示源只认"营地那一格"（见 __init__ 说明 ✓）
+        camp_cells = self.camp_cells or ()
         for c in self.cells_of.get(bi, ()):
             r, cc = c // COLS, c % COLS
             for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -141,6 +189,15 @@ class Problem:
                 #   另：`board[n] < 0` 的情形已被上面的 `consumed_cells` 全量收集（board<0 ⇔ n∈consumed），
                 #   不需要在这里再单独判一次。
                 if n in consumed:
+                    # ⭐⭐⭐ v1.51 **观测闸门**（只对"观测时就已经消耗"的邻格生效）：
+                    #   观测里就空的邻格 ⇒ 它对本块的揭示**在观测里本该看得见**；
+                    #   若观测说本块是雾，那"该邻格已消耗"就是模型的推断（幻影）
+                    #   ⇒ **不许放行** ✗（PC 真机 23:30 那把：4 格被推断成已消耗
+                    #     并删出模型 ⇒ 相邻雾格被判可点 ⇒ 计划点雾格 ✗✗）
+                    #   反之：`n` 是**搜索推演中**才消耗的 ⇒ **放行**
+                    #   （多步揭示链必须能推演 ✓，否则目标藏雾里就永远不可达 ✗）
+                    if n in self.obs_consumed and not _obs:
+                        continue
                     return True
         return False
 
@@ -287,11 +344,24 @@ class Problem:
         size = int(getattr(b, 'size', 1) or 1)
         if getattr(b, 'plain', False):          # 空地：连锁 ⇒ 固定 1 点 ✓
             return 1
-        if b.mark in FIGHT_X2:                  # 明确要打的（boss/红装/大拇指/战斗）✓
+        # ⭐⭐⭐ v1.51【按**地块类型**判定战斗价】—— 抄 PC（**必须放在这里**）
+        #   PC 原话：「战斗格 = **格数×2**」⇒ **按地块类型**判 ✓
+        #   原来只看 `b.mark` ✗ —— 而 `拦路` 是**规划完之后**才贴的标记
+        #   （循环发现"计划路径穿过非空地"时才标）⇒ 规划那一刻**它没有标记**
+        #   ⇒ 要打的架被按"内容格·探索"计价（3 而非 6 ✗）⇒ 平局时选了要打的那条 ✗✗
+        #   真机事故（PC acc1 gui_20261003_140308 第 2 张图，详见 `spots.is_fight_spot` 注释）
+        #   ⇒ 先问数据表（`EventNum` > 1-1 即战斗型 ✓），表里查不到才退回标记判据 ✓
+        #   ⚠⚠ **我之前把这条只写在 `step_cost()` 里** ✗ —— v1.51 让 `step_cost`
+        #     委托给本函数后，那条分支就**丢了**（门禁 v1.43 ② 当场抓到 ✓）
+        #     ⇒ 定价细节**只留在本函数一处**（单一真相源 ✓）
+        try:
+            import spots as _sp                 # ⚠ 本模块**故意不 import spots**（数据靠参数传 ✓）
+            if _sp.is_fight_spot(getattr(b, 'sid', None)):   # 局部导入：首次后走缓存，零开销 ✓
+                return size * 2
+        except Exception:                       # noqa: BLE001
+            pass
+        if b.mark in FIGHT_X2:                  # 明确要打的（boss/红装/大拇指/战斗标记）✓
             return size * 2
-        # ⚠ 「无标记但要开打」（拦路格）的战斗价在 **`step_cost()`** 里加 ——
-        #   因为它需要 `self.targets`（本方法是 staticmethod，拿不到 Problem 上下文）✓
-        #   见 `step_cost` 里 v1.43 那段注释。
         return size                             # 内容格：探索 = SpotSize ✓
 
     def step_cost(self, state, bi):
@@ -302,21 +372,13 @@ class Problem:
         """
         if self.blocks[bi].plain:
             return 1
-        # ⭐⭐ v1.43【按**地块类型**判"要不要打" ⇒ 战斗价 size×2】
-        #   学 PC 端 a7df4af 的真机事故（逻辑完全一致）：
-        #     计划第一步要打的那格（PC 是 S00003_111 海边杂物，格数 3），它的「拦路」标记
-        #     是**规划完之后**才贴的 ⇒ 规划那一刻**没有标记** ⇒ 被当"内容格·探索"按 size
-        #     计价（实际应 size×2）⇒ "打这一架"和"绕路揭 4 格"看起来平局 ⇒ **选了贵的** ✗✗
-        #   ⚠ **不能**改成"看标记 / 看 in targets"：规划期这些都还不存在 ⇒ 治标不治本
-        #     （我第一版就写成了 `bi in self.targets`，实测拦路块 in_tgt=False ⇒ 分支走不到 ✗）
-        #   ⇒ 正确判据 = `spots.is_fight_spot(sid)`（按 `EventNum` 首段 > 1）✓
-        #     与 PC 端 `mapsim.Block.cost` / `mapsolve` **同口径** ✓
-        _b = self.blocks[bi]
-        if _b.mark in FIGHT_X2:
-            return int(getattr(_b, 'size', 1) or 1) * 2
-        if _is_fight_block(_b):
-            return int(getattr(_b, 'size', 1) or 1) * 2
-        return int(getattr(_b, 'size', 1) or 1)
+        # ⭐ v1.51：**委托给 `block_cost`**（抄 PC 的写法）——
+        #   原来这里把定价逻辑**又抄了一遍** ⇒ **两个真相源** ✗
+        #   （改一处、另一处不会跟着变 —— 正是 PC 用 `fixed.cross_check_layout`
+        #     防的那类病：同一份数据抄两遍必然漂移 ✓）
+        #   ⚠ 定价细节**只留在 `block_cost` 一处**（含 v1.43 的 `is_fight_spot` 判据、
+        #     v1.48 的 `is_fight_spot ⇒ plain=False` 相互配合 ✓）
+        return self.block_cost(self.blocks[bi])
 
     def done(self, state):
         return not (self.targets - set(state))
@@ -371,13 +433,41 @@ def _build_cache(prob):
     cost = {bi: prob.step_cost(frozenset(), bi) for bi in idxs}
     camp = prob.camp
     camp_mask = bit[camp] if camp is not None else 0
-    camp_nb = NB_MASK[camp] & ~camp_mask if camp is not None else 0
+    # ⭐⭐⭐ v1.51 **营地的"开局已揭示"只能来自营地那一格的 4 邻**（不是整块的 4 邻）—— 抄 PC
+    #   离线铁证（r_233023_0.png，用户报「规划错了」那把）：
+    #     营地格 (2,1) 被 4 格块 `巨大沙堡` (1,1)(2,1)(2,2)(2,3) 吞掉 ⇒
+    #     用**整块**算邻接 ⇒ boss(1,2)、紫金格(2,4) 都进了 `camp_nb` ⇒ 开局就被当成
+    #     "已揭示/可点" ⇒ 计划 = `[(1,2),(2,4)]`（真机两格 ratio 0.665/0.717 **都是雾**）
+    #     ⇒ `fogged_noop` 空转、整条计划错位 ✗✗
+    #   ⇒ 用 `prob.camp_cells`（真正带 camp 标记的格）算邻接；
+    #     没有该信息（单格营地的常规情形）才退回整块口径 ⇒ 对老盘行为不变 ✓
+    camp_nb = 0
+    _ccells = set(getattr(prob, 'camp_cells', None) or ())
+    if camp is not None and _ccells:
+        for _c0 in _ccells:
+            _r0, _q0 = _c0 // COLS, _c0 % COLS
+            for _dr, _dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                _rr, _qq = _r0 + _dr, _q0 + _dc
+                if 0 <= _rr < ROWS and 0 <= _qq < COLS:
+                    _nb = prob.board[_rr * COLS + _qq]
+                    if _nb >= 0 and _nb != camp:
+                        camp_nb |= bit[_nb]
+    elif camp is not None:
+        camp_nb = NB_MASK[camp] & ~camp_mask
     # ⭐⭐ 2026-09-30：「观测里本来就是空的格」（已消耗）⇒ 它的邻居块**现在就已经揭示**。
     #   全知盘（新生成的盘）没有任何 -1 ⇒ EMPTY_ADJ = 0，行为一字不变 ✓
     #   观测盘（真机 / 在线推演）则有 -1 ⇒ 模型终于知道"已经走到哪了" ✓
     EMPTY_ADJ = 0
+    _obs_cells = set(getattr(prob, 'obs_cells', None) or ())
     for c, bi in enumerate(prob.board):
         if bi >= 0:
+            continue
+        # ⭐⭐⭐ v1.51 闸门：**观测里根本没有这一格 ⇒ 不许拿它当"已消耗"去揭示邻居**
+        #   （PC 真机 23:30 那把：4 格被 `_infer_chain_consumed` 推断成已消耗并
+        #     **删出观测** ⇒ 这里 `board<0` ⇒ `EMPTY_ADJ` 把它们的邻居判成
+        #     "开局已揭示" ⇒ **计划点雾格** ✗）
+        #   ⚠ 只有拿到观测格集合时才启用（老调用/全知盘没有 ⇒ 行为一字不变 ✓）
+        if _obs_cells and c not in _obs_cells:
             continue
         r, cc = c // COLS, c % COLS
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -391,7 +481,18 @@ def _build_cache(prob):
     for t in prob.targets:
         targets_mask |= bit[t]
     tcost = {bit[t]: cost[t] for t in prob.targets}     # ⭐ 键 = 单 bit（与 h() 一致）
+    # ⭐⭐⭐ v1.51【拉黑掩码】—— 抄 PC `d81c42c`
+    #   ⚠⚠ **这是我 v1.44 漏掉的那一环**：拉黑块（`Block.blocked`）
+    #     **既不是候选动作、也不借它走路** ✓
+    #   我 v1.44 只改了 `Problem.visible()`（集合版），可 **`solve()` 用的是它自己那份
+    #   **位掩码版 `visible(m)`** ⇒ 那次修**根本没进求解器** ✗✗（门禁也测错了函数）
+    #   ⇒ 掩码必须建在这里、由 `solve()` 消费 ✓
+    blocked_mask = 0
+    for bi in idxs:
+        if getattr(prob.blocks[bi], 'blocked', False):
+            blocked_mask |= bit[bi]
     return {'bit': bit, 'bits': [bit[bi] for bi in idxs],
+            'blocked_mask': blocked_mask,
             'NB_MASK': {bit[k]: v for k, v in NB_MASK.items()},   # ⭐ 键 = 单 bit
             'PLAIN_GROUP_MASK': PLAIN_GROUP_MASK, 'REP': REP,
             'cost': cost, 'camp_mask': camp_mask, 'camp_nb': camp_nb,
@@ -440,6 +541,13 @@ def solve(prob, max_states=400000, report=None, max_secs=None):
             out |= NB.get(low, 0)
             mm ^= low
         out &= ~m & ~camp_mask
+        # ⭐⭐⭐ v1.51【拉黑块一律不是候选】—— 抄 PC `d81c42c`
+        #   ⚠⚠ 这里才是**真正生效的地方**：`solve()` 用的是**本函数**（位掩码版），
+        #     不是 `Problem.visible()`（集合版）✗
+        #   ⇒ 我 v1.44 只改了集合版 ⇒ **拉黑在求解器里一直没生效**（黑名单形同虚设）
+        #     PC 用户口径：「**能不能一开始就不规划这个拉黑的**」✓
+        #     拉黑块**既不点它、也不借它走路**（连通性/代价都不按"能走"算 ✓）
+        out &= ~ch.get('blocked_mask', 0)
         ded = 0
         while out:
             low = out & -out
