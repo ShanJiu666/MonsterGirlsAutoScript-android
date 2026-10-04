@@ -1424,8 +1424,10 @@ try:
     _src6 = open(_ms6, encoding='utf-8').read()
     check('v1.06 ① Block 保存原始 spot（`fog_sil` 等字段要用 ✓）',
           'self.spot = dict(spot)' in _src6)
-    check('v1.06 ② 雾格 plain **只认剪影**（有物体⇒非空地 / 平坦⇒空地），不再看雾下名字 ✓',
-          "if self.spot.get('fog_sil') is not None:" in _src6
+    check('v1.06 ② 雾格 plain **只认剪影**（有物体⇒非空地 / 平坦⇒空地）'
+          '——⚠ v1.58 起**加 `not observed` 限定**（已揭示的格必须按名字/类型判，'
+          '照 PC `mapsim.py:198-203` ✓；否则已揭示的战斗格被剪影接管 ⇒ `plain=True` ✗）',
+          "if (not getattr(self, 'observed', False)) and self.spot.get('fog_sil') is not None:" in _src6
           and "return bool(getattr(self, 'fog_flat', False))" in _src6)
     check('v1.06 ③ 多格块取**成员剪影最大值**（anchor 常是平坦格 ⇒ 旧写法整块丢剪影 ✗）',
           "_sils = [float(cells[m].get('fog_sil'))" in _src6
@@ -5152,6 +5154,13 @@ except Exception as _e49:       # noqa: BLE001
 #   ⑤ `step_cost` 委托 `block_cost`（消掉**双真相源**）
 #   ⑥ 观测闸门（`obs_consumed` / `obs_cells` / `Block.observed` / `EMPTY_ADJ` 闸门）
 #      —— 治「**计划点雾格**」：模型相信某格已消耗（其实是雾）⇒ 旁边雾格被判可点 ✗
+#      ⚠⚠ **v1.58 起拆成两半**（用户拍板：对齐 PC 的「实际行为」）：
+#        · **留**：`Block.observed`（M8 `block_revealed` 的闸门）—— PC 真机路径上**真的在跑** ✓
+#        · **关**：`EMPTY_ADJ` 的 `obs_cells` 闸门 —— PC 真机路径上**从不给 `obs_cells` 赋值**
+#          （唯一赋值点在 `from_memory_dump`，那句引用了该函数不存在的局部变量 ⇒ 恒 `set()`）
+#          ⇒ PC 那道闸门是**死代码** ⇒ 手机端也不启用（`mapsim` 不再赋值 `obs_cells`）✓
+#          ⇒ 下面 ⑥c/⑥e 只断言"**代码形状**与 PC 一致"（将来要启用时不用重写），
+#            不再断言"闸门真的生效"（那与事实相反 ✗）
 # ─────────────────────────────────────────────────────────────────────────
 print()
 print('㊿⏤ v1.51 抄 PC 规划算法（全部**从 solve() 真跑** ✓）')
@@ -5171,7 +5180,8 @@ try:
         return _d
 
     # ⚠ 真实观测**包含棋盘每一格**（`_cells_for_model` 覆盖 5×7 全部）
-    #   ⇒ 测试盘也必须铺满，否则 `obs_cells` 闸门会把"没给的格"当不存在 ✗
+    #   ⚠ v1.58 起 `EMPTY_ADJ` 的 `obs_cells` 闸门**不生效**（对齐 PC 真机的实际行为），
+    #     所以"铺满"不再是闸门的前提；这里保留铺满，是为了贴近真机观测的形状 ✓
     def _full51(over=None):
         _c = {}
         for _r in range(1, 6):
@@ -5271,8 +5281,9 @@ try:
     check('v1.51 ⑥b `block_revealed` 有观测闸门'
           '（观测说它是雾 ⇒ **不许**因"邻格被推断为已消耗"而判可点 ✗）',
           'if n in self.obs_consumed and not _obs:' in _src51)
-    check('v1.51 ⑥c `_build_cache` 的 `EMPTY_ADJ` 有 `obs_cells` 闸门'
-          '（观测里没有的格不许当"已消耗"去揭示邻居 ✓）',
+    check('v1.51 ⑥c `_build_cache` 的 `EMPTY_ADJ` **代码形状**与 PC 一致（有 `obs_cells` 闸门 ✓）'
+          '—— ⚠ v1.58 起**手机端拿不到 `obs_cells`**（`mapsim` 不赋值）⇒ 闸门**不生效**，'
+          '这正是 PC 真机跑的那一版 ✓',
           'if _obs_cells and c not in _obs_cells:' in _src51)
     _sm51 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py'),
                  encoding='utf-8').read()
@@ -5281,6 +5292,18 @@ try:
     check('v1.51 ⑥e `MapSim` 默认 `obs_cells = None`'
           '（老调用/全知盘行为一字不变 ✓）',
           'self.obs_cells = None' in _sm51)
+    # ⭐⭐⭐ v1.58【D-4】手机端**不再启用** `EMPTY_ADJ` 闸门 —— 用户拍板「对齐 PC 的实际行为」
+    #   依据：PC 唯一给 `sim.obs_cells` 赋值的地方在 `from_memory_dump`，而那句引用了
+    #     该函数**不存在的局部变量** ⇒ 恒异常被吞 ⇒ `set()` ⇒ PC 那道闸门是**死代码** ✓
+    #   而手机端 v1.51 **真的赋了值** ⇒ 闸门启用 ⇒ "被剔出模型的格"不能再当揭示源
+    #     ⇒ 模型里可能出现**永远不可达的目标** ⇒ `exhausted`（探针实测 expanded=16/18）✗
+    check('v1.58 ⑥f 【D-4】`from_observation` / `_from_anchors` **都不给 `obs_cells` 赋值**'
+          '（对齐 PC 真机实际行为 ⇒ 闸门**不生效** ✓；'
+          '⚠ `Block.observed` 是**另一个**机制（M8），必须留着 ✓）',
+          '_sim.obs_cells = obs_cells' not in _sm51
+          and '_sim2.obs_cells' not in _sm51,
+          '仍有赋值点 ✗' if ('_sim.obs_cells = obs_cells' in _sm51
+                            or '_sim2.obs_cells' in _sm51) else '')
 except Exception as _e51:       # noqa: BLE001
     check('v1.51 守门可运行（%r）' % (_e51,), False)
 
@@ -5341,6 +5364,432 @@ try:
                               len(_prob53b.visible(frozenset()))))
 except Exception as _e53:       # noqa: BLE001
     check('v1.53 守门可运行（%r）' % (_e53,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ⓹⓵ v1.58【D-9 补门禁盲区：**真端到端**（`_cells_for_model` → `from_observation` → `Problem` → `solve`）】
+#
+#   ⚠⚠⚠ 这是「**576 项全绿 vs 真机全崩**」的根因，也是本次改动**唯一**能防它复发的东西：
+#     本套件此前**只调用过一次 `_cells_for_model`**（㉓，测拉黑打标），
+#     而 v1.51~v1.56 的"实跑"断言（㊿④ / v1.53③~⑥）**绕过它**，
+#     直接给 `MapSim.from_observation` 喂**已经打好 `camp=True` 的合成观测**
+#     ⇒ 等于**假设打标链已通** ✗
+#     ⇒ M30（`find_camp_cell` 缺失）/ M31（`_rescue` 拆块缺失）这个洞**完全无覆盖**
+#       ⇒ "expanded:1 exhausted" 在门禁上永远是绿的 ✗✗
+#
+#   ⇒ 本组必须从 `_cells_for_model` **起**跑通整条链，并且配**负样本**
+#     证明它不是恒绿（把 `top` 里的 `_000` 删掉 ⇒ **必须**回到 `expanded == 1`）✓
+#   ⇒ 外加 D-3 的不变量：随机 500 张盘（营地塞进 1~4 格块）⇒ `camp_nb > 0` 且 `solve` 有解 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('⓹⓵ v1.58 D-9【真端到端】`_cells_for_model` → `from_observation` → `Problem` → `solve`')
+try:
+    import importlib as _il58
+    _il58.invalidate_caches()
+    import random as _rnd58
+    import spots as _sp58
+    import mapsim as _sim58
+    import mapsolve as _mv58
+
+    _cell58 = _sim58.cell_of
+
+    def _c58(sid, name, anchor, revealed=True, ratio=1.0, score=0.99,
+             marks=None, top=None):
+        return {'sid': sid, 'name': name, 'revealed': revealed, 'ratio': ratio,
+                'score': score, 'marks': list(marks or []), 'anchor': anchor,
+                'top': list(top or [(score, sid, anchor)])}
+
+    def _frame58():
+        """与 PC 真机帧 `r_204323_0.png` / `r_233023_0.png` **同形状**：
+        营地 (2,1) 属 4 格块 `S00003_211 巨大沙堡`（anchor=(1,1)），
+        但 (2,1) 的**单格候选** `top[0] = (1.000, 'S00003_000', (2,1))`；
+        其余格为相连草地；(5,7) 是雾里的 boss ✓"""
+        _c = {}
+        for _r in range(1, 6):
+            for _cc in range(1, 8):
+                _c[(_r, _cc)] = _c58('S00003_001', '草地', (_r, _cc))
+        _a = (1, 1)
+        for _k in ((1, 1), (2, 1), (2, 2), (2, 3)):
+            _c[_k] = _c58('S00003_211', '巨大沙堡', _a)
+        _c[(2, 1)] = _c58('S00003_211', '巨大沙堡', _a,
+                          top=[(1.000, 'S00003_000', (2, 1)),
+                               (0.998, 'S00003_001', (2, 1))])
+        _c[(1, 1)] = _c58('S00003_211', '巨大沙堡', _a,
+                          top=[(0.998, 'S00003_001', (1, 1)),
+                               (0.980, 'S00003_211', _a)])
+        _c[(5, 7)] = _c58('S00003_002', '沙地', (5, 7), revealed=False,
+                          ratio=0.66, marks=['boss'])
+        return _c
+
+    _c58a = _frame58()
+    _mk58 = {(5, 7): {'marks': ['boss']}}
+    _lg58a = []
+    _m58a = EL._cells_for_model({'marks': dict(_mk58), 'obs': _c58a, 'done': set()},
+                                {'st': _c58a}, log=_lg58a, tag='e2e58',
+                                mark_revealed=False)
+    _txt58a = ' '.join(str(x) for x in _lg58a)
+    check('D-9 ① 真端到端：`_cells_for_model` 内部真的走了**单格候选 `top`** 那条路'
+          '（日志里有 `cell_split_from_block` / `spawn_fallback` ✓）',
+          ('cell_split_from_block' in _txt58a) or ('spawn_fallback' in _txt58a),
+          _txt58a[:160])
+    _sim58a = _sim58.MapSim.from_observation(_m58a, _sp58.spot_rows())
+    _prob58a = _mv58.Problem(_sim58a)
+    check('D-9 ② 真端到端：营地被多格块吞掉时 **`Problem.camp` 非空**'
+          '（旧行为：`camp=None` ⇒ 揭示链没起点 ✗）',
+          _prob58a.camp is not None, 'camp=%s' % (_prob58a.camp,))
+    _cache58a = _mv58._build_cache(_prob58a)
+    check('D-9 ③ 真端到端：**`camp_nb` 非零**（用户口径原话：'
+          '「**不可能出现开局没有一个地方能点的情况**」✓）',
+          _cache58a.get('camp_nb', 0) != 0, 'camp_nb=%s' % (_cache58a.get('camp_nb'),))
+    _rep58a = {}
+    _cost58a, _acts58a = _mv58.solve(_prob58a, max_states=60000, max_secs=8,
+                                     report=_rep58a)
+    check('D-9 ④ ⭐真端到端：**`expanded > 1` 且 `reason == \'ok\'`**'
+          '（真机/旧代码是 `expanded=1` + `exhausted` ✗ —— 这条就是"576 项全绿 vs 真机全崩"的补丁 ✓）',
+          (int(_rep58a.get('expanded') or 0) > 1)
+          and _rep58a.get('reason') == 'ok' and _acts58a is not None,
+          'cost=%s reason=%s expanded=%s' % (_cost58a, _rep58a.get('reason'),
+                                             _rep58a.get('expanded')))
+    check('D-9 ⑤ 原格**不许从模型里消失**（`board >= 0`）—— PC `9c045a9` 的教训：'
+          '「重新缩进 ⇒ 该格从模型里消失（`board<0`）⇒ 比原问题更危险」✗',
+          _sim58a.board[_cell58(2, 1)] >= 0,
+          'board=%s' % (_sim58a.board[_cell58(2, 1)],))
+
+    # ---- 负样本：把 `top` 里的 `_000` 删掉 ⇒ **必须仍回到** expanded==1 / exhausted ----
+    _c58b = {}
+    for _k, _v in _c58a.items():
+        _v2 = dict(_v)
+        _v2['top'] = [t for t in (_v.get('top') or [])
+                      if str(t[1]).split('_')[-1] != '000']
+        _c58b[_k] = _v2
+    _lg58b = []
+    _m58b = EL._cells_for_model({'marks': dict(_mk58), 'obs': _c58b, 'done': set()},
+                                {'st': _c58b}, log=_lg58b, tag='e2e58b',
+                                mark_revealed=False)
+    _sim58b = _sim58.MapSim.from_observation(_m58b, _sp58.spot_rows())
+    _prob58b = _mv58.Problem(_sim58b)
+    _rep58b = {}
+    _cost58b, _acts58b = _mv58.solve(_prob58b, max_states=60000, max_secs=8,
+                                     report=_rep58b)
+    check('D-9 ⑥ 【负样本】删掉 `top` 里的 `_000` ⇒ **必须仍回到** '
+          '`camp=None` + `expanded == 1` + `exhausted`'
+          '（证明 ④ 测的真是那条链路，这条门禁**不是恒绿** ✓）',
+          _prob58b.camp is None and int(_rep58b.get('expanded') or 0) == 1
+          and _rep58b.get('reason') == 'exhausted',
+          'camp=%s reason=%s expanded=%s' % (_prob58b.camp, _rep58b.get('reason'),
+                                             _rep58b.get('expanded')))
+
+    # ═══ D-3 不变量：随机 500 张盘，把营地塞进 1~4 格块 ⇒ **开局候选恒非空** ═══
+    #   依据（用户口径）：开局**一定**有点得动的格（营地挨着的那几个）⇒ `camp_nb == 0`
+    #     **只能是模型 bug**。PC 的做法是**不做任何 revealed/observed 过滤**
+    #     （`mapbot_pc/mapsolve.py:403-415`）⇒ 手机端对齐它 ✓
+    def _rand58(_rng, fog):
+        _a = (_rng.randint(1, 5), _rng.randint(1, 7))
+        _nbrs = [(_a[0] + _dr, _a[1] + _dc)
+                 for _dr, _dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                 if 1 <= _a[0] + _dr <= 5 and 1 <= _a[1] + _dc <= 7]
+        _rng.shuffle(_nbrs)
+        _mem = [_a] + _nbrs[:max(0, _rng.randint(1, 4) - 1)]
+        _anc = min(_mem)
+        _c = {}
+        for _r in range(1, 6):
+            for _cc in range(1, 8):
+                _c[(_r, _cc)] = _c58('S00003_001', '草地', (_r, _cc))
+        for _k in _mem:
+            _c[_k] = _c58('S00003_211', '巨大沙堡', _anc)
+        _camp = _rng.choice(_mem)
+        _c[_camp] = _c58('S00003_211', '巨大沙堡', _anc, score=1.0,
+                         top=[(1.000, 'S00003_000', _camp),
+                              (0.998, 'S00003_001', _camp)])
+        _tgt = _rng.choice([k for k in sorted(_c) if k not in _mem])
+        _c[_tgt] = _c58('S00003_002', '沙地', _tgt, marks=['boss'])
+        if fog:      # ⚠ 随机判雾 —— 这正是 v1.55 那道 `observed` 过滤会把 camp_nb 清成 0 的场景
+            for _k in _mem:
+                _c[_k]['revealed'] = False
+            for _k in _rng.sample(sorted(_c), _rng.randint(0, 6)):
+                if _k != _tgt:
+                    _c[_k]['revealed'] = False
+        return _c, _camp, _tgt
+
+    _rnd58.seed(20261004)
+    _bad_nb, _bad_sol, _bad_nb_fog = [], [], []
+    for _i in range(500):
+        _cells, _camp, _tgt = _rand58(_rnd58, fog=False)
+        _lg = []
+        _m = EL._cells_for_model({'marks': {_tgt: {'marks': ['boss']}},
+                                  'obs': _cells, 'done': set()},
+                                 {'st': _cells}, log=_lg, tag='inv58',
+                                 mark_revealed=False)
+        _sv = _sim58.MapSim.from_observation(_m, _sp58.spot_rows())
+        _pv = _mv58.Problem(_sv)
+        if _mv58._build_cache(_pv).get('camp_nb', 0) == 0:
+            _bad_nb.append(_i)
+        _rep = {}
+        _cost, _acts = _mv58.solve(_pv, max_states=60000, max_secs=8, report=_rep)
+        if _acts is None:
+            _bad_sol.append((_i, _rep.get('reason'), _rep.get('expanded')))
+    check('D-9 ⑦ 【D-3 不变量】随机 500 张盘（营地塞进 1~4 格块）⇒ **`camp_nb > 0` 恒成立**'
+          '（对齐 PC「营地四邻恒为候选」的不变量 ✓）',
+          not _bad_nb, 'camp_nb==0 的盘：%d 张 %s' % (len(_bad_nb), _bad_nb[:8]))
+    check('D-9 ⑧ 【D-3 不变量】随机 500 张盘 ⇒ **`solve` 都有解**'
+          '（用户口径：「不可能出现开局没有一个地方能点的情况」✓）',
+          not _bad_sol, '无解的盘：%d 张 %s' % (len(_bad_sol), _bad_sol[:5]))
+
+    _rnd58.seed(20261005)
+    for _i in range(500):
+        _cells, _camp, _tgt = _rand58(_rnd58, fog=True)
+        _m = EL._cells_for_model({'marks': {_tgt: {'marks': ['boss']}},
+                                  'obs': _cells, 'done': set()},
+                                 {'st': _cells}, log=None, tag='inv58f',
+                                 mark_revealed=False)
+        _pv = _mv58.Problem(_sim58.MapSim.from_observation(_m, _sp58.spot_rows()))
+        if _mv58._build_cache(_pv).get('camp_nb', 0) == 0:
+            _bad_nb_fog.append(_i)
+    check('D-9 ⑨ 【D-3 不变量 · 含雾】随机 500 张盘（**营地块整块判雾** + 若干随机格判雾）'
+          '⇒ `camp_nb > 0` **仍恒成立**（v1.55 那道 `observed` 过滤会把这里清成 0 ✗）',
+          not _bad_nb_fog, 'camp_nb==0 的盘：%d 张 %s' % (len(_bad_nb_fog),
+                                                        _bad_nb_fog[:8]))
+
+    # ---- D-5 硬告警路径的**真跑**（`solver_order()` 在 `expanded<=1` 时落 `no_plan_giveup`）----
+    #   ⚠ 必须真调一次 —— 只断言源码字符串等于没测（`no_plan_giveup` 整段在 `if not plan:` 里，
+    #     光照 ⑥ 那样走 `mapsolve.solve()` 是**走不到**的）✗
+    _lg58g = []
+    _so58g = {}
+    _ord58g = EL.solver_order({'marks': dict(_mk58), 'obs': _c58b, 'done': set()},
+                              {'st': _c58b}, log=_lg58g, max_steps=10, out=_so58g)
+    _give58 = [x for x in _lg58g if isinstance(x, dict)
+               and x.get('finish') == 'no_plan_giveup']
+    check('D-9 ⑫ 【D-5 硬告警 · 真跑】把那条坏帧喂进 `solver_order()` ⇒ 返回 `[]` 且'
+          '**真的落 `finish: no_plan_giveup`**（`out` 里也带上 `expanded` ✓）——'
+          '模型层坏掉必须一眼看得出"丢图"，不许被静默转成"正常收工" ✗',
+          (not _ord58g) and bool(_give58) and _so58g.get('expanded') == 1
+          and _give58[0].get('reason') == 'exhausted',
+          'order=%s giveup=%s out=%s' % (_ord58g, _give58[:1], _so58g))
+
+    # ---- D-1 **单独**覆盖（把 D-2 的拆块排除在外）----
+    #   构造：营地格的 `top1` 分**低于分组分**（⇒ `_rescue` 的 `_ts >= _gs` 不成立 ⇒ 拆块不触发），
+    #   但它的 `top` 里仍有一个 `≥ CAMP_TOP_MIN` 的 `_000` ⇒ **只有**"扫 `top` 兜底"能救回来 ✓
+    #   这正是 PC `find_camp_cell()` docstring 里那把帧的形状（top[0]=1.000 / top[1]=0.996…）✓
+    def _d1_frame58(_sc):
+        _c = _frame58()
+        _c[(2, 1)] = _c58('S00003_211', '巨大沙堡', (1, 1), score=0.99,
+                          top=[(_sc, 'S00003_000', (2, 1)),
+                               (0.94, 'S00003_001', (2, 1))])
+        return _c
+
+    for _sc58, _want58 in ((0.95, True), (0.50, False)):
+        _c58f = _d1_frame58(_sc58)
+        _lg58f = []
+        _m58f = EL._cells_for_model({'marks': dict(_mk58), 'obs': _c58f, 'done': set()},
+                                    {'st': _c58f}, log=_lg58f, tag='d1c58',
+                                    mark_revealed=False)
+        _fb58f = [x for x in _lg58f if isinstance(x, dict) and 'spawn_fallback' in x]
+        _split58f = [x for x in _lg58f if isinstance(x, dict)
+                     and x.get('d1c58') == 'cell_split_from_block'
+                     and x.get('cell') == '2,1']
+        _sim58f = _sim58.MapSim.from_observation(_m58f, _sp58.spot_rows())
+        _prob58f = _mv58.Problem(_sim58f)
+        _cache58f = _mv58._build_cache(_prob58f)
+        _rep58f = {}
+        _cost58f, _acts58f = _mv58.solve(_prob58f, max_states=60000, max_secs=8,
+                                         report=_rep58f)
+        if _want58:
+            check('D-9 ⑩ 【D-1 单独覆盖】营地格 `top1` 分（%.2f）**低于分组分** ⇒ 拆块不触发，'
+                  '但 `top` 里有 `≥ CAMP_TOP_MIN(0.90)` 的 `_000` ⇒ '
+                  '**只有"扫 `top`"这条兜底**能救它 ⇒ `spawn_fallback: 2,1` + 有解 ✓'
+                  % _sc58,
+                  (not _split58f) and bool(_fb58f)
+                  and _fb58f[0].get('spawn_fallback') == '2,1'
+                  and _prob58f.camp is not None
+                  and _cache58f.get('camp_nb', 0) != 0
+                  and _rep58f.get('reason') == 'ok',
+                  'split2,1=%s fallback=%s camp=%s camp_nb=%s reason=%s expanded=%s'
+                  % (bool(_split58f), (_fb58f[0].get('spawn_fallback') if _fb58f else None),
+                     _prob58f.camp, _cache58f.get('camp_nb'),
+                     _rep58f.get('reason'), _rep58f.get('expanded')))
+        else:
+            check('D-9 ⑪ 【D-1 负样本】把那个 `_000` 的分数降到 `CAMP_TOP_MIN` 之下（%.2f）⇒ '
+                  '兜底**不许**命中 ⇒ 回到 `camp=None` + `expanded == 1` + `exhausted`'
+                  '（证明 ⑩ 真的是"分数门槛"在起作用，不是恒绿 ✓）' % _sc58,
+                  (not _fb58f) and (not _split58f) and _prob58f.camp is None
+                  and int(_rep58f.get('expanded') or 0) == 1
+                  and _rep58f.get('reason') == 'exhausted',
+                  'fallback=%s camp=%s reason=%s expanded=%s'
+                  % (bool(_fb58f), _prob58f.camp, _rep58f.get('reason'),
+                     _rep58f.get('expanded')))
+except Exception as _e58:       # noqa: BLE001
+    check('v1.58 D-9 真端到端守门可运行（%r）' % (_e58,), False)
+
+print()
+print('⓹⓶ v1.58【P0 落地守门：D-1 / D-2 / D-3 / D-5 / D-6 / D-7 / D-8 每条都有断言】')
+try:
+    _el58s = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                  encoding='utf-8').read()
+    _ms58s = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py'),
+                  encoding='utf-8').read()
+    _mv58s = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
+                  encoding='utf-8').read()
+    _code58 = '\n'.join(l for l in _el58s.split('\n') if not l.strip().startswith('#'))
+
+    # ---------------- D-1 `find_camp_cell()` + CAMP_TOP_MIN + 两处调用点 ----------------
+    check('D-1 ① 手机端有 `find_camp_cell()` 与 `CAMP_TOP_MIN = 0.90`'
+          '（抄 PC `explore_loop.py:7470-7523` / `:2797` ✓）',
+          'def find_camp_cell(' in _el58s and 'CAMP_TOP_MIN = 0.90' in _el58s)
+    check("D-1 ② 兜底扫的是**单格候选 `top`**（`v.get('top')`），不是归组后的 `sid` ✓",
+          "for t in (v.get('top') or []):" in _el58s
+          and "sid.split('_')[-1] == '000'" in _el58s
+          and 'sc >= CAMP_TOP_MIN' in _el58s)
+    _n58_old = _code58.count("v.get('anchor') == k and v.get('name') == '营地'")
+    check('D-1 ③ 老判据**只剩 `find_camp_cell()` 里那一份**'
+          '（原来在 `:7764` / `:8105` 各有一份副本 ⇒ 「只改一半 ⇒ 线上仍复现」，'
+          'PC `交接文档 §14.1` ✓）',
+          _n58_old == 1, '代码里出现 %d 次（应为 1）' % _n58_old)
+    check("D-1 ④ 两处调用点都走 `find_camp_cell()`（`where='spawn'` / `where='spawn_road'`）"
+          '—— 照 PC `:8341` / `:8824` ✓',
+          "where='spawn'" in _el58s and "where='spawn_road'" in _el58s)
+    check('D-1 ⑤ `_cells_for_model` 的兜底**复用** `find_camp_cell()`（单一真相源 ✓）'
+          '—— 不再自己扫归组后的 `sid`（多格归组**恰好把营地格的 sid 覆盖成块 sid**'
+          '⇒ 在唯一需要它的场景下**必然失败** ✗）',
+          "where='cells_for_model'" in _el58s
+          and "if not str(_v54.get('sid') or '').endswith('_000'):" not in _el58s)
+
+    # ---------------- D-2 `_rescue` 拆块规则 ----------------
+    check("D-2 ① `_rescue` 拆块规则在 `_cells_for_model` 里（`cell_split_from_block` 日志 ✓）",
+          "tag: 'cell_split_from_block'" in _el58s
+          and "_vv['anchor'] = tuple(_k)" in _el58s)
+    check('D-2 ② 收窄口径照 PC `:1075-1077`（**只**救 空地系/营地/海螺/`_000`）'
+          '—— 否则 `(2,6)` 被拆成「勇者之墓」⇒ 战斗格被定价 1 体 ✗',
+          "_rescue = (is_plain_spot(_tsid)" in _el58s
+          and "_tname in ('营地', '海螺')" in _el58s
+          and "str(_tsid).endswith('_000')" in _el58s)
+    _i58_res = _el58s.find('_rescue = (is_plain_spot(_tsid)')
+    _i58_out = _el58s.find('            _out[_k] = _vv')
+    _line58_res = [x for x in _el58s.split('\n')
+                   if '_rescue = (is_plain_spot(_tsid)' in x]
+    check('D-2 ③ ⚠ PC `9c045a9` 的教训：**只改字段、不动函数体缩进**'
+          '（拆块段与同层代码**同缩进**，且 `_out[_k] = _vv` 仍在它**之后**'
+          '⇒ 拆出来的 `anchor/sid/name` 真的进了模型，该格**不会从模型里消失** ✓）',
+          _line58_res and _line58_res[0].startswith(' ' * 20)
+          and 0 < _i58_res < _i58_out)
+
+    # ---------------- D-3 `camp_nb` 去掉 `observed` 过滤 ----------------
+    check("D-3 ① `camp_nb` **不再**按 `Block.observed` 滤雾"
+          "（对齐 PC `mapsolve.py:403-415`：**没有任何过滤**，"
+          "用户口径「最开始就是只有**营地挨着的四个格子**可以点」✓）",
+          "if not bool(getattr(prob.blocks.get(_nb), 'observed', True)):" not in _mv58s)
+    check('D-3 ② 保留「营地块 ∪ 营地格」的 4 邻、排除营地块自己（v1.55 修的那半别丢 ✓）',
+          '_camp_block_cells' in _mv58s and '_ccells | _camp_block_cells' in _mv58s
+          and '_nb < 0 or _nb == camp' in _mv58s)
+    check('D-3 ③ ⚠ `Block.observed` 本身**必须留着** —— 那是**另一个**机制'
+          '（M8 `block_revealed` 的观测闸门）✓',
+          'self.observed = bool(revealed)' in _ms58s
+          and 'if n in self.obs_consumed and not _obs:' in _mv58s)
+
+    # ---------------- D-5 退图判据补 `had_plan` ----------------
+    check('D-5 ① 规划成功时置 `had_plan`（照 PC `:9027` ✓）',
+          "st['had_plan'] = True" in _code58)
+    check('D-5 ② 退图判据按 `had_plan` 区分（照 PC `:9149-9172`）：'
+          '算出过计划 ⇒ **立刻收工**；从没算出过 ⇒ **留 3 轮耐心** ✓',
+          "if st.get('had_plan'):" in _code58
+          and "'finish': 'blank_board', 'had_plan': True" in _el58s)
+    check('D-5 ③ `no_plan` 且 `expanded <= 1` ⇒ **硬告警** `finish: no_plan_giveup`'
+          '（模型层坏了必须一眼看得出"丢图"，不许被静默转成"正常收工" ✗）',
+          "'finish': 'no_plan_giveup'" in _el58s
+          and "'expanded': _exp58" in _el58s)
+    check('D-5 ④ 旧的**无条件** `targets_done` 退图已删除'
+          '（它在 `blank_board` 的 3 轮耐心**之前**跑 ⇒ 直接绕过保护 ⇒ 25 体力白扔，'
+          '日志还冒充"满意收工" ✗✗）',
+          "'finish': 'targets_done'" not in _el58s)
+    check('D-5 ⑤ ⛔ **没有**加回「点序空就多等几轮」的兜底'
+          '（PC `verify_fog_only_start.py:160-165` 已按用户口径删掉它 ✗'
+          '—— 要治的是 `expanded:1` 本身，不是给它盖被子）',
+          'need_explore' not in _code58
+          and 'EXPLORE_MIN_GRAY' not in _code58)
+
+    # ---------------- D-6 `Block.plain` 对齐 PC ----------------
+    _i58_fs = _ms58s.find('if _sp0.is_fight_spot(self.sid):')
+    _i58_fog = _ms58s.find("if (not getattr(self, 'observed', False)) "
+                           "and self.spot.get('fog_sil') is not None:")
+    check('D-6 ① `plain` 里**战斗保护在最前**（照 PC `:180-185`）——'
+          '任何分支都不许把战斗型判成空地（用户原话：'
+          '「**42 为什么能连锁？这不是战斗地块吗**」✗）',
+          0 < _i58_fs < _i58_fog, 'fight@%s fog@%s' % (_i58_fs, _i58_fog))
+    check('D-6 ② 雾剪影那一支加了 `not observed`（照 PC `:198-203`）——'
+          '已揭示的格**必须**按名字/类型判（用户原话：'
+          '「**模型都认出这是海边小屋了，怎么还会认为是空地**」✗）',
+          _i58_fog > 0)
+    _sp58c = __import__('spots')
+    _sim58c = __import__('mapsim')
+    _row58c = {'sid': 'S00003_111', 'name': '海边杂物', 'SpotSize': 3,
+               'SpecialSpot': 1, 'fog_sil': 0.2, 'fog_flat': True, 'cells': [0, 1, 2]}
+    _b58c = _sim58c.Block(0, dict(_row58c), revealed=True)
+    check('D-6 ③ 执行级：**已揭示**（observed=True）的战斗块，**即使带剪影值** '
+          '⇒ `plain is False`（旧写法：剪影分支提前 return ⇒ `plain=True` ⇒ 定价 1'
+          '（应 `size×2`）且被算进草地连锁 ✗✗）',
+          _b58c.observed and _b58c.plain is False, 'plain=%s' % (_b58c.plain,))
+    _b58d = _sim58c.Block(1, {'sid': 'S00003_001', 'name': '草地', 'SpotSize': 1,
+                              'SpecialSpot': 0, 'fog_sil': 0.012, 'fog_flat': True},
+                          revealed=False)
+    check('D-6 ④ 【负样本】**真雾格**（observed=False）+ 剪影平坦 ⇒ **仍 `plain is True`**'
+          '（⚠ 别把这一支整个删掉 —— 那是**另一个**机制 M54，'
+          '删了会"连锁穿过雾里的障碍" ✗）',
+          _b58d.plain is True, 'plain=%s' % (_b58d.plain,))
+
+    # ---------------- D-7 三处同步：`is_fight_spot` + `拦路` ----------------
+    _seg58_x2 = _mv58s.split('FIGHT_X2 = ')[1][:160]
+    _seg58_bc = _ms58s.split('def block_cost')[1][:1800]
+    _seg58_cm = _el58s.split('_COST_FIGHT_MARKS = ')[1][:220]
+    check("D-7 ① **三处同步**都有 `拦路`（PC `a7df4af` 正文：「修法（**三处同步**，口径一致 ✓）」）",
+          "'拦路'" in _seg58_x2 and "'拦路'" in _seg58_bc and "'拦路'" in _seg58_cm,
+          'mapsolve=%s mapsim=%s loop=%s' % ("'拦路'" in _seg58_x2,
+                                             "'拦路'" in _seg58_bc,
+                                             "'拦路'" in _seg58_cm))
+    check('D-7 ② `mapsim.block_cost` 里也有**地块类型**定价（`is_fight_spot`）'
+          '—— `_fix_blank_cost_1` 当年「只改了 mapsolve、漏了 mapsim」⇒'
+          '「策略评估与最优解**不可比**」✗',
+          'is_fight_spot' in _seg58_bc)
+    _cells58e = {
+        (1, 1): {'sid': 'S00003_000', 'name': '营地', 'revealed': True,
+                 'ratio': 1.0, 'marks': [], 'anchor': (1, 1)},
+        (2, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
+                 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
+        (2, 2): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
+                 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
+    }
+    _sim58e = _sim58c.MapSim.from_observation(_cells58e, _sp58c.spot_rows())
+    _b58e = [b for b in _sim58e.blocks.values() if b.name == '海边杂物']
+    _cst58e = _sim58c.MapSim.block_cost(_b58e[0]) if _b58e else None
+    _sz58e = _b58e[0].size if _b58e else None
+    check('D-7 ③ 执行级：`MapSim.block_cost` 对**战斗型地块**按 `size×2`'
+          '（与 `mapsolve.step_cost` 同口径 ⇒ 模拟器与求解器可比 ✓）',
+          _cst58e is not None and _cst58e == _sz58e * 2,
+          'cost=%s size=%s' % (_cst58e, _sz58e))
+    _b58f = _sim58c.Block(9, {'sid': 'S00003_002', 'name': '沙地', 'SpotSize': 3,
+                              'SpecialSpot': 0}, revealed=True, mark='拦路')
+    check("D-7 ④ 执行级：`mark='拦路'` 的块也按 `size×2`（拦路标记在**规划时还没有**，"
+          '但 EffPolicy / `model_cost` 审计要用 ✓）',
+          _sim58c.MapSim.block_cost(_b58f) == _b58f.size * 2,
+          'cost=%s size=%s' % (_sim58c.MapSim.block_cost(_b58f), _b58f.size))
+
+    # ---------------- D-8 `FOLLOW_PLAN_ONLY` ----------------
+    check('D-8 ① `FOLLOW_PLAN_ONLY = True`（照 PC `:436`；用户口径原话：'
+          '「**去掉那些追加的，只按规划的走**」✓）',
+          'FOLLOW_PLAN_ONLY = True' in _el58s)
+    _i58_fpo = _code58.find('if FOLLOW_PLAN_ONLY:')
+    _i58_rev = _code58.find('for p in reveals[:10]:')
+    check('D-8 ② 追加逻辑（开路格 + 交替插目标 + 内容格兜底）**已套进 `else:`**'
+          '（PC `:8919-8945` 同款改法 ✓）',
+          0 < _i58_fpo < _i58_rev, 'follow@%s reveals@%s' % (_i58_fpo, _i58_rev))
+    check('D-8 ③ ⚠ **降级链保留**（solver 失败 ⇒ EffPolicy）——'
+          "那不是\"追加点击\"，是**换一个规划器** ✓",
+          "st.get('plan_src') == 'eff'" in _code58 and 'eff_order(' in _code58)
+    check('D-8 ④ ⚠ `road_all` / `targets` **仍照旧计算**'
+          '（它们是"**哪些战斗该打**"的**判据**（popups 的 `offroad_fight` / `forced_fight` /'
+          "`on_plan` 靠它们），**不是点击序列** ⇒ 别一起删 ✗；PC `:8923` 原文 ✓",
+          "st['road'] = road_all" in _code58
+          and "st['targets'] = list(marked)" in _code58
+          and "entry['road'] = road_all[:6]" in _code58)
+except Exception as _e58s:      # noqa: BLE001
+    check('v1.58 P0 落地守门可运行（%r）' % (_e58s,), False)
 
 print()
 print('=' * 78)

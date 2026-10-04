@@ -184,6 +184,25 @@ class Block:
              （宝箱/海螺/岩石…）也当成了空地 ✗；改成只认**草地**（名字含「草」）
         实测（`_why_15c.py`，C 口径）：点 (1,5) ⇒ 片恰为 3 格 ✓ 与用户描述逐字吻合
         """
+        # ⛔⛔ v1.58【战斗保护提到最前 —— 移植 PC `mapbot_pc/mapsim.py:171-185`】
+        #   PC 用户口径（原话，真机两次）：
+        #     「**42 为什么能连锁？这不是战斗地块吗**」
+        #     「**模型都认出这是海边小屋了，怎么还会认为是空地**」✗
+        #   PC 真机铁证（`runs/r_200646_0.png` 第 3 张图）：
+        #     计划第1步 `(4,2)` = `S00003_301`「海边小屋」score 0.757、ratio **1.19（已揭示✓）**
+        #     数据表 `SpotSize=6 / EventNum=6-6` ⇒ **战斗地块** ⇒ 正确定价 **6×2 = 12 体** ✓
+        #     且**不连锁** ✗ —— 可模型给出 `plain=True` ✗ ⇒ `block_cost = 1` ✗
+        #     ⇒ 还被算进"草地连锁"⇒ 计划第一步的代价与后续推演**全错** ✗✗
+        #   根因（**手机端原来就是这个形状** ✗）：下面"雾格剪影"那一支
+        #     **提前 return、完全不看名字/类型**（本意是"雾里名字不可信 ⇒ 改看剪影平坦度"，
+        #     但它**排在战斗保护之前** ✗）
+        #   ⇒ **战斗保护提到最前**：任何分支都不许把战斗型地块判成空地 ✓
+        try:
+            import spots as _sp0
+            if _sp0.is_fight_spot(self.sid):
+                return False
+        except Exception:       # noqa: BLE001
+            pass
         if '营地' in (self.name or ''):
             return False                     # 出生地：不可点 + 阻断连锁 ✓
         # ⭐⭐⭐ 2026-10-01 v1.03【雾格剪影一票否决】——用户口径「优化识别模型，认出雾格里那块
@@ -196,7 +215,14 @@ class Block:
         #   中位分只有 0.276，平坦格被猜成「岩石/巨大木桩」✗）⇒ 雾格的 plain 只认剪影实测：
         #     有物体（fog_object）⇒ 非空地 ｜ 平坦（fog_flat）⇒ 空地
         #   ⚠ 仅当该格**有剪影值**（= 它是雾格）时接管；揭开后走下面按名字/后缀的老逻辑 ✓
-        if self.spot.get('fog_sil') is not None:
+        # ⚠⚠⚠ v1.58【加 `not observed` —— 移植 PC `mapbot_pc/mapsim.py:198-203`】
+        #   这一支**只看真雾格**（观测时未揭示 ✓）；**已揭示的格必须**按名字/类型判断 ✓
+        #   PC 真机反例（`r_200646_0.png`）：(4,2) ratio=**1.19（已揭示）** 却带着剪影值
+        #     ⇒ 旧写法（只看 `fog_sil is not None`）会**绕过一切判断** ⇒ `plain=True` ✗✗
+        #   → 与上面"战斗保护提到最前"是**同一场事故的两半**，必须一起改 ✓
+        #   ⚠ 负样本必须守住：**真雾格 + 剪影平坦 ⇒ 仍 `plain=True`**
+        #     （别把这一支整个删掉 —— 那是另一个机制 M54，删了会连锁穿过雾里的障碍 ✗）
+        if (not getattr(self, 'observed', False)) and self.spot.get('fog_sil') is not None:
             return bool(getattr(self, 'fog_flat', False))
         suf = str(self.sid or '').split('_')[-1]
         # ⚠ v1.05：og_flat（雾格平坦⇒当空地）**暂不启用** —— 集成路径里剪影值与独立原型
@@ -260,10 +286,23 @@ class MapSim:
         self.clicks = 0
         self.stamina = 0            # ⭐ 累计体力（源码口径，见 charge()）
         self.log = []
-        # ⭐ v1.51：**观测格里出现过哪些格** —— `mapsolve._build_cache` 的 `EMPTY_ADJ`
-        #   闸门要用它：观测里没有的格**不许**当"已消耗"去揭示邻居 ✓
-        #   ⚠ 默认 `None` ⇒ 闸门**不启用**（老调用/全知盘/内存盘行为一字不变 ✓）
-        #     —— 与 PC 同口径（`obs_cells` 只在 `from_observation` 那条路被赋值 ✓）
+        # ⭐⭐⭐ v1.58【`obs_cells` —— 手机端**不再赋值** ⇒ `EMPTY_ADJ` 闸门**不生效**】
+        #   ⚠⚠ 这是**用户拍板的口径**：**对齐 PC 的「实际行为」**（PC 真机跑的就是没有闸门那一版）。
+        #   依据（《PC规划算法对照报告》D-4，已实测）：
+        #     · PC `_build_cache` 里**写了**这道闸门（`mapsolve.py:424-429`），注释说
+        #       "只有拿到观测格集合时才启用"；但 PC 的 `MapSim.from_observation`（`:296-389`）
+        #       与 `_from_anchors`（`:391-489`）**从不给 `sim.obs_cells` 赋值**
+        #       ⇒ 探针实测 `obs_cells = None` ⇒ **PC 真机路径上这道闸门是死代码** ✓
+        #     · PC 唯一赋值点在 `from_memory_dump`（`mapsim.py:568-573`），而那段在 `try` 里
+        #       引用了该函数**不存在的局部变量 `cells`** ⇒ 恒走 `except` ⇒ `set()` ✓
+        #     · 而手机端 v1.51 **真的赋了值**（探针实测 35 个格索引）⇒ 闸门**启用** ⇒
+        #       "被剔出模型的格"不能再当揭示源 ⇒ 模型里可能留下**永远不可达的目标**
+        #       ⇒ `exhausted`（探针 B/C 实测：camp 打标成功、`camp_nb` 非零，仍
+        #          `reason=exhausted expanded=16/18`）✗
+        #   ⇒ 手机端对齐 PC 的**行为**（不启用），默认就是 `None` ✓
+        #   ⚠⚠ 与它**成对**出现的 `Block.observed`（M8 `block_revealed` 的观测闸门）
+        #     **必须留着** ✓ —— 那是**另一个**机制（判"块内观测里有没有已揭示的格"），
+        #     不依赖 `sim.obs_cells`；别把两半一起删 ✗（v1.51 就是只搬了一半）
         self.obs_cells = None
 
     # ---------- 体力（源码 82956-82992） ----------
@@ -282,7 +321,22 @@ class MapSim:
         if getattr(b, 'plain', False):
             return 1
         size = int(getattr(b, 'size', 1) or 1)
-        if getattr(b, 'mark', None) in ('boss', 'redEquip', 'recommend', 'battle'):
+        # ⭐⭐⭐ v1.58 与 `mapsolve` 同口径：**先按地块类型**判是不是战斗型
+        #   **原样移植 PC `mapbot_pc/mapsim.py:278-288`**（PC commit `a7df4af` 的正文写明
+        #   「修法（**三处同步**，口径一致 ✓）」）：
+        #     `EventNum` > 1-1 ⇒ 战斗 ⇒ `size×2` ✓（临时标记 `拦路` 在**规划时**还没有 ✗）
+        #   ⚠ 手机端原来是**既没有类型定价、mark 元组也缺 `'拦路'`** ✗
+        #     ⇒ EffPolicy / 离线对拍 / `model_cost` 审计把"要打的架"按**探索价**算
+        #     ⇒ 选出"看起来便宜、实际更贵"的路（PC 用户原话：
+        #        「**为什么还是要去打战斗格子？这样不是会贵吗**」）✗
+        try:
+            import spots as _sp             # ⚠ 本模块**故意不 import spots**（数据靠参数传 ✓）
+            if _sp.is_fight_spot(getattr(b, 'sid', None)):   # 局部导入：首次后走缓存，零开销 ✓
+                return size * 2
+        except Exception:       # noqa: BLE001
+            pass
+        if getattr(b, 'mark', None) in ('boss', 'redEquip', 'recommend', 'battle',
+                                        '拦路'):
             return size * 2
         return size
 
@@ -318,16 +372,16 @@ class MapSim:
         if any(isinstance(v, dict) and v.get('anchor') for v in cells.values()):
             return cls._from_anchors(cells, spot_table)
         board = [-1] * NCELL
-        # ⭐⭐⭐ v1.51【观测格集合】—— 抄 PC：**观测里真的有哪几格**
-        #   `mapsolve._build_cache` 的 `EMPTY_ADJ` 用它做闸门：观测里没有的格
-        #   **不许**当"已消耗"去揭示邻居（真机 23:30 那把：4 格被推断成已消耗并
-        #   **删出观测** ⇒ `board<0` ⇒ 邻居被判"开局已揭示" ⇒ **计划点雾格** ✗✗）
-        #   ⚠ 只有拿到观测格集合时才启用 ⇒ 老调用/全知盘（`mapgen`）行为一字不变 ✓
-        obs_cells = set()
+        # ⭐⭐⭐ v1.58【观测格集合 `obs_cells` —— 手机端**不给它赋值**（抄 PC 真机的实际行为）】
+        #   v1.51 曾在这里攒 `obs_cells` 并交给 `sim.obs_cells` ⇒ 把 `EMPTY_ADJ` 闸门**真启用**了；
+        #   而 PC 真机路径上**从不赋值**（唯一赋值点在 `from_memory_dump`，那句引用了
+        #   该函数不存在的局部变量 ⇒ 恒异常被吞 ⇒ `set()`）⇒ PC 那道闸门是**死代码** ✓
+        #   ⇒ 按用户口径**对齐 PC 的实际行为**：这里不再攒、不再赋值
+        #     （闸门代码留在 `mapsolve._build_cache` 里不动，只是永远拿到 `None` ⇒ 不生效 ✓）
+        #   ⚠ 详细依据与"为什么不能启用"的实测见 `MapSim.__init__` 里 `self.obs_cells` 那段注释 ✓
         idx_of = {}
         blocks = []
         for (r, c) in sorted(cells):
-            obs_cells.add(cell_of(r, c))        # ⭐ v1.51：这一格**观测里真的有** ✓
             sid = cells[(r, c)].get('sid') or cells[(r, c)].get('name')
             # ⚠ 只有 **SpotSize>1 的大地块**才跨格；1 格地块（草地/海螺…）各自独立 ✗
             #   （否则相邻同 sid 的草地会被并成一大块，块数/体力/揭示全算错）
@@ -376,7 +430,8 @@ class MapSim:
             idx_of[(r, c)] = b.idx
             blocks.append(b)
         _sim = cls(board, blocks)
-        _sim.obs_cells = obs_cells        # ⭐ v1.51：观测格集合（EMPTY_ADJ 闸门用 ✓）
+        # ⚠ v1.58：**故意不赋值 `obs_cells`** —— 见本函数开头与 `__init__` 里的说明
+        #   （PC 真机路径上这道 `EMPTY_ADJ` 闸门是死代码 ⇒ 手机端也对齐"不启用" ✓）
         return _sim
 
     @classmethod
@@ -468,9 +523,9 @@ class MapSim:
                 board[c] = b.idx
             blocks.append(b)
         _sim2 = cls(board, blocks)
-        # ⭐ v1.51：观测格集合 = 观测里**出现过的格**（`cells` 的键就是"看到了的格"✓）
-        _sim2.obs_cells = {cell_of(r, c) for (r, c) in cells
-                           if 0 <= r - 1 < ROWS and 0 <= c - 1 < COLS}
+        # ⚠ v1.58：**故意不赋值 `obs_cells`**（`_from_anchors` 这条路也一起关掉）——
+        #   依据同 `from_observation`：PC 真机路径上 `EMPTY_ADJ` 闸门是死代码，
+        #   手机端对齐 PC 的**实际行为** ⇒ 不启用 ✓（`Block.observed` 不受影响，照旧 ✓）
         return _sim2
 
     @classmethod

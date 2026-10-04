@@ -45,7 +45,14 @@ from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROWS, COLS = 5, 7
 NCELL = ROWS * COLS
-FIGHT_X2 = {'boss', 'redEquip', 'recommend', 'battle'}      # 战斗格：体力 ×2
+# ⭐⭐⭐ v1.58 补进 `拦路` —— **移植 PC `mapbot_pc/mapsolve.py:36-41`**（连用户口径一起抄）：
+#   PC 用户口径（原话）：「**战斗格的体力需要是格数×2，拦路那个消耗 6 体啊**」
+#     ⇒ 补进 `拦路`：拦路格**定义上就是战斗**（真机日志：「开打 · 拦路格（标记 ['拦路']）」✓）
+#   真机事故（PC acc1 `gui_20261003_140308` 第 2 张图）：计划里的 `2,6`（S00003_111，格数 3）
+#     被定价成 **3**（掉到"内容格·探索"那档 ✗），而它实际是**拦路战斗** ⇒ 应为 **3×2=6** ✓
+#     ⇒ 求解器把"要打的架"少算一半 ⇒ 挑出"看起来便宜、实际更贵"的路 ✗
+#   ⚠ PC 是**三处同步**（`mapsolve.py:41` / `mapsim.py:286-288` / `explore_loop.py:4625-4626`）✓
+FIGHT_X2 = {'boss', 'redEquip', 'recommend', 'battle', '拦路'}      # 战斗格：体力 ×2
 
 
 def _is_fight_block(b):
@@ -86,9 +93,15 @@ class Problem:
         #       否则目标一旦藏在雾里就永远不可达 ⇒ `exhausted`（无解、整图干等）✗✗
         #   （这两条是 PC 用真机帧 A/B 出来的：只做前者 ⇒ 无解；只做后者 ⇒ 点雾格 ✓）
         self.obs_consumed = {c for c in range(NCELL) if self.board[c] < 0}
-        #   `obs_cells`：**观测里真的有哪几格**（`MapSim.from_observation` 记的）——
-        #     `_build_cache` 的 `EMPTY_ADJ` 用它做闸门：观测里没有的格
-        #     **不许当"已消耗"** ✓（⚠ 拿不到 ⇒ 闸门不启用，行为一字不变 ✓）
+        #   `obs_cells`：**观测里真的有哪几格** —— ⚠⚠ v1.58 起**手机端恒为空**
+        #     （`MapSim.from_observation` / `_from_anchors` 都**不再赋值** ⇒ 这里永远是 `set()`）
+        #     ⇒ `_build_cache` 的 `EMPTY_ADJ` 闸门**不生效** ✓
+        #   ⚠ 这是**用户拍板的口径**：**对齐 PC 的「实际行为」**。依据（报告 D-4，已实测）：
+        #     PC 唯一给 `sim.obs_cells` 赋值的地方在 `from_memory_dump`（`mapsim.py:568-573`），
+        #     而那段在 `try` 里引用了该函数**不存在的局部变量 `cells`** ⇒ 恒走 `except`
+        #     ⇒ `set()` ⇒ **PC 真机路径上这道闸门就是死代码**（探针实测 `obs_cells = None`）✓
+        #   ⚠ 闸门**代码**留在 `_build_cache` 里不动（拿到 `None` 自然不启用，
+        #     与 PC 源码形状一致 ⇒ 将来要真启用时不用重写）✓
         self.obs_cells = set(getattr(sim, 'obs_cells', None) or ())
         for b in self.blocks.values():
             if '营地' in (b.name or ''):
@@ -444,23 +457,22 @@ def _build_cache(prob):
     camp_nb = 0
     _ccells = set(getattr(prob, 'camp_cells', None) or ())
     if camp is not None:
-        # ⭐⭐⭐ v1.55【营地邻接 = 营地块的邻居 ∪ 营地格的邻居，**再按观测滤雾**】
-        #   ⚠⚠ **真机 + 离线都抓到的 bug**（手机端"没有规划"的第二处根因）：
-        #     我 v1.51 抄 PC 时只用了 `camp_cells`（**营地那一格**）——
-        #     而营地格若在**多格块的角上**（4 邻全是自己那块），
-        #     它一个"别人的块"都邻接不到 ⇒ **`camp_nb = 0`** ✗✗
+        # ⭐⭐⭐ v1.58【去掉 `observed` 过滤 —— **对齐 PC 的不变量：营地四邻恒为候选**】
+        #
+        #   PC 基准（`mapbot_pc/mapsolve.py:403-415`）：`camp_nb` = 营地块 ∪ 营地格的 4 邻，
+        #     **没有任何 revealed/observed 过滤**；PC 注释里的用户口径是
+        #     「最开始就是只有**营地挨着的四个格子**可以点」（`mapsolve.py:233-236`）✓
+        #   ⚠⚠ 而手机端 v1.55 自己加的那道 `if not observed: continue` 是 **PC 没有的**：
+        #     它把「营地四邻」又按 `Block.observed`（**建块时**的观测值 ✓）滤一遍
+        #     ⇒ 营地在多格块的角上、或那一帧邻块恰好判雾时，**`camp_nb` 被清成 0**
         #     ⇒ `visible(空状态) = camp_nb | empty_adj = 0` ⇒ `expanded:1` / `exhausted`
-        #     而 `Problem.visible()` 用的是**整块**的邻居 ⇒ 两份**算出来不一样** ✗
-        #     （离线实测：`Problem.visible()` = 4 个候选，`camp_nb` = 0 ⇒ 求解器仍无解）
-        #   ⇒ 两边统一：**用整块的邻居**（保证"开局一定有点能点的格" ✓
-        #      —— 用户口径原话：「不可能出现开局没有一个地方能点的情况」✓）
-        #   但 PC 当初改成 `camp_cells` 是有理由的（它的注释）：
-        #     「用**整块**算邻接 ⇒ boss(1,2)、紫金格(2,4) 都进了 `camp_nb` ⇒
-        #       开局就被当成"已揭示/可点"（真机两格 ratio 0.665/0.717 **都是雾**）✗✗」
-        #   ⇒ 所以**加一道观测闸门**：只把 **`Block.observed`（建块时观测说已揭示）**
-        #     的邻块算进来 ✓ —— 两个目标同时满足：
-        #       · 块角营地也有候选（不再 0）✓
-        #       · 雾格不会被当成"开局可点" ✓
+        #     ⇒ 与 `Problem.visible()`（无 gate）**两份实现算出来不一样** ✗✗
+        #       —— v1.55 注释里记的「`Problem.visible()` = 4 个候选，`camp_nb` = 0」正是这道 gate ✓
+        #   ⇒ 现在只保留「**营地块 ∪ 营地格**的 4 邻、排除营地块自己」这条口径：
+        #       · 块角营地也有候选 ✓（v1.55 修的那半，保留）
+        #       · 不再按 observed 滤 ✓（去掉 v1.55 自己加的那半，对齐 PC）
+        #   ⚠ `Block.observed` 本身**必须留着** —— 那是**另一个**机制（M8 `block_revealed`
+        #     的观测闸门，见本文件 `:155-201`），与这里无关，别一起删 ✗
         _camp_block_cells = set(prob.cells_of.get(camp, ()))
         for _c0 in (_ccells | _camp_block_cells):
             _r0, _q0 = _c0 // COLS, _c0 % COLS
@@ -469,9 +481,6 @@ def _build_cache(prob):
                 if 0 <= _rr < ROWS and 0 <= _qq < COLS:
                     _nb = prob.board[_rr * COLS + _qq]
                     if _nb < 0 or _nb == camp:
-                        continue
-                    # ⭐ 观测闸门：观测说它是雾 ⇒ 不算"开局可点" ✓
-                    if not bool(getattr(prob.blocks.get(_nb), 'observed', True)):
                         continue
                     camp_nb |= bit[_nb]
     # ⭐⭐ 2026-09-30：「观测里本来就是空的格」（已消耗）⇒ 它的邻居块**现在就已经揭示**。
@@ -482,11 +491,14 @@ def _build_cache(prob):
     for c, bi in enumerate(prob.board):
         if bi >= 0:
             continue
-        # ⭐⭐⭐ v1.51 闸门：**观测里根本没有这一格 ⇒ 不许拿它当"已消耗"去揭示邻居**
+        # ⭐⭐⭐ v1.51 闸门（⚠ v1.58 起**手机端不生效**，见 `Problem.__init__` 的说明）：
+        #   **观测里根本没有这一格 ⇒ 不许拿它当"已消耗"去揭示邻居**
         #   （PC 真机 23:30 那把：4 格被 `_infer_chain_consumed` 推断成已消耗并
         #     **删出观测** ⇒ 这里 `board<0` ⇒ `EMPTY_ADJ` 把它们的邻居判成
         #     "开局已揭示" ⇒ **计划点雾格** ✗）
-        #   ⚠ 只有拿到观测格集合时才启用（老调用/全知盘没有 ⇒ 行为一字不变 ✓）
+        #   ⚠ 只有拿到观测格集合时才启用 —— 而**手机端按用户口径恒拿不到**
+        #     （`sim.obs_cells` 不再被赋值 ⇒ `_obs_cells` 恒空 ⇒ 这一支走不到 ✓）
+        #     ⇒ 行为 = **PC 真机跑的那一版**（无闸门）✓
         if _obs_cells and c not in _obs_cells:
             continue
         r, cc = c // COLS, c % COLS

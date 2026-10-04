@@ -426,6 +426,21 @@ SAVE_FIRST = os.environ.get('MAPBOT_SAVE_FIRST', '1') != '0'
 COLLECT_ONLY = False
 SKIP_SPAWN_CLICK = False   # 执行序列里是否跳过出生点（默认关 ✓ 开了揭示起不来 ✗）
 OPT_SOLVER = True     # ⭐ 每轮用精确解算器规划点序（最省体力 ✓ fail-open ✓）
+# ⭐⭐⭐ v1.58【`FOLLOW_PLAN_ONLY` = **只按规划走**】—— 移植 PC `mapbot_pc/explore_loop.py:423-436`
+#   用户口径（原话，PC 端已按此删掉追加逻辑）：
+#     「**去掉那些追加的，只按规划的走**」
+#   ⇒ `order` **只由规划器产出**（solver ≤`PLAN_MAX_STEPS` 步 / EffPolicy ≤2 步），不再追加：
+#       ① 「出生地→目标」路上用来开路的格（`road_all`）
+#       ② 交替插入的目标格（原来"点一格 → 试一次首领 → 再点一格"）
+#       ③ 路上没可点格时的内容格兜底（`clearable`）
+#   ⚠ 手机端 v1.56 之前**仍是旧 PC 路径**（`order = _sol_px + order` ⇒ 计划只是被**前置**，
+#     后面还挂着一大串计划外的追加格）⇒ 用户口径「只按规划走」在手机端**从未生效** ✗
+#   ⚠ 仍然照旧计算的（**不是点击序列，别一起删**）：
+#       `road_all` / `plain_road` / `targets` —— 它们还是「**哪些战斗该打**」的判据
+#       （popups 的 `offroad_fight` / `forced_fight` / `on_plan` 都靠它们）✓
+#   ⚠ **保留降级链**（solver 失败 ⇒ EffPolicy）—— 那不是"追加点击"，是**换一个规划器** ✓
+#   ⚠ 想回退：把这里改成 False 即恢复原来的"规划 + 追加"行为（其余代码一行没删 ✓）
+FOLLOW_PLAN_ONLY = True
 ADAPTIVE_LAYOUT = False
 _GRID_CALIBRATED = {'done': False}   # 棋盘自检只跑一次 ✓
 LAYOUT = layout_mod.DEFAULT        # 默认 = 参考分辨率 1080×1920 ✓
@@ -727,6 +742,81 @@ def _infer_chain_consumed(cells, camp_rc, seed_rc=None, log=None, tag='solver'):
         return seed
 
 
+# ⭐⭐⭐ v1.58：`find_camp_cell()` 兜底用 —— 单格候选里「营地(000)」的**最低分**。
+#   **原样移植 PC `mapbot_pc/explore_loop.py:2790-2797`**（连标定注释一起抄，判据来源在注释里）：
+#     标定依据（PC 离线真机帧，零体力）：
+#       认得出的那把：营地单格 = `S00003_000` **0.998**（走老判据，不经过这里）
+#       认不出的那把（用户报「怎么规划没了」）：营地格 (4,3) 的单格候选
+#         `top[0] = (1.000, 'S00003_000')` / `top[1] = 0.996` / `top[2] = 0.991`
+#         —— 而它**同块**的干扰候选是 `S00003_001 草地 0.998` ⇒ 0.9 这条线留足了区分度
+#   ⚠ 只用于"老判据一个都没命中"时兜底；正常帧根本走不到这里 ✓
+CAMP_TOP_MIN = 0.90
+
+
+def find_camp_cell(cells, log=None, where=''):
+    """在本帧分类结果里找出**出生点（营地）**那一格 → `(cell, how, score)`
+    **原样移植 PC `mapbot_pc/explore_loop.py:7470-7523`**（含全部注释）
+
+    `how` = `'exact'`（老判据命中）／`'fallback'`（兜底命中）／`None`（都没命中，cell=None）
+
+    ⭐⭐⭐ PC 2026-10-02 新增兜底 —— 用户报「**怎么规划没了**」（那天那把的 GUI 日志里
+      只有「正在找路」，**没有「› 规划：体力 X / N 步」那一行**；结构化日志是
+      `{"solver":"no_plan","cost":null,"reason":"exhausted","expanded":1}`）。
+
+      离线复算铁证（PC `runs/r_204323_0.png`，零体力）：
+        · 营地真实位置 = **(4,3)**，它**自己**的单格最佳匹配就是
+          `S00003_000 营地` **1.000（满分）**（`state()` 的 per-cell `top` 里写着）
+        · 但它被**多格块归组**吞进了锚点 `(3,3)` 的 `S00003_211 巨大沙堡` 块
+          （`cells=[(3,3),(4,3),(4,4),(4,5)]`）⇒ 该格对外报 `name='巨大沙堡'`、
+          `anchor=(3,3)` ⇒ 老判据「`name=='营地'` **且** `anchor==自己`」两条全挂 ✗
+        · ⇒ `st['spawn']` 为空 ⇒ `mapsolve.Problem.visible()` 里
+          「开局可点 = **营地四邻**」那一支整体跳过 ⇒ 可点集合 = ∅
+          ⇒ A\* 展开 1 个状态就堆空 ⇒ `no_plan`（`mapsolve.py:198-201/364/456`）
+        · 附带：`_infer_chain_consumed()` 也拿营地当种子（"找不到营地就直接放弃"）
+          ⇒ 连锁消耗推断同时失效
+        · 对照（能规划的那把）：营地 `5,6 → S00003_000 / 0.998 / 单格 anchor` ✓
+
+      ⚠⚠ **手机端就是同一个病**：v1.53/v1.54/v1.55 三次修都在"打标顺序"上纠结，
+        而真机日志一直是
+          `{"solver":"camp_tagged",...}` → `{"solver":"no_plan","reason":"exhausted","expanded":1}`
+        ⇒ 根因是**判据本身认不出被吞掉的营地**（旧判据第二副本在 `:7764` / `:8105`，
+        `_cells_for_model` 的兜底扫的是**归组后的 `sid`** —— 而多格归组**恰好把营地格的
+        `sid` 覆盖成块 sid** ⇒ 在唯一需要它的场景下必然失败 ✗✗）
+
+      兜底判据（**只读 `state()` 已经算好的数据，不新增模板、不新增阈值方向**）：
+        每格的 `top` = 该格**单格**候选 `[(score, sid, anchor), …]` ⇒ 找
+        `sid` 后缀 `000`（= 营地）且 `score ≥ CAMP_TOP_MIN` 的格子，取**分最高**的那个 ✓
+        （PC 注释原文：多格块只会覆盖格子的 `sid/name`，**不会**改掉它单格候选的 `top` ✓）
+
+      ⚠ 只在**老判据一个都没命中**时才用兜底 ⇒ 对"认得出营地"的帧**零影响** ✓
+      ⚠ 每次兜底都落一条 `spawn_fallback` 日志（格号 + 分数）⇒ 事后可核对，不静默 ✗
+    """
+    if not cells:
+        return None, None, 0.0
+    # ① 老判据：单格块 + 名字就是营地（正常情形，优先，行为与改动前完全一致）
+    for k, v in sorted(cells.items()):
+        if v.get('anchor') == k and v.get('name') == '营地':
+            return k, 'exact', float(v.get('score') or 0)
+    # ② 兜底：在每格的**单格候选**里找营地分最高的那格
+    best, best_sc = None, 0.0
+    for k, v in sorted(cells.items()):
+        for t in (v.get('top') or []):
+            try:
+                sc, sid = float(t[0]), str(t[1])
+            except Exception:                 # noqa: BLE001
+                continue
+            if sid.split('_')[-1] == '000' and sc >= CAMP_TOP_MIN and sc > best_sc:
+                best, best_sc = k, sc
+    if best is not None:
+        if log is not None:
+            log.append({'spawn_fallback': '%d,%d' % best, 'score': round(best_sc, 3),
+                        'where': where,
+                        'note': '营地没被认成单格块（多半被多格块吞了）'
+                                '⇒ 用该格单格候选里 000 的最高分兜底'})
+        return best, 'fallback', best_sc
+    return None, None, 0.0
+
+
 def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
                      drop_done=True):
     """⭐ 2026-09-28 抽公共：给模型（MapSim.from_observation）用的「观测合并」
@@ -932,6 +1022,68 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
                 _dropped.append(_k)
                 continue
             _vv = dict(_cells_merged[_k])
+            # ---- ⭐⭐⭐ v1.58【拆掉"误并的多格块"（`_rescue`）】----
+            #   **原样移植 PC `mapbot_pc/explore_loop.py:1030-1095`**（含全部教训注释）
+            #   ⚠⚠ PC 的教训要一起抄（`8ec9891`/`9c045a9`）：「同一处逻辑用"套一层循环 +
+            #     **重新缩进**"实现 ⇒ 该格从模型里消失（`board<0`）⇒ 比原问题更危险」✗
+            #     ⇒ 本条**只改分组键/字段，不动函数体缩进**（PC `279d311` 的成功做法）✓
+            #
+            #   PC 用户报「规划错了」那把（`runs/r_000926_0.png`），地面真值是：
+            #      (1,1)=**空地**   (2,1)=**出生地(营地)**   (2,2)=**海螺**   (2,3)=空地
+            #   而分类器把这 4 格**并成一个「巨大沙堡」S00003_211**（anchor=(1,1)）✗✗
+            #   离线铁证（字段级自相矛盾）：每格的 `score` **恰好等于它自己单格候选 top1 的分**，
+            #      而 `sid/name/anchor` 却来自多格分组 ⇒ 「分是单格的、名字是整块的」
+            #      1,1: score 0.998 = top1 0.998 S00003_001(空地)   但 sid 写成 S00003_211
+            #      2,1: score 1.000 = top1 1.000 S00003_000(营地)   但 sid 写成 S00003_211
+            #      2,2: score 0.764 = top1 0.764 S00003_002(海螺)   但 sid 写成 S00003_211
+            #      2,3: score 0.994 = top1 0.994 S00003_001(空地)   但 sid 写成 S00003_211
+            #   ⇒ 规则：**本格 top1 的 sid 与分组 sid 不同、且 top1 分不低于分组分 ⇒ 以单格为准**
+            #     （把 anchor 改回自己 ⇒ 该格从多格块里**拆出来当独立块**）✓
+            #   为什么必须修：营地被吞 ⇒ `Problem.camp=None` ⇒ 揭示链没起点 ⇒
+            #     幻影消耗 + 把雾格判成可点 ⇒ 计划点雾格空转（整条因果链的唯一根因）✗✗
+            #   ⚠ 只作用于**喂给求解器的模型**（有日志可审），不动分类器本身 ✓
+            #   ⭐⭐⭐ PC 2026-10-03 **收窄这条规则**（PC 10-02 加的拆块，第二天反过来咬了一口 ✗）
+            #   真机事故（PC acc1 `gui_20261003_140308` 第 2 张图，用户：
+            #     「为什么还是要去打战斗格子？这样不是会贵吗」）：
+            #     合并模型里 `(2,6)` 被拆成 **S00003_011 勇者之墓（score 0.445）** ✗，
+            #     而**分组 sid 本来是对的** `S00003_111 海边杂物`（且 (2,6)(3,6)(3,7) 真的
+            #     有 3 格同型 ✓ 是真块 ✓）—— 因为两侧**分数相等**（都 0.445）⇒ 旧规则照拆 ✗✗
+            #     后果：勇者之墓是"特殊面板格、不打架"⇒ 该格被定价 **1 体**（战斗应 6 体 ✗）
+            #     ⇒ 模型以为"打架不要钱" ⇒ 放着绕路(12 体)不走、偏走打架那条(8 体) ✗✗
+            #   ⇒ 拆分的目的**只是**"把营地/空地/海螺从误并的多格块里救出来"⇒
+            #     只有"本格 top1 是**空地系/营地/海螺/`_000`**"时才允许拆 ✓
+            #     （同分/异型的多格互换一律不拆 ⇒ 保住分组原判 ✓）
+            try:
+                _tp = list(_vv.get('top') or [])
+                if _tp:
+                    _t0 = _tp[0]
+                    _ts, _tsid = float(_t0[0]), str(_t0[1] or '')
+                    _gs = float(_vv.get('score') or 0)
+                    _gsid = str(_vv.get('sid') or '')
+                    _tname = ''
+                    try:
+                        _tname = str(((spots_mod.spot_rows() or {}).get(_tsid) or {})
+                                     .get('Name') or '')
+                    except Exception:       # noqa: BLE001
+                        _tname = ''
+                    _rescue = (is_plain_spot(_tsid)
+                               or _tname in ('营地', '海螺')
+                               or str(_tsid).endswith('_000'))
+                    if (_tsid and _tsid != _gsid and _ts >= _gs - 1e-6 and _rescue):
+                        _vv['sid'] = _tsid
+                        if _tname:
+                            _vv['name'] = _tname
+                        _vv['anchor'] = tuple(_k)   # ⭐ 拆出：自己是锚点 ⇒ 独立单格块 ✓
+                        _vv['_split'] = True
+                        if log is not None:
+                            log.append({tag: 'cell_split_from_block',
+                                        'cell': '%d,%d' % tuple(_k),
+                                        'was': _gsid, 'now': _tsid,
+                                        'score': round(_ts, 3),
+                                        'note': '分组 sid 与单格 top1 矛盾 ⇒ '
+                                                '以单格为准（拆出独立块）'})
+            except Exception:               # noqa: BLE001
+                pass
             # ---- ⭐ 2026-09-30 ②：补目标白名单字段（Block.want ⇒ Problem.targets） ----
             try:
                 _vv['target'] = bool(tcfg_mod.is_target(
@@ -968,19 +1120,25 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
             _rc54 = cell_of(_cmp54[0], _cmp54[1])
             if _rc54 in _out:
                 _hit54, _how54 = _rc54, 'st.camp'
-        if _hit54 is None:          # 兜底：`_000` 是营地 —— **取分最高的那个** ✓
-            _best54 = None
-            for _k54, _v54 in _out.items():
-                if not str(_v54.get('sid') or '').endswith('_000'):
-                    continue
-                try:
-                    _sc54 = float(_v54.get('score') or 0.0)
-                except (TypeError, ValueError):
-                    _sc54 = 0.0
-                if _best54 is None or _sc54 > _best54[0]:
-                    _best54 = (_sc54, _k54)
-            if _best54 is not None:
-                _hit54, _how54 = _best54[1], '_000(score=%.2f)' % _best54[0]
+        if _hit54 is None:
+            # ⭐⭐⭐ v1.58【改成扫**单格候选 `top`**，不再扫归组后的 `sid`】
+            #   —— 抄 PC `find_camp_cell()`，并**直接复用**它（单一真相源 ✓）
+            #   ⚠⚠ 旧写法（`str(_v54.get('sid') or '').endswith('_000')`）
+            #     **在唯一需要它的场景下必然失败**：
+            #     多格归组**恰好把营地格的 `sid` 覆盖成块 sid**
+            #     （`spots.Board.state()` 的 `eff = blk['sid']`）
+            #     ⇒ 营地被吞掉时它的 `sid` 已经不是 `_000` ⇒ 兜底扫不到
+            #     ⇒ `camp_not_found` ⇒ `Problem.camp=None` ⇒ `camp_nb=0`
+            #     ⇒ `expanded:1 exhausted`（这就是 v1.53~v1.56 全程真机症状 ✗✗）
+            #   PC 注释原文（**判据来源**）：
+            #     「每格的 `top` = 该格**单格**候选 `[(score, sid, anchor), …]` ⇒ 找
+            #       `sid` 后缀 `000`（= 营地）且 `score ≥ CAMP_TOP_MIN` 的格子，取**分最高**的那个 ✓
+            #       （多格块只会覆盖格子的 `sid/name`，**不会**改掉它单格候选的 `top` ✓）」
+            _fc54, _fhow54, _fsc54 = find_camp_cell(_out, log=log,
+                                                    where='cells_for_model')
+            if _fc54 is not None:
+                _hit54, _how54 = (_fc54,
+                                  'find_camp_cell/%s(score=%.3f)' % (_fhow54, _fsc54))
         # ③ ⚠⚠ v1.55 **不能再"在 done 里就拒绝打标"** ✗ —— 那是我 v1.54 写反的
         #   PC 的正解是「**营地所在的块豁免剔除**」（见上面 `camp_block_kept`），
         #   而不是"放弃这个营地" —— 营地**本来就一直在 `done` 里**
@@ -1260,6 +1418,7 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
         if out is not None:
             out['cost'] = cost
             out['reason'] = _rep.get('reason')
+            out['expanded'] = _rep.get('expanded')      # ⭐ v1.58：退图判据/硬告警要用 ✓
             out['no_targets'] = (not plan) and cost == 0
             out['ok'] = bool(plan)
         if not plan:
@@ -1268,6 +1427,28 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
                             'reason': _rep.get('reason'),
                             'expanded': _rep.get('expanded'),
                             'secs': round(time.time() - _t0, 2)})
+                # ⭐⭐⭐ v1.58【硬告警：`no_plan` 且 `expanded <= 1`】
+                #   照 PC `explore_loop.py:9149-9172` 的口径：模型层坏了必须**一眼看得出丢图**，
+                #   而不是被下游静默转成"正常收工"（PC 事故原文：
+                #     「进图第 0 轮就 `没有目标了,准备退图`，25 体力白花」）。
+                #   `expanded <= 1` 的含义：A\* 展开 1 个状态就堆空 —— **开局候选集是空的**
+                #   （`visible(空) = camp_nb | empty_adj = 0`）⇒ 只有"营地/空地链"整体没建起来
+                #   才会这样 ⇒ **模型层疑似坏了** ⇒ 记 `finish: no_plan_giveup` 硬告警 ✓
+                #   ⚠ 与 `no_targets`（盘上本来就没目标，正常收尾）**必须分开** ——
+                #     否则"算不出"和"没目标"混在一起，事后无法定位 ✗
+                _exp58 = _rep.get('expanded')
+                try:
+                    _exp58i = int(_exp58) if _exp58 is not None else -1
+                except (TypeError, ValueError):
+                    _exp58i = -1
+                if (not ((not plan) and cost == 0)) and _rep.get('reason') != 'ok' \
+                        and 0 <= _exp58i <= 1:
+                    log.append({'finish': 'no_plan_giveup',
+                                'reason': _rep.get('reason'),
+                                'expanded': _exp58,
+                                'cost': cost,
+                                'note': '模型层疑似坏了（expanded<=1 ⇒ 开局候选集空）'
+                                        '⇒ 本图放弃；**不是**"目标已清完"✗'})
             return []
         # block idx → **真的能点的格**
         # ⭐⭐⭐ 2026-09-30 修（离线 `_bench_online.py` 80 张盘对拍，代价极大）：
@@ -4433,7 +4614,8 @@ def _fight_panel_visible(items, ditems):
 #   `android_autoexplore/_verify/phone_stamina_0930/`）。logcat 里原本**只有格号没有成本**
 #   ⇒ 事后无法判断"1 点的草地到底有没有排在点序前面"、还是"模型把贵地块看成了草地"。
 #   口径 = `mapsolve.Problem.block_cost`（空地 1 / 内容格·探索 SpotSize / 内容格·战斗 ×2）
-_COST_FIGHT_MARKS = ('boss', 'redEquip', 'recommend', 'battle')
+_COST_FIGHT_MARKS = ('boss', 'redEquip', 'recommend', 'battle',
+                     '拦路')      # ⭐ v1.58 用户口径（抄 PC `:4625-4626`）：拦路格也是战斗 ⇒ 格数×2 ✓
 # ⭐⭐ v1.08 标记中文名（用户口径：日志要写清"打的是什么格子"，多种标记全写出来 ✓）
 MARK_CN = {'boss': '首领', 'recommend': '大拇指', 'clover': '四叶草',
            'redEquip': '红装', 'battle': '战斗'}
@@ -7643,18 +7825,67 @@ def one_round(b, log, rnd, prefix, st):
     #   再也没人碰，机器人却满地图开路、把体力花在"拦路"战斗上 ✗
     #   ⇒ 只要**本帧**它还是"已揭示 + 强匹配的商人/宝库"，就把它从 `done` 里摘出来
     #     （真被买掉 ⇒ 本帧名字变空地/它不再进 buy ⇒ 自然不再摘 ✓ 不会重复点已消耗格 ✓）
+    # ⛔⛔⛔ v1.57【商人买完**不消失** ⇒ 绝不放回】—— 抄 PC
+    #
+    #   用户口径（原话，PC 那边记的）：
+    #     「那把规划**又忘了旅行商人购买完后不消失**，不能解锁后面相邻那个格子」✓
+    #
+    #   PC 真机日志实证（`gui_20261003_132733_acc2.log`，每轮都刷）：
+    #     「已揭示的宝库/商人 1 格『还没买掉』⇒ 从处理过里放回」
+    #     ⇒ r3/r4/r5/r6 反复出现「商人/宝库 1」⇒ **一直不揭新格、空转** ✗
+    #   根因：本段的摘除判据是「本帧它还是不是商人/宝库」——
+    #     而**商人格买完画面不变**（格子还在 ⇒ 判据以为"还没买"⇒ 放回 ✗✗），
+    #     它**也不解锁相邻格**（用户明确说的）⇒ **放回它没有任何收益** ✗
+    #   ⚠ 为什么商人**不消失**、宝库**会消失**：
+    #     宝库是**整格替换**成新面板/空地 ⇒ 分类器立刻就变了；
+    #     商人是**同格循环购买**（本局 4 轮）⇒ 买完那格仍是「旅行商人」美术
+    #     ⇒ **只有靠「买完记录」才知道它买过了** ✗
+    #   ⇒ 修法（照 PC）：
+    #     · 宝库**保留放回**（多轮奖励，放回是对的 ✓）
+    #     · 商人**一律不放回** ⇒ 记进 `merchant_done` ✓
+    #     · 本轮刚买完的（`buy_consumed` / `bought_done`）**一律不摘** ✓
+    _just_bought = st.setdefault('bought_done', set())
+    _m_done = st.setdefault('merchant_done', set())
     _unpinned = 0
+    _merch_kept = 0
     try:
         for _p in vault_px_now(c):
-            if _p in done:
-                done.discard(_p)
-                _unpinned += 1
+            if _p not in done:
+                continue
+            # ① 本轮刚买完的 ⇒ **它就是"已买完"**，不是"还没买" ⇒ 不摘 ✓
+            if _p in _just_bought or cell_of(*_p) in _just_bought:
+                _merch_kept += 1
+                continue
+            # ② 商人 ⇒ **一律不放回**（买完不消失 且 不解锁相邻格 ⇒ 放回零收益 ✗）
+            _rc_p = cell_of(*_p)
+            if _rc_p in _m_done:
+                _merch_kept += 1
+                continue
+            try:
+                _nm_p = str(((c.get('st') or {}).get(_rc_p) or {}).get('name') or '')
+            except Exception:           # noqa: BLE001
+                _nm_p = ''
+            if '商人' in _nm_p:
+                _m_done.add(_rc_p)
+                _merch_kept += 1
+                if log is not None:
+                    log.append({'merchant': 'bought_no_repin',
+                                'cell': '%d,%d' % _p,
+                                'note': '商人格买完**不消失** ⇒ **不放回**'
+                                        '（用户口径 ✓；放回会被反复规划/空转 ✗）'})
+                continue
+            done.discard(_p)
+            _unpinned += 1
     except Exception:       # noqa: BLE001
         pass
     if _unpinned:
         entry['vault_unpin'] = _unpinned
-        say('       · 已揭示的宝库/商人 %d 格「还没买掉」⇒ 从"处理过"里放回（宝库永不拉黑 ✓）'
+        say('       · 已揭示的宝库 %d 格「还没买掉」⇒ 从"处理过"里放回（宝库多轮奖励 ✓）'
             % _unpinned)
+    if _merch_kept:
+        entry['merchant_kept'] = _merch_kept
+        say('       · 商人 %d 格**买完不消失** ⇒ 不放回（放了会反复规划/空转 ✗）'
+            % _merch_kept)
     buy = [p for p in c['buy'] if p not in done]
     buy_hidden = [p for p in c.get('buy_hidden', []) if p not in done]   # 未揭示的商人/宝库
     # ⭐ v1.27：**已经买完/消耗掉的格子不再当目标**（幽灵目标根因，见「vault: consumed」注释）
@@ -7713,13 +7944,21 @@ def one_round(b, log, rnd, prefix, st):
     #   出生点(营地) 点了只弹一个没用面板、不消耗、不揭示 ⇒ 直接当"已完成"排除，
     #   省掉一次点击 + 一次面板判定（约 1.5 秒/图），也少一次 OCR
     if c.get('st'):
-        for k, v in sorted(c['st'].items()):
-            if v.get('anchor') == k and v.get('name') == '营地':
-                camp_px = marks_mod.cell_center(k[0], k[1])
-                done.add(camp_px)
-                st['spawn'] = camp_px
-                st['camp'] = camp_px
-                break
+        # ⭐⭐⭐ v1.58 认营地改走 `find_camp_cell()`（带 `top` 里 `_000` 兜底）
+        #   —— **原样移植 PC `explore_loop.py:8337-8349`**（同一个判据只能有一处实现 ✓）
+        #   PC 用户报「怎么规划没了」那帧，营地格被多格块吞了 ⇒ 老判据两条全挂
+        #   ⇒ `st['spawn']` 为空 ⇒ 求解器开局可点集合为空 ⇒ `no_plan / exhausted`
+        #   （完整证据链见 `find_camp_cell()` 的 docstring）
+        #   ⚠ 「只改一半」的教训（`交接文档 §14.1`）：另一处调用点在 `spawn_road`，一起换 ✓
+        _ck, _chow, _csc = find_camp_cell(c['st'], log, where='spawn')
+        if _ck is not None:
+            camp_px = marks_mod.cell_center(_ck[0], _ck[1])
+            done.add(camp_px)
+            st['spawn'] = camp_px
+            st['camp'] = camp_px
+            if _chow != 'exact':
+                entry['spawn'] = {'cell': '%d,%d' % _ck, 'how': _chow,
+                                  'score': round(_csc, 3)}
     if c['unknown']:
         entry['unknown_cells'] = len(c['unknown'])
     # ⭐ 2026-09-27：标记格也按**锚点**去重（多格大块的成员格会各报一次 ✓ 去重后只点一次 ✓）
@@ -8021,11 +8260,35 @@ def one_round(b, log, rnd, prefix, st):
         except Exception:       # noqa: BLE001
             pass
     # ⭐ v1.39：没有目标 ⇒ **直接退图**（探索模式已移除，不再有"先探图"这条路 ✓）
+    # ⭐⭐⭐ v1.58【补 `had_plan` 区分 —— 别让模型 bug 冒充满意收工】——
+    #   **照 PC `mapbot_pc/explore_loop.py:9149-9172`**（PC 用户口径原话两次：
+    #     「**无意义的三轮不是早就让全删了吗**」）
+    #   旧写法的问题（两处，PC 的注释点名过）：
+    #     ① 这条判据**跑在 `blank_board` 的 3 轮耐心之前** ⇒ 直接绕过那道保护；
+    #     ② **完全不看"本图到底算出过计划没有"** ⇒ 求解器 `no_plan` + 标记扫描为空时，
+    #        `rnd>=2` 就写 `finish: targets_done` 退图 ⇒ **25 体力白扔**，
+    #        日志还**冒充"满意收工"** ✗✗
+    #   PC 历史事故（`verify_fog_only_start.py` 记的第 ② 类）：旧代码「点序空就判 `all_done`
+    #     退图，**绕过了**那道 `blank_board` 保护，一击退图」✓
+    #   ⇒ 现在按"这张图到底规划过没有"精确区分（两个目的都保住 ✓）：
+    #       · `had_plan`（本次进图**算出过计划**）⇒ 计划已走完 ⇒ **立刻收工，不等** ✓
+    #         （正常图都走这条 ⇒ 那无意义的三轮彻底消失 ✓）
+    #       · 从没算出过计划（全雾/识别失败）⇒ **不在这里退**，落到下面 `blank_board`
+    #         的 3 轮耐心，给识别一次机会 ✓
+    #   ⛔ **不要**加回"点序空就多等几轮"的兜底 —— PC `verify_fog_only_start.py:160-165`
+    #     已按用户口径删掉它；要治的是 `expanded:1` 本身（D-1/D-2 已治），不是给它盖被子 ✗
     if vis and rnd >= 2 and not marked and not pending_buy:
-        log.append(entry)
-        log.append({'finish': 'targets_done', 'gray_left': len(grays),
-                    'content_skipped': len(nones_extra)})
-        return 'done'
+        if st.get('had_plan'):
+            log.append(entry)
+            log.append({'finish': 'blank_board', 'had_plan': True,
+                        'note': '计划已走完、也没有标记目标 ⇒ 立刻收工'
+                                '（用户口径：删掉无意义的三轮 ✓）'})
+            return 'done'
+        # ⚠ 这里**不能** return —— 交给下面 `blank_board` 的 3 轮耐心（`st['blank'] >= 3`）
+        #   也**绝不能**记 `targets_done`（那是"满意收工"，会掩盖模型层坏掉的事实 ✗）
+        log.append({'finish_hold': 'no_plan_yet', 'rnd': rnd,
+                    'note': '本图还没算出过计划 ⇒ 不退图，走 blank_board 的 3 轮耐心 '
+                            '（防"求解器失败被伪装成正常收工"✗）'})
     # ⭐ 2026-09-30 悬浮条心跳：给用户看的是「第几张图 · 还剩几个目标」，
     #   **不是**轮号/坐标/cost/步数（那些只进控制台）。每轮更新一次 ⇒ 长时间无事件时
     #   用户也能看出"它还活着、在推进"，而不是盯着一句几分钟前的旧状态。
@@ -8054,11 +8317,13 @@ def one_round(b, log, rnd, prefix, st):
     # 「出生地」= 营地格（用来判断哪些格在「出生地 → 目标」的路上）
     spawn = st.get('spawn')
     if not spawn and c.get('st'):
-        for k, v in sorted(c['st'].items()):
-            if v.get('anchor') == k and v.get('name') == '营地':
-                spawn = marks_mod.cell_center(k[0], k[1])
-                st['spawn'] = spawn
-                break
+        # ⭐⭐⭐ v1.58：同一个判据的第二处调用点，一起走 `find_camp_cell()`（带兜底）
+        #   —— 免得"只改一半 ⇒ 线上仍复现"（`交接文档 §14.1` 的教训）
+        #   （PC 对应 `explore_loop.py:8818-8827`，where='spawn_road'）
+        _ck2, _chow2, _csc2 = find_camp_cell(c['st'], log, where='spawn_road')
+        if _ck2 is not None:
+            spawn = marks_mod.cell_center(_ck2[0], _ck2[1])
+            st['spawn'] = spawn
 
     def path_to(target, limit=6):
         """出生地 → 目标 **那条直线上的可点格**（用户 2026-09-25 口径）
@@ -8115,27 +8380,37 @@ def one_round(b, log, rnd, prefix, st):
                         road_all.append(p)
         if road_all:
             entry['road'] = road_all[:6]
-        # ⭐ 点序必须**严格交替**：揭一格/开一格 → 立刻试一次目标（首领/商人宝库）→ 再揭…
-        #   用户 2026-09-25：「为什么连续点了好几次出生点周围的，中间没有去点首领判断能不能直接打？
-        #   不应该是点一下判断一下首领吗」
-        # ⚠ 2026-09-25 再修（用户：「还在点不是那条直线上的格子」）：
-        #   有目标时**只点直线上的格**（`road_all`），别再把全部已揭示格（nones）也排进去；
-        #   只有直线上真的没有可点的格时才退回 nones 兜底（否则会卡死）。
-        # ⚠ 另：**未揭示的商人/宝库不进点击序列**（点不动，只会白耗 cold 被误判成放弃）
+        # ⚠ `targets` 是**判据**（下面 `st['targets']` 要用它），**不是点击序列** ⇒ 一起留着 ✓
+        #   （PC `explore_loop.py:8918-8923` 的原文：「`targets` 仍要算 —— 下面 `st['targets']`
+        #     要用它（**判据**，不是点击）✓」）
         targets = [p for p in buy_any if p in set(buy)] + marks_any
-        if road_all:
-            reveals = list(road_all)
+        if FOLLOW_PLAN_ONLY:
+            # ⭐⭐⭐ v1.58 用户口径（原话）：「**去掉那些追加的，只按规划的走**」⇒
+            #   **这里一格都不追加**（路上开路格 / 交替插入的目标格 / 内容格兜底 全去掉），
+            #   `order` 只由下面的规划器产出（solver ≤`PLAN_MAX_STEPS` 步 / eff ≤2 步）✓
+            #   （PC `mapbot_pc/explore_loop.py:8919-8924` 同款改法 ✓）
+            order = []
         else:
-            reveals = list(nones)
-        for p in reveals[:10]:
-            order.append(p)
-            order.extend(targets)
-        order += reveals[10:] + targets
-        # 直线上一格可点的都没有 → 才用内容格兜底开路（同样只在这时插）
-        if not road_all and st.get('clear_clicks', 0) < 16:
-            for q in clearable[:6]:
-                order.append(q)
+            # ⭐ 点序必须**严格交替**：揭一格/开一格 → 立刻试一次目标（首领/商人宝库）→ 再揭…
+            #   用户 2026-09-25：「为什么连续点了好几次出生点周围的，中间没有去点首领判断能不能直接打？
+            #   不应该是点一下判断一下首领吗」
+            # ⚠ 2026-09-25 再修（用户：「还在点不是那条直线上的格子」）：
+            #   有目标时**只点直线上的格**（`road_all`），别再把全部已揭示格（nones）也排进去；
+            #   只有直线上真的没有可点的格时才退回 nones 兜底（否则会卡死）。
+            # ⚠ 另：**未揭示的商人/宝库不进点击序列**（点不动，只会白耗 cold 被误判成放弃）
+            if road_all:
+                reveals = list(road_all)
+            else:
+                reveals = list(nones)
+            for p in reveals[:10]:
+                order.append(p)
                 order.extend(targets)
+            order += reveals[10:] + targets
+            # 直线上一格可点的都没有 → 才用内容格兜底开路（同样只在这时插）
+            if not road_all and st.get('clear_clicks', 0) < 16:
+                for q in clearable[:6]:
+                    order.append(q)
+                    order.extend(targets)
     else:
         order = []
     # ⭐⭐ 2026-09-27 用户要求：**每张图只在进图后规划一次** ✓（不要每轮都规划 ✗）
@@ -8165,6 +8440,16 @@ def one_round(b, log, rnd, prefix, st):
     if c.get('st'):
         if not OPT_SOLVER:
             st['plan_src'] = 'eff'       # `--no-solver`：直奔 EffPolicy，别白数 3 轮 ✓
+            # ⭐⭐⭐ v1.58 与上面对齐：**关掉精确规划时也认「本图规划过」** ——
+            #   依据（手机端特有的停机逻辑，PC 没有这一条，必须显式处理 ✓）：
+            #     `run()` 里 `why in ('stuck','blank')` **连续 2 张就停整局**
+            #     （v1.11 的"连续认不出棋盘就停下"保护，见 `explore_loop.py:9441-9450`）✗
+            #   而"精确规划"是**用户 GUI 上能关的开关**（`--no-solver`，见 `:9093`）⇒
+            #     关着时 `solver_order()` 直接返回 []（`:1219-1222`）⇒ `had_plan` 永远 False
+            #     ⇒ `vis` + 无标记时会落到 `blank_board` 的 3 轮 ⇒ 返回 **'blank'**
+            #     ⇒ **两张图就把整局停掉** ✗✗
+            #   ⇒ 这里显式对齐旧行为（旧代码在 `rnd>=2` 直接 `targets_done` 收工）✓
+            st['had_plan'] = True
         _rest = [p for p in (st.get('plan') or [])
                  if marks_mod.cell_center(p[0], p[1]) not in done]
         _tleft = len(marked) + len(pending_buy)
@@ -8187,6 +8472,15 @@ def one_round(b, log, rnd, prefix, st):
                 st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**（v1.29 恢复到这个口径 ✓）
                 st['plan_src'] = 'solver'
                 st['planned'] = True
+                # ⭐⭐⭐ v1.58 抄 PC `explore_loop.py:9027`：**本图算出过计划** ⇒ `had_plan`
+                #   用途见下面退图判据（PC `:9149-9172`）：
+                #     · `had_plan=True`  ⇒ 计划已走完、也没标记 ⇒ **立刻收工**（删掉无意义三轮 ✓）
+                #     · `had_plan=False`（从没算出过）⇒ 留着 3 轮耐心，给识别一次机会 ✓
+                #   为什么必须区分（PC 事故）：求解器失败 + 标记扫描为空时，
+                #     旧代码在 `rnd>=2` 就写 `finish: targets_done` 退图 ⇒
+                #     **25 体力白扔，日志还冒充"满意收工"** ✗✗
+                #   ⚠ 每张图 `st` 都是新建的（`run_one_map`）⇒ 天然每图清零 ✓
+                st['had_plan'] = True
                 st['plan_tries'] = 0
                 st['plan_stuck'] = 0
                 st['plan_prev_len'] = len(_sol)
@@ -8238,6 +8532,15 @@ def one_round(b, log, rnd, prefix, st):
                 _eff_px = [marks_mod.cell_center(r, cc) for (r, cc) in _eff_pick]
                 order = _eff_px + order
                 entry['eff_order'] = ['%d,%d' % p for p in _eff_pick]
+                # ⭐⭐⭐ v1.58：**EffPolicy 真的产出了点序 ⇒ 也算"本图规划过"** ✓
+                #   理由（D-5 的口径是「**算出过计划**」，不是"只有 solver 才算"）：
+                #     · `eff_order` 走的是**同一份** `_cells_for_model → from_observation`
+                #       建盘链路，是**真的规划器**（PC 也管它叫"毫秒级兜底规划器"）✓
+                #     · 若不置位：等它某轮产不出点序、又恰好没标记时，会落到 `blank_board`
+                #       ⇒ 返回 **'blank'** ⇒ 手机端**连续 2 张就停整局**（`:9441-9450`）✗✗
+                #     · 而真正"模型层坏了"的场景 = **solver 和 eff 都产不出**（那才是
+                #       `no_plan_giveup` 硬告警要抓的）⇒ 那条判据不受影响 ✓
+                st['had_plan'] = True
         else:
             _eff_pick = []
         _picked = []
