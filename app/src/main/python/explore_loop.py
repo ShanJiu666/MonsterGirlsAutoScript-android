@@ -4252,6 +4252,24 @@ def count_slot_timers(items):
 _CLAIM_ROW_DY = 60      # 「已完成」与其它槽位标签的**行距容差**（参考系像素）
 _CLAIM_COL_DX = 140     # 复检时的**同槽**横向容差（槽位宽度量级 ✓）
 _CLAIM_FAIL_MAX = 3     # 连续领不掉几次 ⇒ 停止自动领取（PC 口径「连续 3 次」✓）
+
+# ⭐⭐⭐ v1.52【三步领取的间隔与标定坐标】—— 抄 PC（`abd47f8` / `15f59e3`）
+#   PC 用户口径（原话）：「**已完成和领取时间间隔 1s，领取和后面的返回间隔 3s**」
+#                       「**返回在最下面**」
+#   PC 真机坐标（720×1280 设备系）⇒ 手机端是 **1080×1920 参考系**，
+#     两端都是 9:16 ⇒ 纯等比，系数 **×1.5**（与 `layout` 的 1080↔720 口径一致 ✓）：
+#       ② 弹窗「领取」 PC (582,757)  ⇒ 参考系 (873,1136)
+#       ③ 面板「返回」 PC (359,1195) ⇒ 参考系 (539,1793)
+#   ⚠⚠ 这两个只是**标定兜底** —— 主路径一律 **先 OCR 找字**（文字会随 UI 版本变，
+#     而这两条坐标是我从 PC 720p 换算来的、**没在手机真机上验过** ✗）
+_CLAIM_GAP_PICK = 1.0    # ① 已完成 → ② 领取（用户口径 1s ✓）
+_CLAIM_GAP_BACK = 3.0    # ② 领取   → ③ 返回（用户口径 3s ✓）
+_CLAIM_PICK_XY = (873, 1136)     # 弹窗「领取」标定兜底（参考系）
+_CLAIM_BACK_XY = (539, 1793)     # 面板「返回」标定兜底（用户口径「返回在最下面」✓）
+# 「领取」按钮的搜索带（**参考系 y 区间** —— ⚠ 是区间不是坐标！
+#   PC `d7f13c2` 踩过：「band 传成了坐标 ⇒ 实际是**全屏搜索**」✗）
+#   PC 的按钮带 700~800（720p）⇒ 参考系 1050~1200 ✓
+_CLAIM_PICK_BAND = (1050, 1200)
 # ⚠ 这两个是**跨图**计数（照 PC 的 `_CLAIM_FAIL_STREAK`）——
 #   用 `st`（每图一份）的话每张图都会重置 ⇒ 永远到不了 3 ⇒ 自愈失效 ✗
 _CLAIM_FAIL_STREAK = 0
@@ -6953,14 +6971,83 @@ def one_round(b, log, rnd, prefix, st):
                                             '槽位标签可当锚）⇒ **不点**（防点到棋盘格 ✗）'})
                     else:
                         _cx48, _cy48 = _tgt48['cx'], _tgt48['cy']
-                        _panel_tap(b, _cx48, _cy48, 'norm', log=log,
-                                   what='领取(已完成)')
-                        log.append({'explore': 'claim_done', 'at': (_cx48, _cy48),
-                                    'anchor_y': _y48})
-                        say('       · 探索槽「已完成」⇒ 点它领奖 (%d,%d) ✓'
+                        # ⭐⭐⭐ v1.52【完整的**三步**领取流程】—— 抄 PC
+                        #   （`4ac67cf` 第一步 / `abd47f8` 第二步 / `15f59e3` 第三步）
+                        #   PC 用户口径（原话）：
+                        #     「**已完成和领取时间间隔 1s，领取和后面的返回间隔 3s**」
+                        #     「**返回在最下面**」
+                        #   ⚠⚠ 我 v1.48 **只做了第①步** ✗ —— 点完「已完成」就不管了。
+                        #     PC 第二步 commit 原话（不点「领取」的后果）：
+                        #     「**不点它的话：弹窗留着盖住棋盘 ⇒ 下一轮被判「棋盘被挡」✗**
+                        #       （正是老问题之一 ✓）」
+                        #     ⇒ 少两步 = **每领一次就把棋盘糊一次** ✗✗
+                        #   ① 槽位「已完成」 → ② 弹窗「领取」 → ③ 奖励面板「返回」
+                        _panel_tap(b, _cx48, _cy48, 'norm', log=log, what='已完成')
+                        log.append({'explore': 'claim_step1_slot',
+                                    'at': (_cx48, _cy48), 'anchor_y': _y48})
+                        say('       · 探索槽「已完成」⇒ 点它 (%d,%d) ✓'
                             % (_cx48, _cy48))
-                        # ② **复检同一位置**（自愈的核心：以"有没有真领掉"为准 ✓）
-                        time.sleep(1.2)
+                        # ② 等 **1.0s**（用户口径）⇒ 点弹窗里的「领取」
+                        time.sleep(_CLAIM_GAP_PICK)
+                        _cl52 = None
+                        try:
+                            b.snap('claim_pick')
+                            # ⚠ band 是**参考系 y 区间** —— PC 在这踩过坑（`d7f13c2`：
+                            #   「band 传成了坐标 ⇒ 实际是**全屏搜索**」✗）
+                            #   别写成 (x0,y0,x1,y1) ✗
+                            _it52 = b.ocr(band=(LAYOUT.sy(_CLAIM_PICK_BAND[0]),
+                                                LAYOUT.sy(_CLAIM_PICK_BAND[1])),
+                                          tag='claim_pick') or []
+                            _cl52 = (find_button(_it52, *L['claim'], maxlen=4)
+                                     or find_in(_it52, *L['claim']))
+                        except Exception:       # noqa: BLE001
+                            _cl52 = None
+                        if _cl52:
+                            _panel_tap(b, _cl52['cx'], _cl52['cy'], 'norm', log=log,
+                                       what='领取(弹窗·文字)')
+                            log.append({'explore': 'claim_step2_pick',
+                                        'at': (_cl52['cx'], _cl52['cy']),
+                                        'text': _cl52['text'], 'via': 'text'})
+                            say('       · 弹窗「领取」⇒ 点 (%d,%d)（文字命中 ✓）'
+                                % (_cl52['cx'], _cl52['cy']))
+                        else:
+                            _panel_tap(b, _CLAIM_PICK_XY[0], _CLAIM_PICK_XY[1],
+                                       'norm', log=log, what='领取(标定兜底)')
+                            log.append({'explore': 'claim_step2_pick',
+                                        'at': _CLAIM_PICK_XY, 'via': 'anchor',
+                                        'note': '弹窗里没 OCR 到「领取」⇒ 标定坐标兜底 ✓'})
+                            say('       · 弹窗「领取」没认到 ⇒ 标定坐标 (%d,%d) 兜底'
+                                % _CLAIM_PICK_XY)
+                        # ③ 等 **3.0s**（用户口径）⇒ 找/点奖励面板的「返回」
+                        #   PC 踩点记录：「返回」**要等一会儿才出现** ✗
+                        #     （3 秒后抓的那张里还没有它）⇒ 代码里也照这个顺序 ✓
+                        #   用 `back_poll()`（两级：窄带 → 全屏 → 标定兜底 ✓）
+                        time.sleep(_CLAIM_GAP_BACK)
+                        _hb52 = back_poll(b, log=log, tag='claim_ret')
+                        if _hb52:
+                            _panel_tap(b, _hb52[0], _hb52[1], 'norm', log=log,
+                                       what='返回(%s)'
+                                            % ('窄带命中' if _hb52[2] == 'band'
+                                               else '全屏命中'))
+                            log.append({'explore': 'claim_step3_back',
+                                        'at': (_hb52[0], _hb52[1]), 'via': _hb52[2],
+                                        'polls': _hb52[3]})
+                            say('       · 奖励面板「返回」⇒ 点 (%d,%d)（%s，轮询 %d 次）✓'
+                                % (_hb52[0], _hb52[1],
+                                   '窄带命中' if _hb52[2] == 'band' else '全屏命中',
+                                   _hb52[3]))
+                        else:
+                            _panel_tap(b, _CLAIM_BACK_XY[0], _CLAIM_BACK_XY[1],
+                                       'norm', log=log, what='返回(标定兜底)')
+                            log.append({'explore': 'claim_step3_back',
+                                        'at': _CLAIM_BACK_XY, 'via': 'anchor',
+                                        'note': '轮询 6s 没找到「返回」⇒ 标定坐标兜底 ✓'
+                                                '（用户口径「返回在最下面」✓）'})
+                            say('       · ⚠ 轮询 6s 没找到「返回」⇒ 标定 (%d,%d) 兜底'
+                                % _CLAIM_BACK_XY)
+                        # ④ **三步走完再复检**（自愈：以"有没有真领掉"为准 ✓）
+                        #   PC `677d5d9`：领完复检，连续 3 次领不掉就停
+                        time.sleep(0.8)
                         try:
                             b.snap('claim_re')
                             _re48 = [i for i in (b.ocr(tag='claim_re') or [])
@@ -6974,7 +7061,7 @@ def one_round(b, log, rnd, prefix, st):
                             log.append({'explore': 'claim_not_cleared',
                                         'streak': _CLAIM_FAIL_STREAK,
                                         'at': (_cx48, _cy48),
-                                        'note': '领完复检**同位置仍是「已完成」** ⇒ 判失败 ✗'})
+                                        'note': '三步走完复检**同位置仍是「已完成」** ⇒ 判失败 ✗'})
                             say('       · 领完复检：那槽**还是「已完成」**⇒ 判失败（连续 %d 次）✗'
                                 % _CLAIM_FAIL_STREAK)
                         elif _re48 is not None:

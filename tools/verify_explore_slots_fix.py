@@ -4927,13 +4927,24 @@ try:
     import spots as _sp48
 
     # ① 领取已完成
-    check('v1.48 ① 有「已完成」自动领取（`claim_done` + 每图一次 `claim_checked`）',
-          "'explore': 'claim_done'" in open(
-              os.path.join(PROJ, 'app', 'src', 'main', 'python',
-                           'explore_loop.py'), encoding='utf-8').read()
-          and 'claim_checked' in open(
-              os.path.join(PROJ, 'app', 'src', 'main', 'python',
-                           'explore_loop.py'), encoding='utf-8').read())
+    _el48s = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                               'explore_loop.py'), encoding='utf-8').read()
+    check('v1.48/v1.52 ① 领取是**完整三步**（槽位→弹窗「领取」→面板「返回」）＋每图一次',
+          all(k in _el48s for k in ("'explore': 'claim_step1_slot'",
+                                    "'explore': 'claim_step2_pick'",
+                                    "'explore': 'claim_step3_back'"))
+          and 'claim_checked' in _el48s)
+    check('v1.52 ①b 间隔按用户口径（已完成→领取 **1s** / 领取→返回 **3s** ✓）',
+          '_CLAIM_GAP_PICK = 1.0' in _el48s and '_CLAIM_GAP_BACK = 3.0' in _el48s)
+    check('v1.52 ①c 第③步复用 \ack_poll()\（两级搜索，不是写死坐标 ✗）',
+          chr(98)+chr(97)+chr(99)+chr(107)+chr(95)+chr(112)+chr(111)+chr(108)+
+          chr(108)+chr(40)+chr(98)+chr(44)+chr(32)+chr(108)+chr(111)+chr(103)+
+          chr(61)+chr(108)+chr(111)+chr(103)+chr(44)+chr(32)+chr(116)+chr(97)+
+          chr(103)+chr(61)+chr(39)+chr(99)+chr(108)+chr(97)+chr(105)+chr(109)+
+          chr(95)+chr(114)+chr(101)+chr(116)+chr(39)+chr(41) in _el48s)
+    check('v1.52 ①d 「领取」的 band 是**区间**不是坐标（PC d7f13c2 踩过 ✗）',
+          '_CLAIM_PICK_BAND = (1050, 1200)' in _el48s
+          and 'band=(LAYOUT.sy(_CLAIM_PICK_BAND[0])' in _el48s)
     check('v1.48 ①b 有**自愈**（连续领不掉就停）+ 跨图计数（用 st 会每图重置 ✗）',
           hasattr(_el48, '_CLAIM_FAIL_STREAK')
           and hasattr(_el48, '_CLAIM_FAIL_MAX')
