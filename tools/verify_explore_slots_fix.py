@@ -6331,6 +6331,51 @@ try:
 except Exception as _e60e:      # noqa: BLE001
     check('v1.60 ⑪~⑮ camp_reveal 守门可运行（%r）' % (_e60e,), False)
 
+# ---------------- ⑯ **相对项在地板 0.80 下恒不生效**（实测，必须显式记录） -----------
+#   ⭐⭐ 这是本轮**最重要的负面实测**，写进门禁免得下一个人以为"相对法已经生效、病已经全好" ✗
+#
+#   数学上：相对项生效 ⟺ `p10 × REVEAL_REL_K > REVEAL_REL_FLOOR`
+#           ⟺ p10 > 0.80 / 1.06 = **0.7547**
+#   实测（`tools/probe_reveal_rel_binds.py`，**用正确 map code + `board_hidden` 闸门**，
+#     **33 张真棋盘帧**）：
+#     最大的一帧 p10 = **0.698**（`bagdbg/board_now_ref.png`）⇒ p10×K = 0.740 < 0.80
+#     ⇒ **33 张帧上相对项一次都没生效**，两臂（绝对 0.80 vs 相对法）**逐格差 0 格**
+#   ⇒ 也就是说：**当前 v1.60 的 spots 层，行为 == v1.36 的绝对 0.80**；
+#     真正在修"已揭示被判成雾"的是**第二层**（模型层 `ratio ≥ 0.75` 覆写）✓
+#   ⚠ 相对项仍然值得留着：它的目标是"整盘偏亮（p10>0.755）时绝对阈值会整盘误判"，
+#     而那类帧**本机样本里没有**（真机少见：要求几乎全盘已揭示）
+#   ⚠⚠ 但要动「把绝对阈值改成相对」这件事的人先读这条：手机端 `ratio` 分母是**本图模板中位**
+#     ⇒ 雾格随美术亮度摊开（实测 0.685~0.761），**不是 PC 的常数 ≈0.65**
+#     ⇒ PC 那条 `p10×1.06` 在手机端取的是**雾的下沿**，盖不住雾的上沿（实测在 **80 分位**）
+#     详见 `tools/probe_reveal_quantile.py`
+try:
+    _p10max, _maxframe = 0.0, ''
+    import cv2 as _cv60r
+    import numpy as _np60r
+    import spots as _sp60r
+    for _f in _F60:
+        if not os.path.exists(_f):
+            continue
+        _im = _cv60r.imdecode(_np60r.fromfile(_f, dtype=_np60r.uint8),
+                              _cv60r.IMREAD_COLOR)
+        _st = _sp60r.Board('S10002').state(_im)
+        if len(_st) < 20:
+            continue
+        _rs = sorted(float(v.get('ratio') or 0) for v in _st.values())
+        _p10 = _rs[max(0, int(len(_rs) * _sp60r.REVEAL_REL_Q) - 1)]
+        if _p10 > _p10max:
+            _p10max, _maxframe = _p10, os.path.basename(_f)
+    _bind_thr = float(_sp60r.REVEAL_REL_FLOOR) / float(_sp60r.REVEAL_REL_K)
+    check('v1.60 ⑯ 实测记录：地板 %.2f 下相对项生效门槛 = `p10 > %.4f`；'
+          '**手头真机帧最高 p10 = %.3f（%s）⇒ 相对项恒不生效**'
+          '（⇒ 本层行为 == v1.36 绝对 0.80；真正在修病的是模型层 0.75 覆写 ✓）'
+          % (float(_sp60r.REVEAL_REL_FLOOR), _bind_thr, _p10max, _maxframe),
+          _p10max < _bind_thr,
+          '⚠ 若这条红了：说明换到了「整盘偏亮」的帧 ⇒ 相对项真的生效了，'
+          '**必须补一条两臂对比**再放行')
+except Exception as _e60f:      # noqa: BLE001
+    check('v1.60 ⑯ 相对项生效性实测可运行（%r）' % (_e60f,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
