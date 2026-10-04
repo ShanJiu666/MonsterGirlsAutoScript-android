@@ -285,6 +285,13 @@ public final class Feedback {
         } catch (Throwable t) {
             sb.append("应用版本: 读取失败 ").append(t).append('\n');
         }
+        // ⭐ v1.41：把热更状态钉进反馈包 —— 朋友说"更新完还是老样子"时，
+        //   没有这一行就只能猜：没下到？下了没激活？激活了被自检回滚了？
+        try {
+            sb.append("热更状态: ").append(Updater.statusLine(ctx)).append('\n');
+        } catch (Throwable t) {
+            sb.append("热更状态: 读取失败 ").append(t).append('\n');
+        }
         sb.append("机型: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
         sb.append("系统: Android ").append(Build.VERSION.RELEASE)
           .append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");

@@ -120,6 +120,15 @@ class Block:
         # ⭐ v1.03/v1.05：**雾下剪影**（按格实测，不是一刀切 ✓）
         self.fog_object = bool(spot.get('fog_object')) if isinstance(spot, dict) else False
         self.fog_flat = bool(spot.get('fog_flat')) if isinstance(spot, dict) else False
+        # ⭐⭐ v1.44【拉黑标】—— 求解器据此**既不点它、也不借它走路** ✓
+        #   来自 `explore_loop._cells_for_model`（v0.99 就在打这个标了，但**只用于点序过滤**，
+        #   求解器侧一直没收 ⇒ 拉黑块**被规划进去、还被借作通路** ✗）
+        #   根因（学 PC 端 d81c42c 的完整论证）：
+        #     拉黑块**事后**从点序里剔除 ⇒ 求解器算**连通性/代价**时仍按"能走"算过一遍
+        #     ⇒ 剔除后计划出现断档 / 绕路不合理 ✗
+        #   ⚠ 语义：**留在模型里**（`board >= 0` ⇒ 不是"已消耗"⇒ 不参与空地连锁 ✓，
+        #     v0.99 那条结论依然成立），只是**不可点、不可借道** ✓
+        self.blocked = bool(spot.get('blocked')) if isinstance(spot, dict) else False
 
     @property
     def plain(self):
@@ -282,6 +291,10 @@ class MapSim:
             row['name'] = cells[(r, c)].get('name') or sid
             if 'target' in cells[(r, c)]:              # ⭐ 目标白名单（targets_cfg）✓
                 row['want'] = bool(cells[(r, c)].get('target'))
+            # ⭐ v1.44 拉黑标（与 `_from_anchors` 那条**同步** ✓）：
+            #   row 是从数据表构造的 ⇒ 观测字段必须**显式搬过来**，否则到不了 Block ✗
+            if 'blocked' in cells[(r, c)]:
+                row['blocked'] = bool(cells[(r, c)].get('blocked'))
             b = Block(len(blocks), row, revealed=bool(cells[(r, c)].get('revealed')),
                       mark=((cells[(r, c)].get('marks') or [None])[0]))
             board[cell_of(r, c)] = b.idx
@@ -338,6 +351,9 @@ class MapSim:
             row['name'] = head.get('name') or sid
             if 'target' in head:                       # ⭐ 目标白名单（targets_cfg）✓
                 row['want'] = bool(head.get('target'))
+            # ⭐ v1.44 拉黑标（与单格那条**同步** ✓，见 Block.blocked 的说明）
+            if 'blocked' in head:
+                row['blocked'] = bool(head.get('blocked'))
             b = Block(len(blocks), row, revealed=bool(grew),
                       mark=(marks[0] if marks else None))
             b.cells = [cell_of(*m) for m in members
@@ -796,9 +812,10 @@ def sim_from_shot(path, spots_mod, limits=None):
                          'revealed': bool(v.get('revealed')),
                          'marks': list(v.get('marks') or [])}
     # ⭐ 标记（首领/红装/点赞/幸运草）是**另一个模板匹配器**扫出来的，不在分类器输出里 —— 必须合并
+    # ⭐ v1.45：改走定点窗口版（旧版全图 105 次匹配 ≈ 10s，这里只是离线建盘，但没必要白等）
     try:
         import marks as marks_mod
-        for (r, c), mv in (marks_mod.scan_board(img, thr=0.85) or {}).items():
+        for (r, c), mv in (marks_mod.scan_board_fast(img, thr=0.85) or {}).items():
             if (r, c) in cells:
                 got = list(cells[(r, c)].get('marks') or [])
                 for m in (mv.get('marks') or []):

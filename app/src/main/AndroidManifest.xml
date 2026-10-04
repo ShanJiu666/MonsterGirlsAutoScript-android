@@ -11,6 +11,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- ⭐⭐ 热更新（v1.41，用户 2026-10-03「发给朋友的怎么搞热更新？」）：
+         ① INTERNET —— 拉更新清单 + 下补丁/整包（此前**完全没有联网权限** ⇒ 必须先发一版带它的 APK）
+         ② REQUEST_INSTALL_PACKAGES —— Android 8+ 装 APK 的硬门槛；用户还要在系统设置里
+            对「本应用」允许一次「安装未知应用」（App 会自己跳那一页，见 Updater.installApk） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- ⭐ Android 11+ 包可见性：否则 getLaunchIntentForPackage(游戏包) 返回 null
          ⇒ 「切回游戏」失败 ⇒ 脚本对着自己界面跑（2026-09-29 真机 Redmi/Android15 实测踩坑） -->
     <queries>

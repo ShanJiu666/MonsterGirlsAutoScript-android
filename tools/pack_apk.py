@@ -21,6 +21,15 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # android_autoexplore/
 GRADLE = os.path.join(ROOT, 'app', 'build.gradle')
+
+# ⚠ 2026-10-03 实测踩到：本机 pwsh 是 GBK 控制台，脚本末尾 print('…✓…') 会抛
+#   UnicodeEncodeError ⇒ **APK 明明已经复制好了，退出码却是 1** ⇒ 调用方
+#   （tools/release.py）会误判"打包失败"✗ 教训同 AGENTS §2「PYTHONIOENCODING 别省」。
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:                       # noqa: BLE001
+    pass
 BUILT = os.path.join(ROOT, 'app', 'build', 'outputs', 'apk', 'arm64', 'release',
                      'app-arm64-release.apk')
 

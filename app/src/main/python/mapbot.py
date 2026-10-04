@@ -175,18 +175,51 @@ class Bot(object):
         # ⭐ v0.34：弹窗帧缓存（按帧戳），同一帧内多次 img_dlg() 只编码一次
         #   （close_x_panels / find_x / badge 常在同一轮里连着要弹窗帧 ⇒ 省几百 ms）
         self._dlg_cache = {'stamp': -1, 'arr': None}
+        # ⭐⭐⭐ v1.45【截图去重 + OCR 帧戳缓存】（提速施工单 ②/⑤）
+        #   为什么安全：帧戳变了像素才可能变；戳相同 ⇒ 同一张帧 ⇒ ndarray / OCR 结果必然相同。
+        #   省什么：原来每轮 snap 3~5 次（PNG 编码 150~300ms + 端上解码），很多是同一帧；
+        #        OCR 也常在**同一帧**上被 popups / panel_seen / stamina / slots 各扫一遍
+        #        （每遍 1.5~2s，一局 75~158 次 ⇒ 这是最大的一块）。
+        #   ⚠ 只认**同一帧戳**：戳一变立刻清空缓存（绝不复用旧帧的识别结论）。
+        self._snap_stamp = -1
+        self._ocr_stamp = -1
+        self._ocr_cache = {}
+        self._ocr_dlg_stamp = -1
+        self._ocr_dlg_cache = {}
         self.last_change = {'changed': None, 'dim': 1.0}
         self._last_items = []
         print('[bot] Android 通道：截屏=%s 点击=%s'
               % (self.api.hasFrame(), self.api.touchReady()))
 
     # ---------- 截图 ----------
+    def frame_stamp(self):
+        """当前帧戳（ms）；拿不到返回 -1。⭐ v1.45：截图/OCR 去重都靠它"""
+        try:
+            return int(self.api.frameStamp())
+        except Exception:       # noqa: BLE001
+            return -1
+
     def snap(self, name=None, save=False):
-        """取一帧（放内存，不落盘）；save=True 时才写 PNG（同 PC 的极速通道语义）"""
+        """取一帧（放内存，不落盘）；save=True 时才写 PNG（同 PC 的极速通道语义）
+
+        ⭐ v1.45【帧戳去重】：帧戳与上次相同（= 同一张帧）且不要求落盘 ⇒ 直接复用 ndarray，
+        不付 PNG 编码 + imdecode。像素完全一致 ⇒ 对任何下游判定都是同一份输入 ✓
+        ⚠ `save=True`（要留证/诊断）与「没有帧」的情况**一律不走缓存**。
+        """
         self._seq += 1
         name = name or '%s_%04d' % (self.log_prefix, self._seq)
         p = os.path.join(self.runs, name + '.png')
         _t0 = time.time()
+        _stamp = self.frame_stamp()
+        if (not save) and self._img_arr is not None and _stamp >= 0 \
+                and _stamp == self._snap_stamp:
+            self._last = p
+            self._img_path = None
+            self.fast_ok = True
+            self.t['snap_hit'] = self.t.get('snap_hit', 0) + 1
+            self.t['snap'] += time.time() - _t0
+            self.t['snap_n'] += 1
+            return p
         png = self.api.grabRefPng()
         if png is None:
             self.fast_ok = False
@@ -200,6 +233,7 @@ class Bot(object):
         if save:
             cv2.imwrite(p, arr)
             self._img_path = p
+        self._snap_stamp = _stamp
         self.fast_ok = True
         self.t['snap'] += time.time() - _t0
         self.t['snap_n'] += 1
@@ -241,6 +275,20 @@ class Bot(object):
         "认不出"时才跑，见 explore_loop.dlg_ocr）。PC 版没有这个通道。
         """
         _t0 = time.time()
+        # ⭐ v1.45 帧戳缓存（同一帧 + 同一 band/min_conf ⇒ 直接复用，省一次 ~2s 的弹窗帧 OCR）
+        _key = None
+        _stamp = self.frame_stamp()
+        if _stamp >= 0:
+            if _stamp != self._ocr_dlg_stamp:
+                self._ocr_dlg_stamp = _stamp
+                self._ocr_dlg_cache = {}
+            _key = self._ocr_key(min_conf, band)
+            _hit = self._ocr_dlg_cache.get(_key)
+            if _hit is not None:
+                self.t['ocr_hit'] = self.t.get('ocr_hit', 0) + 1
+                self.t['ocr'] += time.time() - _t0
+                self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
+                return [dict(x) for x in _hit]
         raw = self.api.ocrDlgJson(float(min_conf))
         try:
             items = json.loads(raw) if raw else []
@@ -249,6 +297,8 @@ class Bot(object):
         if band:
             y0, y1 = int(band[0]), int(band[1])
             items = [it for it in items if y0 <= it['cy'] <= y1]
+        if _key is not None:
+            self._ocr_dlg_cache[_key] = [dict(x) for x in items]
         self.t['ocr'] += time.time() - _t0
         self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
         if tag:                 # ⭐ v0.61：与 PC 同口径的分账（找 180s/图 到底花在哪个调用点）
@@ -268,6 +318,15 @@ class Bot(object):
         return p
 
     # ---------- OCR ----------
+    @staticmethod
+    def _ocr_key(min_conf, band):
+        """OCR 缓存键 = (band 起, band 止, min_conf×1000)。band=None ⇒ (-1,-1)"""
+        if band:
+            b0, b1 = int(band[0]), int(band[1])
+        else:
+            b0, b1 = -1, -1
+        return (b0, b1, int(round(float(min_conf) * 1000)))
+
     def ocr(self, min_conf=0.5, img=None, band=None, scale=None, tag=None):
         """返回 [{text,cx,cy,x0,y0,x1,y1,conf}]，坐标是 1080×1920 参考系
 
@@ -280,8 +339,32 @@ class Bot(object):
             `Δy >= BAND_CROP_MIN` 才裁，更矮的仍走整帧+过滤（口径不变）。
           ⚠ 裁图失败（返回空串）自动回退整帧路径，保证不会"整段认不出来"。
           `scale` 参数仅为接口兼容（端侧固定 0.75 倍口径）。
+
+        ⭐⭐ v1.45【帧戳缓存】：同一帧 + 同一 (band, min_conf) ⇒ 直接复用上次结果。
+          安全依据：**帧戳相同 = 同一张帧 = 像素逐字节相同** ⇒ OCR 结果必然相同。
+          省什么：popups / panel_seen / stamina / slots / dice 常在**同一帧**上各扫一遍
+          （每遍 1.5~2s；一局 75~158 次 ⇒ 这是最大的一块）。
+          ⚠ 帧戳一变立刻清空；`img=` 显式传图那条路**不走缓存**（口径可能不一致）。
         """
         _t0 = time.time()
+        _key = None
+        if img is None:
+            _stamp = self.frame_stamp()
+            if _stamp >= 0:
+                if _stamp != self._ocr_stamp:
+                    self._ocr_stamp = _stamp
+                    self._ocr_cache = {}
+                _key = self._ocr_key(min_conf, band)
+                _hit = self._ocr_cache.get(_key)
+                if _hit is not None:
+                    self.t['ocr_hit'] = self.t.get('ocr_hit', 0) + 1
+                    self.t['ocr'] += time.time() - _t0
+                    self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
+                    if tag:
+                        cur = self.t.setdefault('ocr_by', {}).get(tag, [0.0, 0])
+                        self.t['ocr_by'][tag] = [cur[0] + (time.time() - _t0), cur[1] + 1]
+                    self._last_items = _hit
+                    return [dict(x) for x in _hit]
         if img is not None:
             # 调用方给了图（极少见）：落盘后走同一路（保证口径一致）
             p = os.path.join(self.runs, '_inline.png')
@@ -308,6 +391,8 @@ class Bot(object):
                 items = json.loads(raw) or []
             except Exception:       # noqa: BLE001
                 items = []
+        if _key is not None:
+            self._ocr_cache[_key] = [dict(x) for x in items]
         self.t['ocr'] += time.time() - _t0
         self.t['ocr_n'] = self.t.get('ocr_n', 0) + 1
         if tag:                 # ⭐ v0.61：按调用点分账（PC 早就有，端侧补齐 ⇒ 可逐项对账）

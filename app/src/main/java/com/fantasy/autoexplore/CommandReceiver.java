@@ -203,6 +203,22 @@ public class CommandReceiver extends BroadcastReceiver {
                 case "summary":
                     AppLog.i("[summary]\n" + PyBridge.call("summary"));
                     break;
+
+                // ── 热更新（v1.41）──────────────────────
+                //   ⭐ 与悬浮条 / 界面**同一条代码路径**（Updater.run）⇒ adb 验证的就是朋友跑的那条
+                //   --es mode check|hot|apk|auto|bg（默认 check，只查不动）
+                case "update": {
+                    String mode = intent.getStringExtra("mode");
+                    AppLog.i("[update] " + Updater.run(app, mode == null ? "check" : mode));
+                    break;
+                }
+                case "update_status":
+                    AppLog.i("[update_status] " + Updater.statusLine(app));
+                    break;
+                case "install_result":
+                    // ⭐ 系统安装器把结果回投到这里（PendingIntent 见 Updater.installPendingIntent）
+                    AppLog.i("[安装结果] " + Updater.describeInstallResult(intent));
+                    break;
                 case "overlay_on":
                     OverlayService.start(app);
                     AppLog.i("[overlay_on] 悬浮控制条已开启（不用把界面拉到前台 ✓）");

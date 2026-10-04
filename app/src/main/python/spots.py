@@ -351,6 +351,11 @@ class Board:
                 'mask_idx': [int(i) for i in ix[ismask]],      # 非矩形 ⇒ 走掩膜 NCC ✓
             }
         self.sids = [e[0] for e in self.entries]
+        # ⭐ v1.45（施工单 ④）：`scores()` 写入、`objects()` 复用的**逐位置最优**缓存。
+        #   只在"同一次 state() 调用"内有效（scores 每次开头都会重建）；留着旧值也不会被误用，
+        #   因为 `objects()` 会核对"是不是同一张 img 对象" ✓
+        self._pos_cache = None
+        self._pos_cache_img = None
 
     def footprint(self, sid):
         """该地块的**真实占格**偏移 [(dr,dc)...]（alpha 推导；无则退回矩形占位 ✓）"""
@@ -422,12 +427,22 @@ class Board:
         ⭐ 2026-09-27 重写：候选**只投给该贴图真正覆盖的格**（`cells_of`）✗ 不再按矩形外框投。
            理由：111 的 L 形缺右上格，旧代码会把候选投到那格（实际住着邻居 103）。
            同时：非矩形覆盖的多格贴图改走**掩膜 NCC**（`_mscore`）✓
+
+        ⭐⭐ v1.45 提速（施工单 ④）：顺手把**多格模板的逐位置最优**记进 `self._pos_cache`，
+           供同一次 `state()` 里的 `objects()` **直接复用**（它原来把这些像素匹配**整个重算了一遍**）。
+           ⚠ 语义完全不变：缓存值的算法与 `objects()` 里那段**逐字同序**
+             （先 plain 的 argmax，再掩膜严格大于）⇒ 连"平分时留谁"都一样 ✓
         """
         best = {}
         rows, cols = self.grid['rows'], self.grid['cols']
+        # ⭐ v1.45：本次调用的位置缓存（只给**多格模板**用；单格模板 objects() 不看）
+        _pc = {}
+        self._pos_cache = _pc
+        self._pos_cache_img = img
         for (dw, dh), grp in self.groups.items():
             cw = int(round((dw + 2) / DESIGN_PITCH))
             ch = int(round((dh + 2) / DESIGN_PITCH))
+            _multi_grp = (cw * ch > 1)
             plain, masks = grp.get('plain_idx'), grp.get('mask_idx') or []
             for rr in range(1, rows - ch + 2):
                 for cc in range(1, cols - cw + 2):
@@ -435,13 +450,19 @@ class Board:
                     if sub is None:
                         continue
                     got = []
+                    _pbest = None                  # (score, sid) —— plain 的 argmax
+                    _msc = []                      # [(score, sid)] —— 掩膜逐个
                     if plain is not None and plain.size:
                         v, _sd = self._vec(sub)
                         if v is not None and v.size == grp['mat'].shape[1]:
                             sc = grp['mat'] @ v / v.size
-                            for oi in np.argsort(-sc)[:topn]:
+                            _ord = np.argsort(-sc)[:topn]
+                            for oi in _ord:
                                 e = self.entries[grp['idx'][oi]]
                                 got.append((float(sc[oi]), e[0], e[3]))
+                            _oi0 = int(_ord[0])     # argsort 首个 = argmax（与 np.argmax 同口径）
+                            _e0 = self.entries[grp['idx'][_oi0]]
+                            _pbest = (float(sc[_oi0]), _e0[0])
                     if masks:
                         # ⭐ 2026-09-28：灰度/饱和度**位置层算一次共享** —— 同一位置的
                         #   多个掩膜模板不再各 cvtColor 一遍（数值完全等价 ✓ 纯提速 ✓）
@@ -450,9 +471,19 @@ class Board:
                                 - sub.min(axis=2).astype(np.float32))
                         for ent in masks:
                             e = self.entries[ent]
-                            got.append((self._mscore(ent, gsub, satf), e[0], e[3]))
+                            _ms = self._mscore(ent, gsub, satf)
+                            got.append((_ms, e[0], e[3]))
+                            _msc.append((_ms, e[0]))
                     if not got:
                         continue
+                    if _multi_grp:
+                        # ⭐ v1.45：**与 objects() 逐字同序**复算出"该位置最优"
+                        _bs2, _bsid2 = (-9.0, None) if _pbest is None else _pbest
+                        for _ms2, _sid2 in _msc:
+                            if _ms2 > _bs2:
+                                _bs2, _bsid2 = _ms2, _sid2
+                        if _bsid2 is not None:
+                            _pc[(dw, dh, rr, cc)] = (_bs2, _bsid2)
                     got.sort(reverse=True)
                     for s, sid, fi in got[:topn]:
                         for (r, c) in self.cells_of(sid, (rr, cc)):
@@ -475,6 +506,14 @@ class Board:
         #     ⇒ 费用模型把 4 点的战斗格当成 2 点的海螺 ⇒ 求解器"走它不亏"✗）
         #   ⇒ 先算出**多格模板**的最佳摆放 ✓，若其"覆盖各格平均分"够高 ⇒ 让它们**优先占位** ✓
         _multi = []
+        # ⭐⭐ v1.45 提速（施工单 ④）：`scores()` 刚把**同一张帧**的逐位置最优算过一遍
+        #   （见那边的 `self._pos_cache`）⇒ 这里**直接取值**，不再把多格模板的像素匹配整个重算。
+        #   ⚠ 等价性：缓存值的算法与下面那段**逐字同序**（先 plain argmax、再掩膜严格大于）⇒
+        #     结果逐格一致；只有 `img` 与 `scores()` 当时那张**同一个对象**时才敢用（否则回退原算）。
+        _pc = {}
+        if img is not None and getattr(self, '_pos_cache_img', None) is img \
+                and getattr(self, '_pos_cache', None):
+            _pc = self._pos_cache
         for (dw, dh), grp in (getattr(self, 'groups', {}) if img is not None else {}).items():
             cw = int(round((dw + 2) / DESIGN_PITCH))
             ch = int(round((dh + 2) / DESIGN_PITCH))
@@ -486,6 +525,14 @@ class Board:
                 for c in range(1, cols_ + 1):
                     rr, cc = r - ch + 1, c - cw + 1
                     if not (1 <= rr <= rows_ - ch + 1 and 1 <= cc <= cols_ - cw + 1):
+                        continue
+                    if _pc:
+                        # 这条路径上"有没有、是多少"都已在 scores() 里判过 ✓
+                        _hit = _pc.get((dw, dh, rr, cc))
+                        if _hit is None:
+                            continue
+                        _bs, _bsid = _hit
+                        _multi.append((_bs, _bsid, (rr, cc), (cw, ch)))
                         continue
                     sub = self._region(img, rr, cc, dw, dh)
                     if sub is None:
@@ -888,6 +935,40 @@ def is_plain_spot(sid):
         except Exception:           # noqa: BLE001
             _PLAIN_CACHE[sid] = False
     return _PLAIN_CACHE[sid]
+
+
+_FIGHT_CACHE = {}
+
+
+def is_fight_spot(sid):
+    """⭐⭐ v1.43【这一格是不是"要打一场架"的地块】—— 按**地块类型**判，不看临时标记
+
+    ⭐⭐⭐ 为什么必须有它（学 PC 端 a7df4af 的真机事故，逻辑完全一致）：
+      计划里第一步要打的那格（PC 端是 `S00003_111` 海边杂物，格数 3），
+      它的「拦路」标记是**规划完之后才贴上去的**（循环发现"计划路径穿过非空地"才标）⇒
+      **规划那一刻它没有标记** ⇒ 被当"内容格·探索"按 `size` 计价（实际应为 `size×2`）⇒
+      ⇒ "打这一架(3)"和"绕路揭 4 格(1×4=4)"看起来差不多 ⇒ **平局时选了要打的那条** ✗✗
+      ⇒ 必须按**地块类型**定价，而不是看规划期还不存在的标记 ✓
+
+    判据来自数据表 `Area_Spot.EventNum`（本机 482 行实测）：
+      · 草地 `1-1`、海螺 `1-1`、宝箱 `1-1`、岩石 `1-1`、勇者之墓 `1-1` ⇒ **不打** ✓
+      · 海边杂物 `3-3`、游乐设施 `4-4`、巨大沙堡 `8-8`、海边小屋 `9-9` ⇒ **要打** ✓
+      · 营地（空）/ 商人 / 宝箱怪 等 `0-0` 或空 ⇒ 不打 ✓
+    ⇒ 规则：`EventNum` 非空且**首段数字 > 1** ⇒ 战斗型 ✓
+    """
+    sid = str(sid)
+    if sid in _FIGHT_CACHE:
+        return _FIGHT_CACHE[sid]
+    try:
+        row = (spot_rows() or {}).get(sid) or {}
+        ev = str(row.get('EventNum') or '').strip()
+        if not ev:
+            _FIGHT_CACHE[sid] = False
+        else:
+            _FIGHT_CACHE[sid] = int(ev.split('-')[0]) > 1
+    except Exception:           # noqa: BLE001
+        _FIGHT_CACHE[sid] = False
+    return _FIGHT_CACHE[sid]
 
 
 def board_cmd(a):

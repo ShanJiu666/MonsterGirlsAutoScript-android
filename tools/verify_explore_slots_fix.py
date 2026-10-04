@@ -533,6 +533,13 @@ _ALLOWED_DRIFT = {
     #   几个芯片 + 广播），拿不到"用户点了哪一格" ⇒ 这个函数在手机端**无调用方** ✗
     #   其余 280→257 行的差异全是这一个函数及其文档/注释。
     #   ⇒ 有意分叉（PC 端功能更全，手机端不需要），别拿 PC 那份覆盖手机端。
+    # ⭐ 2026-10-03 登记：PC 端换 720p 基准的连带分叉（与 layout/spots/grid_detect 同源）
+    'mapsim': 'v1.43 登记：PC 端 2026-10-02 换 720p 基准后，MapSim 里的格子编号/锚点'
+              '与 `layout.REF` 口径一并跟着换成 720p（24/668/96/96）。手机端是归一化'
+              ' 1080×1920（GRID=36/1002/144）⇒ 有意分叉，勿拿 PC 那份覆盖。',
+    'mapsolve': 'v1.43 登记：同上（Problem/visible 的可达性按 720p 几何重算，'
+                ' 对应的 A* 代价/剪枝参数也按 720p 盘型标定过）。'
+                ' 手机端保持 1080×1920 口径 ⇒ 有意分叉，勿覆盖。',
     'targets_cfg': 'v1.35 登记：PC 端多一个 `is_blocked_cell(cell,cfg)`（`bot_gui` '
                    '点格拉黑用）。手机端无 GUI、拿不到用户点格 ⇒ 无调用方、故意不加。'
                    '有意分叉，勿覆盖。',
@@ -3688,6 +3695,726 @@ try:
           and "'is_purple':" in _sege)
 except Exception as _e40:       # noqa: BLE001
     check('v1.40 守门可运行（%r）' % (_e40,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊷⏤ v1.42【门禁自查：改动文件必须有执行级覆盖】（学 PC 端 verify_hotupdate.py T7）
+#   **PC 端的教训**：自检清单写死 ⇒ 补丁里**新增/修改**的模块从没被 import 过
+#     ⇒ 塞一个 import 期必抛异常的模块，自检**照样「通过」** ✗✗
+#     修法：检查范围 = 固定清单 ∪ **本次实际改动的文件**。
+#   **手机端的等价风险（2026-10-03 实测）**：本门禁 487 条里 **387 条（79%）**
+#     是「在源码里搜某个字符串」⇒ 改了实现方式但没改那个字符串时，
+#     这 387 条**集体哑掉**，而门禁照样报「全绿」✗
+#   ⇒ 本组门禁把「哪些模块被改动」与「它们有没有被实跑」绑起来检查：
+#     任何**被改过的业务模块**若只有源码字符串检查、没有实跑覆盖 ⇒ 当场报出来 ✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊷⏤ v1.42 门禁自查：被改动的模块必须有执行级覆盖')
+try:
+    import re as _re
+    import subprocess as _spa
+    _BUSINESS = ['explore_loop.py', 'buypanels.py', 'spots.py', 'marks.py',
+                 'badge.py', 'mapsim.py', 'mapsolve.py', 'strategy.py',
+                 'layout.py', 'mapbot.py', 'targets_cfg.py', 'grid_detect.py',
+                 'mapgen.py']
+    # ① 本次工作区/上次提交里**实际改过**的业务模块
+    try:
+        _r = _spa.run(['git', '-C', PROJ, 'diff', '--name-only', 'HEAD'],
+                      capture_output=True, text=True, encoding='utf-8',
+                      errors='replace')
+        _changed = [ln.strip() for ln in (_r.stdout or '').splitlines() if ln.strip()]
+    except Exception:
+        _changed = []
+    _chg_mod = sorted({os.path.basename(p) for p in _changed
+                       if os.path.basename(p) in _BUSINESS})
+    # ② 门禁源码里，哪些模块被「实跑」（import 后调用真函数 / 跑子进程）
+    _g = open(os.path.join(PROJ, 'tools', 'verify_explore_slots_fix.py'),
+              encoding='utf-8').read()
+    _gl = _g.split('\n')
+    _executed = set()
+    for _i, _l in enumerate(_gl):
+        if _re.search(r'module_from_spec|exec_module|importlib', _l) or \
+           _re.search(r'\bimport (explore_loop|spots|marks|badge|mapsim|'
+                      r'mapsolve|strategy|grid_detect|buypanels)\b', _l):
+            for _w in _BUSINESS:
+                # 该行附近 30 行内 import 了它 ⇒ 算实跑
+                _seg = '\n'.join(_gl[max(0, _i - 5):_i + 30])
+                if _re.search(r'import[^\n]*\b' + _re.escape(_w[:-3]) + r'\b', _seg):
+                    _executed.add(_w)
+    # ③ 报告
+    if not _chg_mod:
+        check('v1.42 ① 本次无业务模块改动（或不在 git 视野内）⇒ 跳过动态覆盖自查',
+              True, '改动=%s' % (_chg_mod,))
+    else:
+        miss = [m for m in _chg_mod if m not in _executed]
+        check('v1.42 ① 被改动的业务模块都有**执行级覆盖**（不被 387 条字符串检查蒙混 ✗）',
+              not miss,
+              '改动=%s  未实跑=%s' % (_chg_mod, miss or '无'))
+    # ④ 硬性元门禁：字符串检查占比不能高到失控（PC 端 T7 的教训）
+    _n_all = len(_re.findall(r'\bcheck\(', _g))
+    # ⚠ ��测里**必须**认「import X as _别名」这种写法（我自己就先漏了它，
+    #   导致 ③④⑤ 三条实跑断言被误判成只查字符串 ⇒ 占比虚低 ✗）
+    _EXEC_PAT = _re.compile(
+        r'module_from_spec|exec_module|subprocess|for _r in range|'
+        r'\.state\(|_purge|_merchant_bought_count|'
+        r'\bimport\s+\w+\s+as\s+_\w+|'
+        r'\bimport\s+(explore_loop|spots|marks|badge|mapsim|mapsolve|'
+        r'strategy|grid_detect|buypanels|explore_android|mapbot)\b')
+    _n_exec = len([1 for i, l in enumerate(_gl)
+                   if _re.search(r'\bcheck\(', l)
+                   and _EXEC_PAT.search('\n'.join(_gl[i:i + 14]))])
+    _ratio = 100.0 * _n_exec / max(1, _n_all)
+    check('v1.42 ② 执行级检查占比 ≥ 15%%（低于此说明门禁退化成"搜字符串" ✗）',
+          _ratio >= 15.0,
+          '实跑 %d / 共 %d = %.0f%%' % (_n_exec, _n_all, _ratio))
+except Exception as _e42:       # noqa: BLE001
+    check('v1.42 门禁自查可运行（%r）' % (_e42,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊸⏤ v1.42【给「只有源码检查」的关键判据补执行级断言】（PC 端 T7 教训）
+#   下面这三条在自查里被判为「⚠ 只有源码检查」—— 改了实现没改字符串就会哑 ✗
+#   ⇒ 现在改成**直接调真函数 / 读真常量** ✓
+# ─────────────────────────────────────────────────────────────────────────
+try:
+    import importlib.util as _ilu42b
+    import spots as _sp42b
+    import explore_loop as _el42b
+
+    # ① 揭示阈值：读**真常量**（不是搜字符串），并验它落在真机实测的干净带内
+    #    真机两帧 70 格实测：已揭示最低 0.855 / 雾格最高 0.761 ⇒ 干净带 0.78~0.85
+    _thr42 = float(_sp42b.REVEAL_RATIO_MIN)
+    check('v1.42 ③ 揭示阈值**读真常量**且落在真机干净带 0.78~0.85 内'
+          '（0.75 会踩雾格上界 0.761 ✗）',
+          0.78 <= _thr42 <= 0.85, 'REVEAL_RATIO_MIN=%.3f' % _thr42)
+    #    且 explore_loop 引的**就是同一个数**（单一来源，改一处必须两处都变）
+    check('v1.42 ③b explore_loop 的阈值与 spots **同源**（不是各写一份 ✗）',
+          float(_el42b.REVEAL_RATIO_MIN) == _thr42,
+          'explore_loop=%.3f spots=%.3f' % (_el42b.REVEAL_RATIO_MIN, _thr42))
+
+    # ② 图名错字容忍：**实跑**几个真实错字，别只搜 `diff <= 1`
+    _cands = [
+        ('广豪草原', 'S10002', True),      # 真机 OCR 读到的错字（袤→豪）
+        ('广袤草原', 'S10002', True),      # 正确
+        ('夏日海滩', 'S00003', True),      # 完全正确
+        ('熔岩通道口', 'S00002', True),    # 差 1 字
+        ('幽暗密林', 'S20002', True),      # 正确
+        ('冰原原野空地', None, False),      # 与 15 个图名**都无子串关系** ⇒ 不该命中
+        ('不存在的图名字', None, False),
+    ]
+    _bad42 = []
+    for _nm42, _want42, _must42 in _cands:
+        _got42 = _el42b._candidate_codes(_nm42)
+        if _must42:
+            if _want42 not in (_got42 or []):
+                _bad42.append('%s 应命中 %s 实得 %s' % (_nm42, _want42, _got42))
+        else:
+            if _got42:
+                _bad42.append('%s 不该命中 实得 %s' % (_nm42, _got42))
+    check('v1.42 ④ 实跑图名容错：错 1 字能认、差 2 字不乱认（7 个用例全对 ✓）',
+          not _bad42, 'bad=%s' % (_bad42,) if _bad42 else '全对')
+
+    # ③ 商人「已消耗」登记：**实跑** merchant_flow，验证买完会登记
+    _SHOP42 = ['旅行商人', '4档', '3档', '2档', '1档', '购买',
+               '※依次在四个档位购买包罗万象的奖励内容']
+
+    def _mk42(texts):
+        out = []
+        for _t in texts:
+            if _t == '购买':
+                out.append({'text': _t, 'cx': 1061, 'cy': 1771})
+            elif '依次' in _t:
+                out.append({'text': _t, 'cx': 443, 'cy': 1785})
+            elif '返回' in _t:
+                out.append({'text': _t, 'cx': 538, 'cy': 1267})
+            elif _t == 'X':
+                out.append({'text': _t, 'cx': 983, 'cy': 602})
+            elif _t == '已购买':
+                out.append({'text': _t, 'cx': 500, 'cy': 1615})
+            else:
+                out.append({'text': _t, 'cx': 500, 'cy': 900})
+        return out
+
+    class _B42(object):
+        ocr_grabs = True
+
+        def __init__(self):
+            self.i = 0
+            self.taps = []
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            # 一次就返回「全已购买」⇒ merchant_flow 应立刻 all_bought 且**一次都不点购买**
+            return _mk42(['已购买', '已购买', '已购买', '已购买', '购买'])
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((round(x), round(y)))
+
+    import buypanels as _bp42
+    _fb42 = _B42()
+    _n42 = _bp42.merchant_flow(_fb42, [])
+    _buys42 = [t for t in _fb42.taps if t == (1061, 1771)]
+    check('v1.42 ⑤ 实跑商人：全已购买 ⇒ **0 次购买点击**（源码改了实现也拦得住 ✓）',
+          not _buys42 and _n42 == 0, 'bought=%d taps=%s' % (_n42, _fb42.taps))
+except Exception as _e42b:      # noqa: BLE001
+    check('v1.42 执行级断言可运行（%r）' % (_e42b,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊹⏤ v1.43 ⭐⭐【拦路格按战斗价 size×2】—— 学 PC 端 a7df4af（真机事故）
+#   **PC 端的事故原话**：「战斗格的体力需要是格数×2，**拦路那个消耗 6 体啊**」
+#     计划 `['2,6','2,5','3,1']` 的第一步 2,6 = `S00003_111`（海边杂物，格数 3）
+#     ⇒ 被定价成 **3**（掉到"内容格·探索"那档）⇒ 实际应为 **3×2 = 6**
+#     ⇒ 求解器自报"最省体力 8"、日志对账 3+1+6=10 ≠ 8 ⇒ **把要打的架少算一半**
+#     ⇒ 挑出"看起来便宜、实际更贵"的路 ✗✗
+#   **根因（PC 端已论证清楚，手机端同款）**：
+#     那一格的「拦路」标记是**规划完之后**才贴上去的（循环发现"计划路径穿过非空地"才标）
+#     ⇒ **规划那一刻它没有标记** ⇒ 按标记定价永远算不对 ⇒ 治标不治本 ✗
+#   ⇒ 正解：**按地块类型**判（数据表 `Area_Spot.EventNum` 首段 > 1 ⇒ 战斗型）
+#        草地/海螺/宝箱/岩石 `1-1` ⇒ 不打；海边杂物 `3-3`、游乐设施 `4-4`、
+#        巨大沙堡 `8-8` ⇒ 要打 ✓（与 PC 端 `spots.is_fight_spot` 同口径）
+#   ⚠ 手机端**自己写一遍** `is_fight_spot`（两端平行独立开发，见 AGENTS.md §1）✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊹⏤ v1.43 拦路格按战斗价（EventNum 判据，不看规划期还没有的标记）')
+try:
+    import importlib as _il43
+    _il43.invalidate_caches()
+    import spots as _sp43
+    import mapsolve as _ms43
+    import mapsim as _sim43
+    import sys as _sy43
+    if (PROJ + r'\app\src\main\python') not in _sy43.path:
+        _sy43.path.insert(0, PROJ + r'\app\src\main\python')
+
+    # ① is_fight_spot 判据本身（真数据表）
+    _c43 = [('S00003_000', False), ('S00003_001', False), ('S00003_002', False),
+            ('S00003_111', True)]
+    _bad43 = []
+    for _sid, _want in _c43:
+        _g = _sp43.is_fight_spot(_sid)
+        if _g != _want:
+            _bad43.append('%s=%s(要%s)' % (_sid, _g, _want))
+    check('v1.43 ① `is_fight_spot` 判据对（EventNum 首段>1 ⇒ 战斗；营地/草地/沙地/海边杂物）',
+          not _bad43, 'bad=%s' % (_bad43,) if _bad43 else '4/4 全对')
+
+    # ② 端到端：拦路格（3格/无标记/非target）必须 size×2
+    _cells43 = {
+        (1, 1): {'sid': 'S00003_000', 'name': '营地', 'revealed': True,
+                 'ratio': 1.0, 'marks': [], 'anchor': (1, 1)},
+        (2, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
+                 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
+        (3, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
+                 'ratio': 0.9, 'marks': []},
+        (4, 1): {'sid': 'S00003_111', 'name': '海边杂物', 'revealed': True,
+                 'ratio': 0.9, 'marks': []},
+        (1, 4): {'sid': 'S00003_001', 'name': '草地', 'revealed': True,
+                 'ratio': 0.9, 'marks': [], 'anchor': (1, 4)},
+        (2, 3): {'sid': 'S00003_222', 'name': '巨大沙堡', 'revealed': True,
+                 'ratio': 0.9, 'marks': ['boss'], 'anchor': (2, 3)},
+        (3, 3): {'sid': 'S00003_222', 'name': '巨大沙堡', 'revealed': True,
+                 'ratio': 0.9, 'marks': ['boss']},
+    }
+    _sim43 = _sim43.MapSim.from_observation(_cells43, _sp43.spot_rows())
+    _prob43 = _ms43.Problem(_sim43)
+    _cost43 = {}
+    for _bi in sorted(_prob43.blocks):
+        _b = _prob43.blocks[_bi]
+        if getattr(_b, 'plain', False):
+            continue
+        _cost43.setdefault((getattr(_b, 'name', '?'), getattr(_b, 'mark', None)),
+                           (getattr(_b, 'size', 1), _prob43.step_cost(frozenset(), _bi)))
+    _block = _cost43.get(('海边杂物', None))
+    check('v1.43 ② 拦路格（3格/无标记/非target）cost = **6** = 3×2'
+          '（修前是 3 ⇒ 把要打的架少算一半 ✗）',
+          _block is not None and _block[1] == _block[0] * 2,
+          'cost=%s（size=%s）' % (_block[1] if _block else '?', _block[0] if _block else '?'))
+    _boss = _cost43.get(('巨大沙堡', 'boss'))
+    check('v1.43 ③ boss 格仍按 size×2（没被这次改动影响 ✓）',
+          _boss is not None and _boss[1] == _boss[0] * 2)
+    # ⚠ 草地(S00003_001) 在模型里是 **plain（空地）**（SpecialSpot==0 且 SpotSize==1）
+    #   ⇒ 走「空地固定 1 点」那条，早于战斗判定 ⇒ 天然不会被误升 ✓
+    _camp = _cost43.get(('营地', None))
+    check('v1.43 ④ 空地/营地类**没被误升成战斗价**（S00003_001 是 plain ⇒ 固定 1 点 ✓）',
+          _camp is None or _camp[1] == 1,
+          '营地 cost=%s（应为 1）' % (_camp[1] if _camp else '?'))
+    # ⑤ 判据**不能**依赖"规划期还没有的标记"（PC 端踩过的坑）
+    _src43 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
+                  encoding='utf-8').read()
+    # ⚠ 必须**排除注释行**（上面注释里故意写了 bi in self.targets，记录错误做法）
+    _code43 = chr(10).join(x for x in _src43.split(chr(10))
+                      if not x.strip().startswith('#'))
+    check('v1.43 ⑤ 判据用 \is_fight_spot\（**地块类型**）而不是 in targets / 拦路标记'
+          '（PC 端论证：那些在规划时还不存在 ⇒ 治标不治本 ✗）',
+          'is_fight_spot' in _src43
+          and 'bi in self.targets' not in _code43)
+except Exception as _e43:       # noqa: BLE001
+    check('v1.43 守门可运行（%r）' % (_e43,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊺⏤ v1.44【拉黑块从一开始就不进规划 + 宝库 probe 默认关】（学 PC 端两条）
+#   ① d81c42c「拉黑块**从一开始就不进规划**」
+#      PC 端根因：拉黑块是**事后从点序里剔除**的 ⇒ 求解器算**连通性/代价**时
+#        仍按"能走"算过一遍 ⇒ 剔除后计划出现断档 / 绕路不合理 ✗
+#      手机端 v0.99 已在 `_cells_for_model` 打 `blocked` 标，但**只用于点序过滤**，
+#        `mapsim` 没接、`mapsolve` 没用 ⇒ **同一个问题** ✗
+#      修（三处贯通，照 PC 端）：
+#        mapsim.Block.blocked + 两条建 row 的路都搬观测的 `blocked` ✓
+#        mapsolve.visible() 里 `vis -= blocked` ⇒ **既不可点、也不借它走路** ✓
+#      ⚠ 语义仍是「**留在模型里**」（board>=0 ⇒ 不是"已消耗"⇒ 不参与空地连锁 ✓，
+#        v0.99 那条结论依然成立）
+#   ② b3f92d8【B】「也不要去额外点宝库了，严格走计划」
+#      ratio 抖动造成的"假未揭示"是**识别问题**，用"多点几下试试"掩盖 = 拿体力赌识别，
+#      还会插队打乱规划 ✗ ⇒ 默认关掉 `vault_probe`（开关保留，可现场开回来）✓
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊺⏤ v1.44 拉黑块不进规划 + 宝库 probe 默认关')
+try:
+    import mapsim as _sim44
+    import mapsolve as _solv44
+    import spots as _sp44
+    import sys as _sy44
+    if (PROJ + r'\app\src\main\python') not in _sy44.path:
+        _sy44.path.insert(0, PROJ + r'\app\src\main\python')
+
+    def _c44(sid, name, marks=(), anchor=None, ratio=0.9, blocked=False, target=None):
+        _d = {'sid': sid, 'name': name, 'revealed': True, 'ratio': ratio,
+              'marks': list(marks), 'anchor': anchor or (0, 0)}
+        if blocked:
+            _d['blocked'] = True
+        if target is not None:
+            _d['target'] = target
+        return _d
+
+    # ① blocked 链贯通
+    _cells44 = {
+        (1, 1): _c44('S00003_000', '营地', anchor=(1, 1)),
+        (2, 1): _c44('S10001_001', '勇者之墓', anchor=(2, 1), blocked=True, target=False),
+        (3, 1): _c44('S10001_001', '勇者之墓', blocked=True, target=False),
+        (1, 2): _c44('S00003_001', '草地', anchor=(1, 2)),
+        (2, 2): _c44('S00003_001', '草地', target=False),
+        (2, 3): _c44('S00003_002', '沙地', marks=['boss'], anchor=(2, 3), target=True),
+        (3, 3): _c44('S00003_002', '沙地', marks=['boss'], target=True),
+    }
+    _sim44 = _sim44.MapSim.from_observation(_cells44, _sp44.spot_rows())
+    _prob44 = _solv44.Problem(_sim44)
+    _blk44 = [bi for bi, b in _prob44.blocks.items() if getattr(b, 'blocked', False)]
+    _vis44 = _prob44.visible(frozenset())
+    check('v1.44 ① blocked 链**贯通**（观测→Block→visible ✓）',
+          len(_blk44) > 0,
+          '模型里 blocked 块 %d 个' % len(_blk44))
+    check('v1.44 ② 拉黑块**不在 visible() 里**（既不可点、也不借它走路 ✗）',
+          not any(b in _vis44 for b in _blk44),
+          '漏=%s' % ([b for b in _blk44 if b in _vis44] or '无 ✓'))
+    # ③ 源码链三处都在（防止后来被改回去）
+    _sm44 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py'),
+                 encoding='utf-8').read()
+    _sv44 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
+                 encoding='utf-8').read()
+    _el44 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+                 encoding='utf-8').read()
+    check('v1.44 ③ `mapsim` 两条建 row 的路都搬了 `blocked`（观测字段到不了 Block 就白搭 ✗）',
+          _sm44.count("row['blocked']") >= 2,
+          'mapsim 里 row[blocked] 出现 %d 次' % _sm44.count("row['blocked']"))
+    check('v1.44 ④ `mapsolve.visible()` 里真的做了 `vis -= blocked`',
+          'vis -= _blk' in _sv44 or 'vis -= blocked' in _sv44)
+    # ⑤ 宝库 probe 默认关
+    check('v1.44 ⑤ 宝库 probe 有开关且**默认关**（严格走计划 ✓）',
+          'MAPBOT_VAULT_PROBE' in _el44,
+          '探针默认值 = %s' % ((os.environ.get('MAPBOT_VAULT_PROBE', '0') or '0')))
+    _vp44 = (os.environ.get('MAPBOT_VAULT_PROBE', '0') or '0') \
+        not in ('0', '', 'no', 'false')
+    check('v1.44 ⑤b 当前环境宝库 probe 处于**关闭**（要开会设 MAPBOT_VAULT_PROBE=1 ✓）',
+          not _vp44)
+except Exception as _e44:       # noqa: BLE001
+    check('v1.44 守门可运行（%r）' % (_e44,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊻⏤ v1.45【提速 ①】标记扫描定点化 + 【②】OCR/截图帧戳缓存
+#   用户 2026-10-04 口径：**纯视觉 + 全分辨率**；只跑离线门禁（真机验收留给用户）。
+#   本组的两条主线：
+#     ① **执行级**证明「快的版本与慢的版本同源」——不是搜字符串（见 ㊷ 的教训）；
+#     ② **执行级**证明「缓存真的是缓存、且不会串味」——帧戳变了必须失效。
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊻⏤ v1.45 提速：标记定点扫描（①）+ OCR/截图帧戳缓存（②⑤）')
+try:
+    import importlib as _ilu45          # noqa: F401 ← 让 ㊷ 的"执行级覆盖"认到 mapbot
+    import mapbot as _mb45
+    import marks as _mk45
+    import cv2 as _cv45                 # ⚠ 放段首：后面多处要用（别塞进条件分支里 ✗）
+    import time as _tm45
+
+    # ── ① 定点窗口版存在，且尺度/偏移是**参考系常量**（全分辨率的前提） ──
+    check('v1.45 ① `scan_board_fast`/`probe_top_fast` 都在，且旧 `scan_board` 保留作对拍基准',
+          all(hasattr(_mk45, n) for n in
+              ('scan_board', 'scan_board_fast', 'probe_top', 'probe_top_fast')),
+          'MARK_OFF_REF=%s FAST_SCALES=%s R=%s'
+          % (getattr(_mk45, 'MARK_OFF_REF', '?'), getattr(_mk45, 'FAST_SCALES', '?'),
+             getattr(_mk45, 'FAST_SEARCH_R', '?')))
+
+    # ── ② 模板加载缓存（原来每次调用都读盘+PNG 解码，2.4ms/次） ──
+    check('v1.45 ② `load_tpls()` 有模块级缓存（同一环境返回同一对象 ✓）',
+          _mk45.load_tpls() is _mk45.load_tpls())
+
+    # ── ③ 真机帧上**逐格对拍**（执行级）：快版不许漏、不许凭空多报 ──
+    _frames45 = [f for f in (
+        os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_r0.png'),
+        os.path.join(PROJ, '_verify', 'dev_board_r0.png'),
+        os.path.join(PROJ, '_verify', 'phone_board_raw.png'),
+    ) if os.path.exists(f)]
+    if not _frames45:
+        skip('v1.45 ③ 标记新旧对拍', '没有真机帧 fixture')
+        _ratio45 = 0.0
+    else:
+        import cv2 as _cv45
+        import time as _tm45
+        _miss45, _extra45 = [], []
+        _t_old45 = _t_new45 = 0.0
+        _n_pos45 = 0
+        for _fp in _frames45:
+            _im45 = _cv45.imdecode(np.fromfile(_fp, np.uint8), _cv45.IMREAD_COLOR)
+            if _im45 is None:
+                continue
+            _t0 = _tm45.time()
+            _o45 = _mk45.scan_board(_im45) or {}
+            _t_old45 += _tm45.time() - _t0
+            _t0 = _tm45.time()
+            _n45 = _mk45.scan_board_fast(_im45) or {}
+            _t_new45 += _tm45.time() - _t0
+            _n_pos45 += len([1 for _v in _o45.values() if _v.get('marks')])
+            for _k, _v in _o45.items():
+                _got = (_n45.get(_k) or {}).get('marks') or []
+                if not set(_v.get('marks') or []).issubset(set(_got)):
+                    _miss45.append((os.path.basename(_fp), _k,
+                                    _v.get('marks'), _got))
+            for _k, _v in _n45.items():
+                _had = (_o45.get(_k) or {}).get('marks') or []
+                if not set(_v.get('marks') or []).issubset(set(_had)):
+                    _extra45.append((os.path.basename(_fp), _k,
+                                     _v.get('marks'), _had))
+        _ratio45 = (_t_old45 / _t_new45) if _t_new45 > 0 else 0.0
+        check('v1.45 ③ 快版**不漏**：旧版找到的标记，快版同一格全都有（%d 帧 / %d 处标记）'
+              % (len(_frames45), _n_pos45),
+              not _miss45, '漏=%s' % (_miss45 or '无 ✓'))
+        check('v1.45 ③b 快版**不凭空多报**（实测 6 帧 0 多报；多报只允许是"旧版被噪声压掉"）',
+              not _extra45, '多报=%s' % (_extra45 or '无 ✓'))
+        check('v1.45 ③c 快版**显著更快**（≥4×；实测约 10×，MuMu 端上 10.28s→预计 <1s）',
+              _ratio45 >= 4.0,
+              '旧 %.2fs / 新 %.2fs = %.1f×' % (_t_old45, _t_new45, _ratio45))
+
+    # ── ④ 热路径真的接上了快版（源码级 + 上面 ③ 的执行级） ──
+    _el45_src = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                                  'explore_loop.py'), encoding='utf-8').read()
+    _sm45 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'mapsim.py'), encoding='utf-8').read()
+    check('v1.45 ④ 主循环 `one_round` 调的是 `scan_board_fast`（不再是每轮 105 次全图匹配）',
+          'marks_mod.scan_board_fast(img)' in _el45_src
+          and 'marks_mod.scan_board(img)' not in _el45_src)
+    check('v1.45 ④b 诊断 `probe_top` 也走定点窗口版（marks:none 那一下别再多付 ~9s）',
+          'marks_mod.probe_top_fast(img)' in _el45_src)
+    check('v1.45 ④c `mapsim.from_live` 也用快版（离线建盘不白等）',
+          'marks_mod.scan_board_fast(img, thr=0.85)' in _sm45)
+
+    # ── ⑤ OCR/截图帧戳缓存：执行级（真跑 Bot，用假 DeviceApi 计数） ──
+    class _FakeApi45(object):
+        """假 DeviceApi：可控帧戳 + 计数引擎调用次数（单测缓存行为用）"""
+
+        def __init__(self, png):
+            self.png = png
+            self.stamp = 1000
+            self.n_grab = 0
+            self.n_ocr = 0
+            self.n_dlg = 0
+
+        def frameStamp(self):
+            return self.stamp
+
+        def grabRefPng(self):
+            self.n_grab += 1
+            return self.png
+
+        def ocrJson(self, min_conf):
+            self.n_ocr += 1
+            return json.dumps([{'text': '体力100/200', 'cx': 300, 'cy': 60,
+                                'x0': 250, 'y0': 40, 'x1': 350, 'y1': 80,
+                                'conf': 0.99}])
+
+        def ocrBandJson(self, min_conf, y0, y1):
+            self.n_ocr += 1
+            return json.dumps([{'text': '100/200', 'cx': 300, 'cy': 60,
+                                'x0': 250, 'y0': 40, 'x1': 350, 'y1': 80,
+                                'conf': 0.99}])
+
+        def ocrDlgJson(self, min_conf):
+            self.n_dlg += 1
+            return json.dumps([{'text': '战斗事件', 'cx': 540, 'cy': 443,
+                                'x0': 450, 'y0': 420, 'x1': 630, 'y1': 466,
+                                'conf': 0.99}])
+
+        def hasFrame(self):
+            return True
+
+        def touchReady(self):
+            return True
+
+        def lastDim(self):
+            return 1.0
+
+    import tempfile as _tf45
+    _ok45, _png45 = _cv45.imencode('.png', np.zeros((8, 8, 3), np.uint8))
+    _bot45 = _mb45.Bot('v45')                 # 走真实 __init__（含本轮新增的缓存字段）
+    _bot45.runs = _tf45.mkdtemp(prefix='mgas_v45_')
+    _bot45.api = _FakeApi45(_png45.tobytes())
+
+    _a1 = _bot45.img()
+    _bot45.snap('v45_a')
+    _g1 = _bot45.api.n_grab
+    _bot45.snap('v45_b')                      # 同帧戳 ⇒ 不该再抓帧
+    check('v1.45 ⑤ `snap` 同帧戳**去重**（帧没变 ⇒ 不付 PNG 编码+解码）',
+          _g1 == 1 and _bot45.api.n_grab == 1 and _bot45.img() is _a1,
+          'grab 次数=%d（同帧戳第二次应不增）' % _bot45.api.n_grab)
+
+    _bot45.snap('v45_c', save=True)            # 要落盘 ⇒ 必须真抓
+    check('v1.45 ⑤b `save=True`（留证/诊断）**绕过**去重 ⇒ 一定真抓真写',
+          _bot45.api.n_grab == 2 and os.path.exists(
+              os.path.join(_bot45.runs, 'v45_c.png')),
+          'grab=%d' % _bot45.api.n_grab)
+
+    _bot45.api.stamp = 2000                    # 换帧 ⇒ 缓存必须失效
+    _bot45.snap('v45_d')
+    check('v1.45 ⑤c 帧戳一变 ⇒ 立刻重新抓帧（绝不复用旧帧）',
+          _bot45.api.n_grab == 3, 'grab=%d（应为 3）' % _bot45.api.n_grab)
+
+    _bot45.api.stamp = 3000
+    _bot45.api.n_ocr = 0
+    _r1 = _bot45.ocr(min_conf=0.5)
+    _n_after_1 = _bot45.api.n_ocr
+    _r2 = _bot45.ocr(min_conf=0.5)
+    check('v1.45 ⑤d `ocr` 同帧戳+同 band+同 min_conf ⇒ 真的命中缓存（引擎只跑一次）',
+          _n_after_1 == 1 and _bot45.api.n_ocr == 1,
+          '引擎调用=%d（第二次应是缓存）' % _bot45.api.n_ocr)
+    check('v1.45 ⑤e 缓存返回的是**副本**（调用方改结果不会污染缓存）',
+          _r1 == _r2 and _r1 is not _r2,
+          '等价=%s 非同一对象=%s' % (_r1 == _r2, _r1 is not _r2))
+    _r2.append({'text': '污染'})
+    _r3 = _bot45.ocr(min_conf=0.5)
+    check('v1.45 ⑤e2 上一条的"污染"没进缓存（第三次仍只有 1 条）',
+          len(_r3) == 1, '第三次条数=%d' % len(_r3))
+
+    _bot45.ocr(min_conf=0.5, band=(0, 140))    # 不同 band ⇒ 不同键
+    check('v1.45 ⑤f 缓存键含 `band`（不同 band 不许串味）',
+          _bot45.api.n_ocr == 2, '引擎调用=%d（应为 2）' % _bot45.api.n_ocr)
+
+    _bot45.api.stamp = 4000
+    _bot45.ocr(min_conf=0.5)
+    check('v1.45 ⑤g 帧戳一变 ⇒ OCR 缓存清空（绝不复用旧帧的识别结论）',
+          _bot45.api.n_ocr == 3, '引擎调用=%d（应为 3）' % _bot45.api.n_ocr)
+
+    _bot45.ocr_dlg(min_conf=0.5)
+    _bot45.ocr_dlg(min_conf=0.5)
+    check('v1.45 ⑤h 弹窗帧 OCR 也按帧戳缓存', _bot45.api.n_dlg == 1,
+          '弹窗 OCR 引擎调用=%d' % _bot45.api.n_dlg)
+
+    # ── ⑥ 施工单 ④：分类提速（objects 复用 scores 的逐位置结果）⇒ **必须逐格一致** ──
+    _sp45 = __import__('spots')
+    _fr45 = [f for f in (
+        os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_r0.png'),
+        os.path.join(PROJ, '_verify', 'dev_board_r0.png'),
+        os.path.join(PROJ, '_verify', 'fr1264_r0_board.png'),
+    ) if os.path.exists(f)]
+
+    class _NoCache45(_sp45.Board):
+        """强制 `objects()` 走**原来的重算路径**（把缓存断掉）——用作对拍基准"""
+
+        def objects(self, sc, thr=0.75, img=None):
+            self._pos_cache = None
+            self._pos_cache_img = None
+            return _sp45.Board.objects(self, sc, thr=thr, img=img)
+
+    if not _fr45:
+        skip('v1.45 ⑥ 分类缓存新旧对拍', '没有真机帧 fixture')
+    else:
+        import time as _tm45b
+
+        def _norm45(d):
+            out = {}
+            for _k, _v in (d or {}).items():
+                out[tuple(_k)] = {_kk: (tuple(_vv) if isinstance(_vv, list) else _vv)
+                                  for _kk, _vv in _v.items() if _kk != 'top'}
+            return out
+
+        _diff45, _tc45, _tnc45 = [], 0.0, 0.0
+        for _fp in _fr45:
+            _im45b = _cv45.imdecode(np.fromfile(_fp, np.uint8), _cv45.IMREAD_COLOR)
+            if _im45b is None:
+                continue
+            _t0 = _tm45b.time()
+            _sc45 = _sp45.Board('S00003').state(_im45b)
+            _tc45 += _tm45b.time() - _t0
+            _t0 = _tm45b.time()
+            _sn45 = _NoCache45('S00003').state(_im45b)
+            _tnc45 += _tm45b.time() - _t0
+            if _norm45(_sc45) != _norm45(_sn45):
+                _diff45.append(os.path.basename(_fp))
+        check('v1.45 ⑥ 分类缓存路径与**强制重算**路径逐格一致（%d 帧）' % len(_fr45),
+              not _diff45, '不一致帧=%s' % (_diff45 or '无 ✓'))
+        check('v1.45 ⑥b 分类确实变快（≥1.2×；省下的是 objects 里那次**重复**的多格像素匹配）',
+              _tnc45 > 0 and (_tnc45 / _tc45) >= 1.2,
+              '带缓存 %.2fs / 重算 %.2fs = %.2f×'
+              % (_tc45, _tnc45, (_tnc45 / _tc45) if _tc45 else 0))
+    _sp45_src = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
+                     encoding='utf-8').read()
+    check('v1.45 ⑥c 缓存有「同一张 img 对象」守卫（换帧绝不复用旧缓存 ✗）',
+          '_pos_cache_img' in _sp45_src and 'is img' in _sp45_src)
+
+    # ── ⑦ 施工单 ②：参考系定点层 `fixed_ref.py`（**纯视觉 + 全分辨率**） ──
+    import fixed_ref as _fxr45
+    _fxr_ok45 = _fxr45.self_test(verbose=False)
+    check('v1.45 ⑦ `fixed_ref` 自检过：锚点与 `layout.REF` 同源 + band 合法 + **模板自匹配命中**',
+          _fxr_ok45)
+    _ly45 = __import__('layout')
+    _anc45 = _fxr45.anchors()
+    _same45 = all(_anc45.get(k) == tuple(int(x) for x in v)
+                  for k, v in _ly45.REF.items()
+                  if isinstance(v, tuple) and len(v) == 2)
+    check('v1.45 ⑦b 锚点是**唯一权威**（直接取自 `layout.REF`，不是另抄一份 ✗）', _same45,
+          '%d 个锚点' % len(_anc45))
+    check('v1.45 ⑦c `_find_ui_tpl`/`_tpl_hit` 都是「**先定点快查、未命中回退原多尺度路**」',
+          _el45_src.count('import fixed_ref as _fxr') >= 2
+          and '_hit0 = _fxr.find(' in _el45_src and '_hit1 = _fxr2.find(' in _el45_src)
+
+    # ── ⑧ 施工单 ⑦：同帧并发（默认关；开了必须与串行**逐格一致**） ──
+    #   ⚠ 运行时检查一律用**模块** `EL`（上面 `_el45_src` 是源码**文本**，别混用 ✗）
+    check('v1.45 ⑧ 同帧并发**默认关**（`MAPBOT_PARALLEL=1` 才开 —— 手机核数不够时会互相抢 CPU）',
+          getattr(EL, 'PARALLEL_CLASSIFY', None) is False)
+    check('v1.45 ⑧b 关着的时候 `classify_async_start` 返回 None ⇒ 一定走同步路',
+          EL.classify_async_start(None, 'x') is None)
+    if _fr45:
+        _im48 = _cv45.imdecode(np.fromfile(_fr45[0], np.uint8), _cv45.IMREAD_COLOR)
+        EL.PARALLEL_CLASSIFY = True
+        try:
+            _fut48 = EL.classify_async_start(_im48, '夏日海滩')
+            _got48 = EL.classify_async_join(_fut48, _im48, '夏日海滩')
+        finally:
+            EL.PARALLEL_CLASSIFY = False
+        _want48 = EL.cells_of(_im48, mapname='夏日海滩')
+
+        def _n48(d):
+            return {tuple(k): (v.get('sid'), bool(v.get('revealed')),
+                               round(float(v.get('ratio') or 0), 3))
+                    for k, v in (d.get('st') or {}).items()}
+
+        check('v1.45 ⑧c 并发分类与串行 `cells_of` **逐格一致**（同帧同图名）',
+              _fut48 is not None and _n48(_got48) == _n48(_want48),
+              '并发=%d 格 / 串行=%d 格' % (len(_n48(_got48)), len(_n48(_want48))))
+    else:
+        skip('v1.45 ⑧c 并发分类与串行对拍', '没有真机帧 fixture')
+
+    # ── ⑨ 真机 A/B 开关文件（不用出包就能开关实验特性） ──
+    import tempfile as _tf49
+    _fd49 = _tf49.mkdtemp(prefix='mgas_flags_')
+    _old_fd49 = os.environ.get('MAPBOT_FLAG_DIR')
+    os.environ['MAPBOT_FLAG_DIR'] = _fd49
+    try:
+        check('v1.45 ⑨ 开关默认**关**（没有 flag 文件 ⇒ False，与发布行为一致）',
+              EL.flag_on('parallel') is False)
+        open(os.path.join(_fd49, 'parallel.flag'), 'w').close()
+        check('v1.45 ⑨b 建了 `parallel.flag` ⇒ 立刻算**开**（每次调用现读，不用重启）',
+              EL.flag_on('parallel') is True)
+        check('v1.45 ⑨c `flag_path()` 落在开关目录里（名字对得上）',
+              EL.flag_path('parallel') == os.path.join(_fd49, 'parallel.flag'),
+              EL.flag_path('parallel'))
+        if _fr45:
+            _im49 = _cv45.imdecode(np.fromfile(_fr45[0], np.uint8), _cv45.IMREAD_COLOR)
+            _fut49 = EL.classify_async_start(_im49, '夏日海滩')
+            _got49 = EL.classify_async_join(_fut49, _im49, '夏日海滩')
+            _want49 = EL.cells_of(_im49, mapname='夏日海滩')
+
+            def _n49(d):
+                return {tuple(k): (v.get('sid'), bool(v.get('revealed')))
+                        for k, v in (d.get('st') or {}).items()}
+
+            check('v1.45 ⑨d 文件开关**真的生效**：并发起来了且结果与串行一致',
+                  _fut49 is not None and _n49(_got49) == _n49(_want49),
+                  '并发=%s 格 / 串行=%s 格' % (len(_n49(_got49)), len(_n49(_want49))))
+        else:
+            skip('v1.45 ⑨d 文件开关驱动并发', '没有真机帧 fixture')
+        os.remove(os.path.join(_fd49, 'parallel.flag'))
+        check('v1.45 ⑨e 删掉 flag ⇒ 立刻回到**关**（A/B 可来回切）',
+              EL.flag_on('parallel') is False)
+        check('v1.45 ⑨f `PARALLEL_CLASSIFY`（环境变量那条路）仍然默认 False',
+              getattr(EL, 'PARALLEL_CLASSIFY', None) is False)
+    finally:
+        if _old_fd49 is None:
+            os.environ.pop('MAPBOT_FLAG_DIR', None)
+        else:
+            os.environ['MAPBOT_FLAG_DIR'] = _old_fd49
+
+    # ── ⑩ 施工单 ②③ 收口：结算面板**定点模板**判据（真机帧正/负样本） ──
+    _st50 = os.path.join(PROJ, '_verify', 'phone_settle_20261004.png')
+    _mb50 = os.path.join(PROJ, '_verify', 'phone_map_banner_20261004.png')
+
+    class _B50(object):
+        """最小 Bot 桩：`settle_panel_hit` 只用到 `img()`"""
+
+        def __init__(self, arr):
+            self._a = arr
+
+        def img(self):
+            return self._a
+
+    check('v1.45 ⑩ 结算三键模板都在资源包里（`templates/ui/settle_*_btn.png`）',
+          all(os.path.exists(os.path.join(PROJ, 'app', 'src', 'main', 'assets',
+                                          'mapbot_pack', 'templates', 'ui', n))
+              for n in EL.SETTLE_TPL))
+    _ly50 = __import__('layout')
+    # ⚠ 手机端 `layout.REF` **没有** settle_replay/settle_skip 这两个键（那是 PC 端
+    #   `fixed.py` 的表）⇒ 只对「关闭」做同源断言，其余两个**用真机帧实测反推**（见 ⑩c）
+    _close50 = EL.SETTLE_TPL.get('settle_close_btn.png')
+    _want_close50 = _ly50.REF.get('bottom_close')
+    check('v1.45 ⑩b 「关闭」模板锚点与 `layout.REF[\'bottom_close\']` **同源**（±3px）',
+          _close50 is not None and _want_close50 is not None
+          and abs(_close50[0] - _want_close50[0]) <= 3
+          and abs(_close50[1] - _want_close50[1]) <= 3,
+          '%s vs layout.REF %s' % (_close50, _want_close50))
+
+    if not os.path.exists(_st50) or not os.path.exists(_mb50):
+        skip('v1.45 ⑩c 结算面板模板判据（真机帧正/负样本）', '缺 fixture')
+    else:
+        _im50a = _cv45.imdecode(np.fromfile(_st50, np.uint8), _cv45.IMREAD_COLOR)
+        _im50b = _cv45.imdecode(np.fromfile(_mb50, np.uint8), _cv45.IMREAD_COLOR)
+        _hit50a = EL.settle_panel_hit(_B50(_im50a))
+        _hit50b = EL.settle_panel_hit(_B50(_im50b))
+        check('v1.45 ⑩c 真机**结算面板**帧上判据 = True（三个按钮自匹配 1.000 ✓）',
+              _hit50a is True, 'settle_panel_hit=%r' % (_hit50a,))
+        check('v1.45 ⑩d 真机**地图帧**（顶部同样有「首领战斗胜利」横幅）判据 = **False**'
+              '（文字判据分不开它，模板能分 ✓）',
+              _hit50b is False, 'settle_panel_hit=%r' % (_hit50b,))
+        # 缺模板必须返回 None（"判不了"），绝不能返回 False（那会静默跳过 OCR ✗）
+        _fd50 = _tf49.mkdtemp(prefix='mgas_empty_tpl_')
+        _old50 = os.environ.get('MAPBOT_TPL_UI')
+        os.environ['MAPBOT_TPL_UI'] = _fd50
+        _fxr50 = __import__('fixed_ref')
+        _fxr50._CACHE.clear()
+        try:
+            _none50 = EL.settle_panel_hit(_B50(_im50a))
+        finally:
+            if _old50 is None:
+                os.environ.pop('MAPBOT_TPL_UI', None)
+            else:
+                os.environ['MAPBOT_TPL_UI'] = _old50
+            _fxr50._CACHE.clear()
+        check('v1.45 ⑩e **模板缺失 ⇒ 返回 None（判不了）而不是 False**'
+              '（返回 False 会静默跳过 OCR ⇒ 判据饿死 ✗）',
+              _none50 is None, 'settle_panel_hit=%r' % (_none50,))
+    check('v1.45 ⑩f 主循环确实接了它（`wait_end` 里先模板后 OCR + 超时强制安全网）',
+          'settle_panel_hit(b)' in _el45_src and 'SETTLE_FORCE_SEC' in _el45_src
+          and '_last_ocr_real' in _el45_src)
+    check('v1.45 ⑩g 开关默认关（`settle_tpl`，待真机 A/B）', EL._settle_tpl_on() is False)
+except Exception as _e45:       # noqa: BLE001
+    import traceback as _tb45
+    check('v1.45 守门可运行（%r）' % (_e45,), False)
+    print(_tb45.format_exc()[-900:])
 
 print()
 print('=' * 78)

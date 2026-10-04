@@ -57,6 +57,30 @@ COLOR_MIN = 0.68           # ⭐ 配色下限（NCC，对雾格变暗不敏感 �
 GLYPH_KEEP = 1.0           # （保留：1.0 = 不裁剪；裁过 0.62 反而更差 ✗）          # ⭐ 只保留模板中间 62%（挖掉共有的沙地圆角底纹 ✓）
 GLYPH_SCALES = [round(3.8 + 0.1 * i, 2) for i in range(15)]   # ⭐ 真标记尺度 3.8~5.2
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v1.45 提速（施工单 ①）：**参考系定点窗口搜索**
+#
+# 为什么可以这么改（真机帧实测，2026-10-04）：
+#   ① 参考系是「顶块锚顶 + 其余锚底」，两段斜率**都是 kx** ⇒ 参考系内尺寸恒定，
+#      标记的真尺度只落在 **3.8 / 4.1 / 4.4** 附近（4 帧实测：boss 4.4、clover 3.8、
+#      recommend 4.1、redEquip 4.4~4.5；15 档里其余 12 档从来没赢过）；
+#   ② 标记**模板中心的落点相对格心恒为 (-36,-36)**（独立两帧逐像素一致）——
+#      也就是说它根本不是"随便落在格心附近"，而是**格子美术里的固定位置**。
+# 于是「整条 1080×740 棋盘带 × 15 尺度 × 7 模板 = 105 次全图匹配」可以换成
+# 「35 格 × 每格一个小窗 × 3~5 尺度」= 匹配面积降到约 1/100。
+#
+# ⚠ 约束（用户 2026-10-04 定）：**纯视觉 + 全分辨率**。本层全部工作在 1080×1920
+#   参考系里、只用视觉，不读内存；窗口/偏移都是**参考系常量**，与设备分辨率无关
+#   （RefMapper 已经把任何设备归一到参考系）⇒ 全分辨率零特例 ✓
+#
+# ⚠ 与旧 `scan_board` 的**唯一语义差异**：旧版对每个 (模板,尺度) 只取**全图最优那一处**，
+#   若那处不在格心附近就整档丢弃（会漏掉"别处有更高分噪声"的格子）；新版本**逐格取最好**，
+#   因此**可能多找到**本来被噪声压掉的真标记（是"更少漏"的方向，不是误报方向）。
+#   闸门（SHAPE_MIN / COLOR_MIN / TYPE_MIN）一个字没改 ⇒ 噪声照样过不去。
+MARK_OFF_REF = (-36, -36)          # 标记模板中心相对**格心**的固定偏移（参考系像素）
+FAST_SCALES = (3.8, 4.0, 4.2, 4.4, 4.6)   # 实测真标记尺度区间（15 档 → 5 档）
+FAST_SEARCH_R = 14.0               # 每格搜索半径（参考系像素）；±14 已覆盖实测抖动
+
 
 def _crop_glyph(tpl, keep=GLYPH_KEEP):
     h, w = tpl.shape[:2]
@@ -66,6 +90,26 @@ def _crop_glyph(tpl, keep=GLYPH_KEEP):
 
 
 def load_tpls():
+    """加载标记模板（**带模块级缓存**）
+
+    ⭐ v1.45：原来每次调用都重新读盘 + PNG 解码（实测 2.4ms/次，而 `scan_board` 每轮都调一次）。
+    模板在运行期不会变 ⇒ 缓存安全。缓存键带上 `TPL_DIR`/`_MAPBOT_ROOT`，
+    这样门禁里改环境变量/临时换目录时**不会拿到别的目录的旧模板** ✓
+    想强制重载（极少用）：`load_tpls.cache_clear()`。
+    """
+    _key = (TPL_DIR, _MAPBOT_ROOT)
+    _hit = _TPL_CACHE.get(_key)
+    if _hit is not None:
+        return _hit
+    out = _load_tpls_raw()
+    _TPL_CACHE[_key] = out
+    return out
+
+
+_TPL_CACHE = {}
+
+
+def _load_tpls_raw():
     out = {}
     for key, fn in MARKS:
         p = os.path.join(TPL_DIR, fn)
@@ -206,12 +250,63 @@ def default_scales():
     return [round(2.0 + 0.25 * i, 3) for i in range(17)]      # 2.0 .. 6.0
 
 
+def _jobs_of(tpls=None):
+    """(类型名, RGBA 模板) 列表：列表型变体逐个展开、归到基础类型 ✓
+
+    ⭐ v1.45：从 `scan_board` 里抽出来（纯重构，行为不变），供 `scan_board_fast` 共用。
+    """
+    _all = tpls if tpls is not None else load_tpls()
+    out = []
+    for _k, _v in _all.items():
+        if isinstance(_v, list):
+            for _t in _v:
+                out.append((_k.replace('_v', ''), _t))       # 变体 → 归到基础类型 ✓
+        else:
+            out.append((_k, _v))
+    return out
+
+
+def _dedup_candidates(out):
+    """收尾：同格多标记按**位置**区分 ✓（纯重构，逐字搬自 `scan_board` 尾部）
+
+    ⭐ 2026-09-27：clover ↔ recommend 这对要分得更开才算两个真标记 ✓
+      实测（用户报）同一格的**同一个大拇指徽章**上，幸运草模板能偏 ~20px 命中 ✗
+      ⇒ 被当成第二个标记 ⇒ 白摇一次色子（耗幸运草 ✗）
+      徽章宽约 58px ⇒ 这对要求分开 ≥35px ✓；其余组合仍 18px ✓（保 4 标记格 ✓）
+    """
+    for _cell, _d in out.items():
+        _cand = _d.pop('_cand', [])
+        if not _cand:
+            continue
+        _cand.sort(reverse=True)
+        _keep, _pos = [], []
+        _STRICT = {('clover', 'recommend'), ('recommend', 'clover')}
+        for _tot, _name, _sc, _cs, _px, _py in _cand:
+            _dup = False
+            for _i2, (qx, qy) in enumerate(_pos):
+                _gap = 35 if (_keep[_i2], _name) in _STRICT else 18
+                if abs(_px - qx) < _gap and abs(_py - qy) < _gap:
+                    _dup = True
+                    break
+            if _dup:
+                continue
+            if _name not in _keep:
+                _keep.append(_name)
+                _pos.append((_px, _py))
+        _d['marks'] = _keep
+        _d['best'] = round(_cand[0][0], 3)
+    return out
+
+
 def scan_board(img, thr=None, scales=None, region=None, use_color=True):
     """整盘扫描标记 -> {(row,col): {'marks': [...], 'at': (cx,cy), 'score': s}}
 
     region: 只搜棋盘区域 (x0,y0,x1,y1)，默认按 GRID 算，避免 HUD 误命中
     use_color: ⭐ 用**形状 + 配色**双判（2026-09-25 加）——boss 与 redEquip 形状极像，
         只用形状分每张图都会把 boss 格也认成 redEquip（用户报的"我游戏里没看到红装"）
+
+    ⚠ v1.45：本函数是**旧实现**，全图 105 次匹配（~10s/次），保留作**对拍基准**。
+      热路径已改用 `scan_board_fast`（见下）。
     """
     thr = SHAPE_MIN if thr is None else thr   # ⭐ 默认用形状下限（原来写死 0.90 ⇒ 幻少全漏 ✗）
     scales = scales or GLYPH_SCALES          # ⭐ 收紧到真标记的尺度区间
@@ -221,14 +316,7 @@ def scan_board(img, thr=None, scales=None, region=None, use_color=True):
     x0, y0, x1, y1 = region
     sub = img[y0:y1, x0:x1]
     out = {}
-    _all = load_tpls()
-    _jobs = []
-    for _k, _v in _all.items():
-        if isinstance(_v, list):
-            for _t in _v:
-                _jobs.append((_k.replace('_v', ''), _t))     # 变体 → 归到基础类型 ✓
-        else:
-            _jobs.append((_k, _v))
+    _jobs = _jobs_of()
     for key, tpl in _jobs:
         for sc, s, cx, cy, w, h in match_at_scales(sub, tpl, scales):
             if sc < thr:
@@ -262,32 +350,156 @@ def scan_board(img, thr=None, scales=None, region=None, use_color=True):
                                int(gx), int(gy)))
             d['score'] = max(d['score'], round(sc, 3))
             d['color'] = round(max(d.get('color') or 0, cs), 3)
-    # 收尾：同格多标记按**位置**区分 ✓（用户：幸运草紧挨着首领、在它右边 ✓）
-    for _cell, _d in out.items():
-        _cand = _d.pop('_cand', [])
-        if not _cand:
-            continue
-        _cand.sort(reverse=True)
-        _keep, _pos = [], []
-        # ⭐ 2026-09-27：clover ↔ recommend 这对要分得更开才算两个真标记 ✓
-        #   实测（用户报）同一格的**同一个大拇指徽章**上，幸运草模板能偏 ~20px 命中 ✗
-        #   ⇒ 被当成第二个标记 ⇒ 白摇一次色子（耗幸运草 ✗）
-        #   徽章宽约 58px ⇒ 这对要求分开 ≥35px ✓；其余组合仍 18px ✓（保 4 标记格 ✓）
-        _STRICT = {('clover', 'recommend'), ('recommend', 'clover')}
-        for _tot, _name, _sc, _cs, _px, _py in _cand:
-            _dup = False
-            for _i2, (qx, qy) in enumerate(_pos):
-                _gap = 35 if (_keep[_i2], _name) in _STRICT else 18
-                if abs(_px - qx) < _gap and abs(_py - qy) < _gap:
-                    _dup = True
-                    break
-            if _dup:
-                continue
-            if _name not in _keep:
-                _keep.append(_name)
-                _pos.append((_px, _py))
-        _d['marks'] = _keep
-        _d['best'] = round(_cand[0][0], 3)
+    # 收尾：同格多标记按**位置**区分 ✓（v1.45 抽成 `_dedup_candidates`，逐字同源）
+    return _dedup_candidates(out)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v1.45：定点窗口版（热路径用它）
+# ══════════════════════════════════════════════════════════════════════════
+
+def _match_window(img, tpl_rgba, s, ecx, ecy, half):
+    """在 **格心 (ecx,ecy) ± half** 这个小窗里做一次带掩码 TM_SQDIFF
+
+    返回 (score, cx, cy) 或 None（窗口越界/模板太小 ⇒ 与原版"越界不报"一致）。
+
+    ⚠ 窗的取法：要让**模板中心**落在 [ecx±half]，等价于模板**左上角**落在
+      [ecx−half−w/2, ecx+half−w/2] ⇒ 裁 `2*half + w` 宽的一小块。
+      这与旧版「全图搜 + 事后按 MARK_BOX 过滤」覆盖的是**同一批合法位置** ✓
+    """
+    th, tw = tpl_rgba.shape[:2]
+    w, h = int(round(tw * s)), int(round(th * s))
+    if w < 6 or h < 6:
+        return None
+    x0 = int(round(ecx - half - w / 2.0))
+    y0 = int(round(ecy - half - h / 2.0))
+    cw, ch = int(2 * half) + w, int(2 * half) + h
+    H, W = img.shape[:2]
+    if x0 < 0 or y0 < 0 or x0 + cw > W or y0 + ch > H:
+        return None
+    sub = img[y0:y0 + ch, x0:x0 + cw]
+    if sub.size == 0:
+        return None
+    rgb = cv2.resize(tpl_rgba[:, :, :3].astype(np.float32), (w, h),
+                     interpolation=cv2.INTER_LINEAR)
+    m = cv2.resize(np.where(tpl_rgba[:, :, 3] > 32, 255, 0).astype(np.uint8), (w, h),
+                   interpolation=cv2.INTER_NEAREST)
+    nmask = int((m > 0).sum())
+    if nmask < 20:
+        return None
+    res = cv2.matchTemplate(sub.astype(np.float32), rgb, cv2.TM_SQDIFF, mask=m)
+    res = np.nan_to_num(res, nan=1e12, posinf=1e12, neginf=1e12)
+    mn, _mx, mnloc, _mxl = cv2.minMaxLoc(res)
+    # 与 `match_at_scales` 同一套归一化（0=完全一致）⇒ 分数口径完全一致 ✓
+    sc = 1.0 - mn / (float(nmask) * 255.0 * 255.0)
+    return (float(sc), x0 + mnloc[0] + w / 2.0, y0 + mnloc[1] + h / 2.0)
+
+
+def scan_board_fast(img, thr=None, scales=None, use_color=True, tpls=None,
+                    offset=None, search_r=None, cell_stats=None):
+    """⭐⭐⭐ v1.45 参考系**定点窗口**标记扫描（热路径版）
+
+    与 `scan_board` 的差异（已论证，见文件顶 MARK_OFF_REF 那段注释）：
+      · 只扫 **35 个格心 ± search_r**（不是整条 1080×740 棋盘带）；
+      · 尺度只取 `FAST_SCALES`（实测真标记尺度区间，15 档 → 5 档）；
+      · 逐格取最好（旧版每档只取全图最优 ⇒ 会被别处的噪声把真标记压掉，会漏）。
+    闸门（thr / COLOR_MIN / TYPE_MIN / 多标记去重）**一个字没改** ⇒ 不会因此多报。
+
+    `cell_stats`（可选，dict）：把每格的最高形状分与耗时塞进去（诊断/标定用）。
+    """
+    thr = SHAPE_MIN if thr is None else thr
+    scales = tuple(scales if scales is not None else FAST_SCALES)
+    half = float(FAST_SEARCH_R if search_r is None else search_r)
+    off = MARK_OFF_REF if offset is None else offset
+    out = {}
+    if img is None:
+        return out
+    jobs = _jobs_of(tpls)
+    rows, cols = int(GRID['rows']), int(GRID['cols'])
+    for r in range(1, rows + 1):
+        for c in range(1, cols + 1):
+            _ccx, _ccy = cell_center(r, c)
+            ecx, ecy = _ccx + off[0], _ccy + off[1]
+            _best_any = 0.0
+            for key, tpl in jobs:
+                best = None
+                for s in scales:
+                    got = _match_window(img, tpl, s, ecx, ecy, half)
+                    if got is None:
+                        continue
+                    if best is None or got[0] > best[0]:
+                        best = got + (s,)
+                if best is None:
+                    continue
+                sc, gx, gy, s = best
+                if sc > _best_any:
+                    _best_any = sc
+                if sc < thr:
+                    continue
+                cs = color_score(img, tpl, gx, gy, s) if use_color else 1.0
+                if use_color and cs < COLOR_MIN:
+                    continue
+                base_name = key.replace('_live', '').replace('_desk', '').replace('_real', '')
+                _tmin = TYPE_MIN.get(base_name)
+                if _tmin and (sc < _tmin[0] or cs < _tmin[1]):
+                    continue
+                d = out.setdefault((r, c), {'marks': [], 'at': (int(gx), int(gy)),
+                                            'score': round(sc, 3), 'color': round(cs, 3),
+                                            '_cand': []})
+                d['_cand'].append((sc + cs, base_name, round(sc, 3), round(cs, 3),
+                                   int(gx), int(gy)))
+                d['score'] = max(d['score'], round(sc, 3))
+                d['color'] = round(max(d.get('color') or 0, cs), 3)
+            if cell_stats is not None:
+                cell_stats['%d,%d' % (r, c)] = round(_best_any, 3)
+    return _dedup_candidates(out)
+
+
+def probe_top_fast(img, scales=None, tpls=None, offset=None, search_r=None):
+    """⭐ v1.45：`probe_top` 的**定点窗口版**（诊断用，语义等价、快 ~9 倍）
+
+    与 `probe_top` 同一件事：**每个标记模板各自最好的那处**（不设闸门、给裸分），
+    供反馈包分清「真没有标记」 vs 「有标记但被机身偏暗压到闸门之下」。
+    只是把搜索范围收到**格心窗口**（标记只可能在那儿）——对诊断而言更贴题
+    （旧版全图找出来的最高分常常落在棋盘外/别格，反而看不出"这一格差多少"）。
+
+    ⚠ 同样**只做诊断，不参与任何判定**（调用方别拿它当命中用 ✗）
+    """
+    if img is None:
+        return []
+    scales = tuple(scales if scales is not None else GLYPH_SCALES)
+    half = float(FAST_SEARCH_R if search_r is None else search_r)
+    off = MARK_OFF_REF if offset is None else offset
+    rows, cols = int(GRID['rows']), int(GRID['cols'])
+    jobs = _jobs_of(tpls)
+    best_per = {}
+    for r in range(1, rows + 1):
+        for c in range(1, cols + 1):
+            _ccx, _ccy = cell_center(r, c)
+            ecx, ecy = _ccx + off[0], _ccy + off[1]
+            for key, tpl in jobs:
+                base = key.replace('_live', '').replace('_desk', '').replace('_real', '')
+                cur = best_per.get(base)
+                for s in scales:
+                    got = _match_window(img, tpl, s, ecx, ecy, half)
+                    if got is None:
+                        continue
+                    sc, gx, gy = got
+                    if cur is None or sc > cur[0]:
+                        cur = (sc, s, gx, gy, r, c, key)
+                if cur is not None:
+                    best_per[base] = cur
+    out = []
+    for base, (sc, s, gx, gy, r, c, key) in best_per.items():
+        tpl = None
+        for k2, t2 in jobs:
+            if k2 == key:
+                tpl = t2
+                break
+        cs = color_score(img, tpl, gx, gy, s) if tpl is not None else 0.0
+        out.append({'tpl': base, 'shape': round(float(sc), 3), 'color': round(float(cs), 3),
+                    'rc': '%d,%d' % (r, c), 'scale': round(float(s), 2)})
+    out.sort(key=lambda d: -d['shape'])
     return out
 
 

@@ -547,6 +547,44 @@ public final class DeviceApi {
         return d.getAbsolutePath();
     }
 
+    // ---------------- 热更新（v1.41，见 Updater 类注释） ----------------
+
+    /**
+     * 热更状态一句话（诊断 / 反馈包用）。
+     *
+     * ⚠ 为什么反馈包里要有这个：朋友报"更新完还是老样子"时，第一件事就是确认
+     *   **到底哪一层生效了** —— 补丁 id、有没有坏包、壳版本，缺一个都判不了。
+     */
+    public static String hotInfo() {
+        if (appCtx == null) {
+            return "appCtx 未绑定";
+        }
+        return Updater.statusLine(appCtx);
+    }
+
+    /** 当前生效的热更目录（Python 侧拿它填 `MAPBOT_HOT`，没有则空串） */
+    public static String hotDir() {
+        if (appCtx == null) {
+            return "";
+        }
+        String p = Updater.hotActivePath(appCtx);
+        return p == null ? "" : p;
+    }
+
+    /**
+     * ⭐ 触发更新（Python 侧也能调；悬浮条 / 广播走的是同一条路）。
+     *
+     * @param mode check / hot / apk / auto（语义见 {@link Updater#run}）
+     * @return 给人看的一句话
+     * ⚠ **会阻塞**（网络下载，整包几十秒）⇒ 调用方必须自己在后台线程里调。
+     */
+    public static String update(String mode) {
+        if (appCtx == null) {
+            return "appCtx 未绑定";
+        }
+        return Updater.run(appCtx, mode == null || mode.isEmpty() ? "check" : mode);
+    }
+
     public static String filesDir() {
         return appCtx == null ? "" : appCtx.getFilesDir().getAbsolutePath();
     }

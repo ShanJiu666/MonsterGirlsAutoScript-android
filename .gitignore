@@ -21,3 +21,7 @@ captures/
 
 # Python
 __pycache__/
+
+# ⚠ 发版令牌（Gitee）**永远不进仓** —— 放用户主目录 ~/.gitee_token（tools/release.py 会去读）。
+#   这条是防呆：万一有人在仓库根目录建了一个，别被 git add 进去。
+.gitee_token

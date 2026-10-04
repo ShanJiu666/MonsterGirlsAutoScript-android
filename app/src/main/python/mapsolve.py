@@ -48,6 +48,19 @@ NCELL = ROWS * COLS
 FIGHT_X2 = {'boss', 'redEquip', 'recommend', 'battle'}      # 战斗格：体力 ×2
 
 
+def _is_fight_block(b):
+    """⭐ v1.43：这一块按**地块类型**是不是"要打一场架"（`EventNum` 首段 > 1）
+
+    ⚠ 本模块**故意不 import spots**（地块数据靠参数传，避免循环依赖）；
+      这里**局部导入**，首次之后走模块缓存 ⇒ 零开销 ✓（与 PC 端 `mapsim.block_cost` 同款）
+    """
+    try:
+        import spots as _sp
+        return bool(_sp.is_fight_spot(getattr(b, 'sid', None)))
+    except Exception:       # noqa: BLE001
+        return False
+
+
 def rc_of(idx):
     """cell 索引 -> 1 基 (r, c)（与 `mapsim.rc_of` 同口径）"""
     return idx // COLS + 1, idx % COLS + 1
@@ -188,8 +201,12 @@ class Problem:
             ⇒ 开局可点 = **营地的四个邻居** ✓（地图生成时就是亮的 ✓）
         可点 = ① 与已消耗格 4 邻接的（连锁揭示 ✓）
                ∪ ② 营地的 4 邻接格（开局起手 ✓）
+        ⭐⭐ v1.44【**拉黑块既不可点、也不借它走路**】（学 PC 端 d81c42c）
         """
         vis = set()
+
+        # ⭐ v1.44：拉黑掩码（`Block.blocked` ⇒ 由 explore_loop 的观测 `blocked` 传来 ✓）
+        _blk = {bi for bi, b in self.blocks.items() if getattr(b, 'blocked', False)}
 
         def _add_nb(cell):
             r, cc = cell // COLS, cell % COLS
@@ -210,6 +227,11 @@ class Problem:
         if self.camp is not None:
             for cc2 in self.cells_of.get(self.camp, ()):
                 _add_nb(cc2)
+        # ⭐ v1.44：拉黑块**既不是候选动作、也不能当通路** ✓
+        #   （根因：拉黑块原本只"事后从点序剔除"⇒ 求解器算连通性/代价时仍按能走算
+        #    ⇒ 计划出现断档/绕路不合理 ✗ —— 与 PC 端 d81c42c 同一个问题）
+        if _blk:
+            vis -= _blk
         return vis
 
     def plain_group(self, bi):
@@ -265,8 +287,11 @@ class Problem:
         size = int(getattr(b, 'size', 1) or 1)
         if getattr(b, 'plain', False):          # 空地：连锁 ⇒ 固定 1 点 ✓
             return 1
-        if b.mark in FIGHT_X2:                  # 明确要打的（boss/红装/大拇指/战斗标记）✓
+        if b.mark in FIGHT_X2:                  # 明确要打的（boss/红装/大拇指/战斗）✓
             return size * 2
+        # ⚠ 「无标记但要开打」（拦路格）的战斗价在 **`step_cost()`** 里加 ——
+        #   因为它需要 `self.targets`（本方法是 staticmethod，拿不到 Problem 上下文）✓
+        #   见 `step_cost` 里 v1.43 那段注释。
         return size                             # 内容格：探索 = SpotSize ✓
 
     def step_cost(self, state, bi):
@@ -277,7 +302,21 @@ class Problem:
         """
         if self.blocks[bi].plain:
             return 1
-        return self.block_cost(self.blocks[bi])
+        # ⭐⭐ v1.43【按**地块类型**判"要不要打" ⇒ 战斗价 size×2】
+        #   学 PC 端 a7df4af 的真机事故（逻辑完全一致）：
+        #     计划第一步要打的那格（PC 是 S00003_111 海边杂物，格数 3），它的「拦路」标记
+        #     是**规划完之后**才贴的 ⇒ 规划那一刻**没有标记** ⇒ 被当"内容格·探索"按 size
+        #     计价（实际应 size×2）⇒ "打这一架"和"绕路揭 4 格"看起来平局 ⇒ **选了贵的** ✗✗
+        #   ⚠ **不能**改成"看标记 / 看 in targets"：规划期这些都还不存在 ⇒ 治标不治本
+        #     （我第一版就写成了 `bi in self.targets`，实测拦路块 in_tgt=False ⇒ 分支走不到 ✗）
+        #   ⇒ 正确判据 = `spots.is_fight_spot(sid)`（按 `EventNum` 首段 > 1）✓
+        #     与 PC 端 `mapsim.Block.cost` / `mapsolve` **同口径** ✓
+        _b = self.blocks[bi]
+        if _b.mark in FIGHT_X2:
+            return int(getattr(_b, 'size', 1) or 1) * 2
+        if _is_fight_block(_b):
+            return int(getattr(_b, 'size', 1) or 1) * 2
+        return int(getattr(_b, 'size', 1) or 1)
 
     def done(self, state):
         return not (self.targets - set(state))

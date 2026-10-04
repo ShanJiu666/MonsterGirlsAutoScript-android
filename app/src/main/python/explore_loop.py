@@ -1582,6 +1582,17 @@ def _find_ui_tpl(b, name, region=None, thr=0.80):
     img = b.img()
     if img is None:
         return None
+    # ⭐⭐ v1.45 提速（施工单 ②）：**先走参考系定点单尺度快查**（毫秒级），
+    #   没命中再回退下面那套 6 档多尺度全图搜（长屏非等比压缩的兜底，行为不变）。
+    #   为什么敢先单尺度：归一化帧是**等比**归一的（RefMapper 两段斜率都是 kx）
+    #   ⇒ 1024×1920 帧上模板就是 1:1；只有真机弹性区压缩那类才需要多档。
+    try:
+        import fixed_ref as _fxr
+        _hit0 = _fxr.find(img, name, region=region, thr=thr)
+        if _hit0 is not None:
+            return _hit0
+    except Exception:       # noqa: BLE001
+        pass
     H, W = img.shape[:2]
     x0, y0, x1, y1 = region or (0, 0, W, H)
     sub = img[y0:y1, x0:x1]
@@ -1749,6 +1760,16 @@ def _tpl_hit(img, name, region=None, scales=None, thr=0.80):
         _UI_TPL_CACHE[name] = tpl
     if tpl is None or img is None:
         return None
+    # ⭐⭐ v1.45 提速（施工单 ②）：同上 —— 先单尺度定点快查，未命中再回退多尺度。
+    #   ⚠ 只在「调用方没指定多档尺度」时才走快查（`scales=` 显式给了就说明它要扫多档）
+    if not scales:
+        try:
+            import fixed_ref as _fxr2
+            _hit1 = _fxr2.find(img, name, region=region, thr=thr)
+            if _hit1 is not None:
+                return _hit1
+        except Exception:       # noqa: BLE001
+            pass
     H, W = img.shape[:2]
     x0, y0, x1, y1 = region or (0, 0, W, H)
     x0, y0 = max(0, int(x0)), max(0, int(y0))
@@ -2453,6 +2474,112 @@ def cells_of(img, mapname=None, code=None):
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐ v1.45 提速（施工单 ⑦）：**同帧并发** —— 把「轮首全屏 OCR」与「棋盘分类」重叠
+#
+# 现状（串行）：snap → Java OCR(~1.5s) → popups 判定 → Python 分类(~1s) → 标记 → 规划 → 点。
+#   两段都是"同一帧上的独立计算"，彼此**不依赖**（分类只需要 img，不需要 OCR 结果）⇒
+#   可以重叠。JDK/ONNX 都是 native 调用（GIL 大部分时间是放开的）⇒ 有重叠空间。
+#
+# ⚠⚠ 为什么**默认关**（`MAPBOT_PARALLEL=1` 才开）：
+#   手机上两边都是 CPU 密集型，**核数不够时并发反而互相抢 CPU**，净收益只能是真机上 A/B 出来。
+#   我没有真机可测（用户 2026-10-04 口径：只跑离线门禁、真机验收留给用户）⇒
+#   做成**可开关 + 离线证明"结果与串行逐格一致"**，把"开不开"留给真机数据决定 ✓
+#
+# ⚠ 只在 `st['mapname']` **已知**时才并发（第一轮还不知道图名，串行拿 items 里的图名）；
+#   并且**上一轮的并发还没跑完就不再提交**（避免任务在池里排队 ⇒ join 反而更久）。
+# ══════════════════════════════════════════════════════════════════════════
+PARALLEL_CLASSIFY = (os.environ.get('MAPBOT_PARALLEL', '') or '').strip() not in (
+    '', '0', 'no', 'false', 'False')
+_PAR_POOL = None
+_PAR_LAST = None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐ v1.45【真机 A/B 开关文件】—— 不用出包就能开关实验特性
+#
+# 为什么要有：以前每试一个开关都要「改代码 → 发热更 → 冷启动 → 跑 5 张图」，
+#   一轮十几分钟，而且要真机才能定的事（并发划不划算 / 某个 OCR 砍了会不会漏面板）
+#   根本没法快速试。
+# 现在：`adb shell touch /sdcard/Download/autoexplore/bagdbg/<名字>.flag` 就开，
+#   `rm` 就关；**每次调用现读**（同一次运行里改也生效），跑完我拉统计对比即可。
+#
+# ⚠ 纪律：**正式行为不许依赖 flag**（flag 不在 ⇒ 走默认，与发布行为一字不差）；
+#   flag 只用于"待真机定论"的实验开关。目录可用 `MAPBOT_FLAG_DIR` 覆盖（门禁就这么测）。
+# 已知开关：
+#   parallel  —— 同帧并发分类（`classify_async_start`）
+# ══════════════════════════════════════════════════════════════════════════
+
+def flag_dir():
+    """开关文件目录（**每次现读环境变量** ⇒ 门禁/测试可运行时改）"""
+    return os.environ.get('MAPBOT_FLAG_DIR') or BAG_PUB_DIR
+
+
+def flag_path(name):
+    return os.path.join(flag_dir(), str(name) + '.flag')
+
+
+def flag_on(name, default=False):
+    """开关文件在 ⇒ True；不在 ⇒ **default**（读不到/异常也走 default）
+
+    ⚠ 语义容易写错（我第一版就写错了）：**必须回落到 default**，
+      否则"环境变量那条路"会被这个函数**静默掐死**（`_par_on()` 用的是
+      `flag_on('parallel', PARALLEL_CLASSIFY)`，不回落到 default 就永远 False）——
+      门禁 v1.45 ⑧c 当场把这个错抓住了 ✓
+    """
+    try:
+        return True if os.path.exists(flag_path(name)) else bool(default)
+    except Exception:       # noqa: BLE001
+        return bool(default)
+
+
+def _par_on():
+    """⑦ 同帧并发是否生效：**文件开关优先**，其次环境变量（默认关）"""
+    return flag_on('parallel', PARALLEL_CLASSIFY)
+
+
+def _par_pool():
+    global _PAR_POOL
+    if _PAR_POOL is None:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            _PAR_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='mgas-cls')
+        except Exception:       # noqa: BLE001
+            _PAR_POOL = False
+    return _PAR_POOL or None
+
+
+def classify_async_start(img, mapname=None, code=None):
+    """把 `cells_of` 丢后台线程先算（与主线程的 Java OCR 重叠）⇒ future / None
+
+    返回 None = **关掉了/池不可用/上一轮还在跑** ⇒ 调用方走原来的同步路 ✓
+    """
+    global _PAR_LAST
+    if not _par_on() or img is None:
+        return None
+    if _PAR_LAST is not None and not _PAR_LAST.done():
+        return None                      # 上一轮没跑完 ⇒ 别再提交（防排队）
+    pool = _par_pool()
+    if pool is None:
+        return None
+    try:
+        _PAR_LAST = pool.submit(cells_of, img, mapname, code)
+        return _PAR_LAST
+    except Exception:       # noqa: BLE001
+        return None
+
+
+def classify_async_join(fut, img, mapname=None, code=None):
+    """取并发结果；**任何异常都回退同步重算**（绝不因为并发把这一轮搞崩 ✗）"""
+    if fut is None:
+        return cells_of(img, mapname=mapname, code=code)
+    try:
+        return fut.result()
+    except Exception:       # noqa: BLE001
+        return cells_of(img, mapname=mapname, code=code)
+
+
+
 BUY_SCORE_MIN = 0.85        # 认商人/宝库的最低匹配分（见上面注释）
 BUY_PROBE_MAX = 3           # 「强匹配但被判未揭示」的宝库/商人：每格每图最多验证式点几下（见下）
 
@@ -2899,6 +3026,19 @@ def start_fight(b, log, btn, marks=()):
             continue                           # 点空了 ⇒ 允许再点一次 ✓
         _t0 = time.time()
         while time.time() - _t0 < 15.0:        # ⭐ v1.26：5s → 15s（真机开打更慢 ✓）
+            # ⭐⭐ v1.45 提速（施工单 ③⑥）：**别再固定 sleep(0.6) 白等**
+            #   这条循环原来是「OCR(~1.4s) + sleep(0.6)」⇒ 每轮白花 0.6s，
+            #   15s 窗口里最多白等 ~4s/场战斗。改成：
+            #     · 先用 Java 侧 `wait_stable`（60ms 轮询**纯像素**、≈0 成本）等画面停 ≤1.0s；
+            #       —— 「开打」这一帧是**静止**的，等它停再看，命中率不降、还少认几次字；
+            #     · 停不下来（战斗动画一直在动）就**直接看**，绝不把检测拖过窗口 ✗
+            #   ⚠ 语义没变：判据还是 `battle_started(items)` / 结算面板，只是**看字的时机**变了。
+            try:
+                if b.fast_ok:
+                    b.wait_stable(1.0, interval=0.06, thr=1.4, need=6,
+                                  band=(LAYOUT.sy(130), LAYOUT.sy(1700)))
+            except Exception:       # noqa: BLE001
+                pass
             items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(980)), tag='tap')
             if battle_started(items):
                 log.append({'battle': 'started', 'at': (btn['cx'], btn['cy']),
@@ -2911,7 +3051,8 @@ def start_fight(b, log, btn, marks=()):
                 log.append({'battle': 'result_panel_instead', 'try': i,
                             'secs': round(time.time() - _t0, 1), 'marks': list(marks)})
                 return True
-            time.sleep(0.6)
+            # ⚠ 只在「上一轮什么都没等到」时补一小口，别恢复成固定 0.6s 白等
+            time.sleep(0.1)
         log.append({'battle': 'no_battle_in_15s', 'try': i, 'tries': tries,
                     'note': '画面变了但 15s 没进战斗 ⇒ 不再重点 ✓'})
         break                                  # ⭐ 不重试 ✗（防点到别的 UI）
@@ -3295,6 +3436,70 @@ def dice_dialog(items):
     return {'yes': _yes, 'no': _no}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐ v1.45c 结算面板「定点模板」判据（施工单 ②③）
+#
+# 用途：`wait_end` 等结算时**先花一次毫秒级模板匹配**判"面板出来没有"，
+#   没出来就**不付那一次 ~1.5s 的 OCR**。
+#
+# 为什么比"文字含战斗胜利"干净：地图顶部常驻「首领战斗胜利」横幅**也含这四个字**
+#   （代码里 `is_battle_panel`/`win_only` 那些兜底就是被它逼出来的）；
+#   而这三个按钮（回放战斗/关闭/自动跳过）**只在结算面板上**。
+#   真机帧实测（2026-10-04）：
+#     · 正样本：结算面板帧上三个模板自匹配 **1.000**，位置与 `layout.REF`
+#       （`settle_replay`(577,1223) / `bottom_close`(578,1440) / `settle_skip`(576,1563)）**逐位吻合**；
+#     · 负样本：6 张**地图帧**（含那条横幅）+ 3 张棋盘帧 → **全部不命中** ✓
+# 模板从真机参考帧裁（1080×1920），落在 `templates/ui/`；**参考系坐标 ⇒ 全分辨率通吃** ✓
+#
+# ⚠ flag `settle_tpl`（默认关）：没有真机 A/B 数据前不改默认行为；
+#   而且**模板缺失 ⇒ 判据返回 None ⇒ 调用方立刻走原路**（绝不因缺模板而跳过判定 ✗）
+# ══════════════════════════════════════════════════════════════════════════
+SETTLE_TPL = {
+    'settle_replay_btn.png': (577, 1223),   # 回放战斗
+    'settle_close_btn.png': (577, 1440),    # 关闭
+    'settle_skip_btn.png': (575, 1560),     # 自动跳过
+}
+SETTLE_TPL_THR = 0.80
+SETTLE_TPL_HALF = (160, 60)                 # 定点搜索半径（参考系像素）
+# 距上次"真正 OCR"超过这么多秒 ⇒ 无论模板说什么都强制 OCR 一次（安全网）
+SETTLE_FORCE_SEC = 6.0
+
+
+def _settle_tpl_on():
+    return flag_on('settle_tpl')
+
+
+def settle_panel_hit(b, log=None):
+    """结算面板在不在 —— **定点模板**，不 OCR。-> True / False / **None（判不了）**
+
+    None 的两种情形（调用方**必须**回退 OCR）：
+      · 模板文件缺失（资源没到位 / 换 UI 版本）
+      · 帧拿不到
+    返回 False = "三个按钮都没命中" ⇒ 可以安全跳过这一次 OCR ✓
+    """
+    try:
+        import fixed_ref as _fxr
+    except Exception:       # noqa: BLE001
+        return None
+    img = b.img()
+    if img is None:
+        return None
+    best = None
+    missing = False
+    for nm, (cx, cy) in SETTLE_TPL.items():
+        hx, hy = SETTLE_TPL_HALF
+        got = _fxr.find(img, nm, region=(cx - hx, cy - hy, cx + hx, cy + hy),
+                        thr=SETTLE_TPL_THR)
+        if got is None:
+            if _fxr.load(nm) is None:
+                missing = True            # 模板不在 ⇒ 这一路判不了
+            continue
+        best = got[2] if best is None else max(best, got[2])
+    if best is not None:
+        return True
+    return None if missing else False
+
+
 def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None):
     """等战斗结算。⚠ 用户 09-25：战斗胜利不会超过 5s —— 超过很久还没结算就是没打起来，
     别死等（原来 180s，白耗时间）。
@@ -3319,6 +3524,7 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None
     _dice_skip_logged = False   # ⭐ v1.22：这场战斗只记一条"想摇没摇成"（防 OCR 循环刷屏 ✓）
     back = 0
     last_ocr = 0.0
+    _last_ocr_real = 0.0     # ⭐ v1.45c：上次**真正做了 OCR** 的时刻（模板省 OCR 的安全网用）
     # ⭐ 用户 2026-09-25：「不是每个战斗都要等待，只有有大拇指的要等待」
     #   - 带 recommend 标记：要**细等**（等奖励行稳定，才判断得出有没有大拇指）→ wait_stable
     #   - 普通战斗：不追稳定，每 ~2.5 秒看一眼就够（结算面板一出现就关掉走人）
@@ -3360,8 +3566,25 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None
         if not need_ocr:
             continue
         last_ocr = elapsed
-        _OCR_CH['dlg'] = False      # ⭐ 战斗界面是**全屏**界面（不是居中弹窗）⇒ 一切回归一化系
+        # ⭐⭐⭐ v1.45c（施工单 ②③，flag `settle_tpl`）：
+        #   **先用定点模板判"结算面板到底出来没有"，没出来就不付那一次 OCR（~1.5s）**。
+        #   为什么这条安全（对比 2026-09-25 被回退的那次"只看顶部 HUD"）：
+        #     · 不是"只看画面一小块"，而是**三个面板专有按钮**（回放战斗/关闭/自动跳过）的定点匹配；
+        #       实测负样本含 **6 张地图帧**（顶部同样有「首领战斗胜利」横幅）——**全部不命中** ⇒
+        #       这个判据比"文字含战斗胜利"更干净（文字判据分不开横幅与面板，见下一行注释）。
+        #     · **超时强制**：距上次真正 OCR 超过 SETTLE_FORCE_SEC 秒 ⇒ 无论模板说什么都 OCR 一次
+        #       （模板没裁好 / 换了 UI 版本 ⇒ 最坏退化成原行为，绝不让判据饿死 ✗）
+        #     · 模板文件缺失 ⇒ `settle_panel_hit()` 返回 None ⇒ 立刻走原路 ✓
         b.snap('battle_wait')
+        if _settle_tpl_on():
+            _sp = settle_panel_hit(b)
+            if _sp is not None and log is not None:
+                log.append({'settle_tpl': _sp, 'secs': round(elapsed, 1)})
+            if _sp is False and (elapsed - _last_ocr_real) < SETTLE_FORCE_SEC:
+                continue                     # 面板还没出来 ⇒ 这一轮省掉 OCR ✓
+            if _sp is not None:
+                _last_ocr_real = elapsed
+        _OCR_CH['dlg'] = False      # ⭐ 战斗界面是**全屏**界面（不是居中弹窗）⇒ 一切回归一化系
         items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
         win = fb(items, L['win'])
         # ⚠ 摇色子触发必须限定在**真结算面板**上：地图顶部「首领战斗胜利」横幅也含
@@ -4730,9 +4953,21 @@ def enter_map(b, log, timeout=40):
                         'stamina_before': _st_now})
             # ⚠ 2026-09-25 用户报「一进图就点一下右下角」：原来点完没立刻认出地图
             #   **同一秒又点了一次**，第二下正好落在刚加载出来的地图上（看起来像乱点）。
-            #   现在点一下就**等地图加载**（每秒看一次，最多 ~14 秒），期间处理弹窗。
+            #   现在点一下就**等地图加载**（最多 ~9 轮），期间处理弹窗。
+            # ⭐⭐ v1.45 提速（施工单 ⑥）：固定 sleep(1.5) → **有条件地等**
+            #   原来「sleep(1.5) + snap + 全屏 OCR(~1.5s)」⇒ 每轮 ~3s，最多 9 轮 ≈ **27 秒**！
+            #   而这条循环的全部目的只是「等地图加载完」——OCR 本身就是个 1.5s 的阻塞操作，
+            #   再叠加固定 1.5s 等于每轮多花一倍时间。
+            #   ⇒ 改成：先 `wait_stable` 等画面停（进图动画播完就停，最多 1.2s，≈免费），
+            #     然后 snap + OCR 判定；**地图一认出来就立刻返回**（原本也不会更早）。
+            #   ⚠ 不减少判定次数上限（仍 9 轮），只把"白等"换成"等它停"。
             for _ in range(9):
-                time.sleep(1.5)
+                try:
+                    if b.fast_ok:
+                        b.wait_stable(1.2, interval=0.06, thr=1.4, need=6,
+                                      band=(LAYOUT.sy(130), LAYOUT.sy(1700)))
+                except Exception:       # noqa: BLE001
+                    time.sleep(0.4)
                 b.snap('enter_wait')
                 img2 = b.img()
                 it2 = b.ocr(tag='round')
@@ -4748,7 +4983,9 @@ def enter_map(b, log, timeout=40):
         if not on_menu:
             log.append({'enter': 'not_menu_yet',
                         'texts': [i['text'] for i in items if i['cy'] > LAYOUT.sy(900)][:8]})
-        time.sleep(1.5)
+        # ⭐ v1.45：本循环每轮已经付了一次全屏 OCR（~1.5s）⇒ 固定 1.5s 属于纯白等，
+        #   收到 0.3s（只是让出一点 CPU、别把设备榨干）
+        time.sleep(0.3)
     log.append({'enter': 'timeout'})
     return False
 
@@ -6266,6 +6503,13 @@ def one_round(b, log, rnd, prefix, st):
     # ⚠ 2026-09-28 实测否决「跳帧复用 OCR」（P4 试错，已撤）：连续两轮的帧差
     #   （96×160 灰度均值差）最小都有 **42.7** —— 夏日海滩水面等待机动画让画面
     #   永远在动，根本不存在"帧没变" ⇒ 复用永远命中不了，纯加噪音。别再加回来。
+    # ⭐⭐ v1.45 提速（施工单 ⑦）：**同帧并发**（默认关，`MAPBOT_PARALLEL=1` 才开）
+    #   本轮的 `img` 已经拿到（上面 snap 过），而下面这行全屏 OCR 是 **Java 侧 ~1.5s 阻塞**；
+    #   棋盘分类只需要 `img`、**不需要 OCR 结果** ⇒ 先把分类丢后台一起算，
+    #   等下面真的要用 `c` 时再 join（见 `c = classify_async_join(...)`）。
+    #   ⚠ 只在 `st['mapname']` **已知**时并发：第一轮图名要从本帧 items 里读，
+    #     提前分类会拿不到正确模板集（宁可串行）；`mapname` 一旦定了，后面每轮都用它 ✓
+    _fut_cls = classify_async_start(img, st.get('mapname')) if st.get('mapname') else None
     items = b.ocr(tag='round')
     st['mapname'] = map_name(items) or st.get('mapname')
     entry = {'round': rnd, 'stamina': stamina(items)}
@@ -6409,7 +6653,10 @@ def one_round(b, log, rnd, prefix, st):
 
     # ⭐ 2026-09-27：存图已**提到函数开头**（拿到 img 就存）—— 见 `one_round` 顶部注释 ✓
     #   这里不再存（原来放这儿会被 `act == 'battle'/'handled'` 的提前 return 跳过 ✗）
-    c = cells_of(img, mapname=st.get('mapname') or map_name(items))
+    # ⭐ v1.45（施工单 ⑦）：如果轮首把分类并发起来了，这里取它的结果；否则**走原来的同步路**
+    #   （`classify_async_join` 在 fut=None 时就是 `cells_of(...)`，语义一字不差 ✓）
+    c = classify_async_join(_fut_cls, img,
+                            st.get('mapname') or map_name(items))
     # ⭐⭐⭐ 2026-09-28 暗罩复查（只看 rnd==0）：预等待 2 秒没盖住进图动画时兜底。
     #   _board_dimmed(c) = 全盘无一格 ratio≥0.85 ⇒ 这帧还是暗罩 ⇒ 等 2 秒重截
     #   重识别（最多 2 次；用尽则 fail-open 照常往下走，行为同旧版不会更糟）。
@@ -6418,7 +6665,19 @@ def one_round(b, log, rnd, prefix, st):
     for _fi in range(2):
         if rnd != 0 or not _board_dimmed(c):
             break
-        time.sleep(2.0)
+        # ⭐ v1.45 提速（施工单 ⑥）：固定 2s → 等**棋盘带**画面停（暗罩散去就停，最多 2s）
+        #   语义不变（仍上限 2s、仍重截重识别），只是"暗罩一散就往下走"。
+        _stable6 = False
+        try:
+            if b.fast_ok:
+                # band 是**参考系**行号（Java waitStable 内部按 RefMapper 换算）——
+                # 与 `one_round` 开头那处 `band=(1002, 1722)` 同口径 ✓
+                _stable6 = bool(b.wait_stable(2.0, interval=0.08, thr=1.6, need=6,
+                                              band=(1002, 1722)))
+        except Exception:       # noqa: BLE001
+            _stable6 = False
+        if not _stable6:
+            time.sleep(2.0)
         b.snap('%sr%03d_fog%d' % (prefix, rnd, _fi + 1))
         img = b.img()
         c = cells_of(img, mapname=st.get('mapname') or map_name(items))
@@ -6596,16 +6855,23 @@ def one_round(b, log, rnd, prefix, st):
             return None
     st['dark'] = 0
     if vis:
-        _new_mk = marks_mod.scan_board(img)
+        # ⭐⭐⭐ v1.45 提速（施工单 ①）：标记扫描改走**定点窗口版**
+        #   旧 `marks_mod.scan_board` 每次「整条 1080×740 棋盘带 × 15 尺度 × 7 模板 = 105 次全图像素匹配」，
+        #   端上实测 **10.28s/次**，而它**不在任何埋点里** ⇒ 一局 23 次 ≈ 236s 的时间黑洞。
+        #   新版只用「35 个格心 ±14px 小窗 × 5 尺度」（标记模板中心相对格心恒为 (-36,-36)，
+        #   尺度实测只落在 3.8~4.5）⇒ 匹配面积降到约 1/100，**6 张真机帧逐格一致**（含负样本无多报）。
+        #   ⚠ 旧 `scan_board` 一字未动，留作对拍基准（门禁㊻ 组会做等价性断言）。
+        _new_mk = marks_mod.scan_board_fast(img)
         # ⭐ v1.22 诊断：这一帧**一个标记都没扫到**（且此前也没攒下标记）⇒ 记下"最像的候选"
         #   起因（用户 2026-10-02 「进不去图.zip」/ nubia NX729J）：
         #   日志是 `no_plan` + `blank_board` + `targets_done(gray_left 29)` —— 一个目标都没有、
         #   直接退图；可那帧肉眼看得见格子上有标记图标 ✗
         #   ⇒ 到底"真没有标记"还是"有标记但形状/配色分被机身偏暗压到闸门之下"，
-        #     必须能从反馈包里一眼看出来（`marks_mod.probe_top` 给裸分 ✓ 只诊断不判定）
+        #     必须能从反馈包里一眼看出来（`probe_top` 给裸分 ✓ 只诊断不判定）
+        #   ⚠ v1.45：诊断也走定点窗口版（同一批格心窗口），否则 marks:none 那一下要多付 ~9s
         if not _new_mk and not (st.get('marks') or {}):
             try:
-                log.append({'marks_scan': 'none', 'top': marks_mod.probe_top(img)})
+                log.append({'marks_scan': 'none', 'top': marks_mod.probe_top_fast(img)})
                 # ⭐⭐⭐ 2026-10-02 v1.30【识别问题的**铁证**：把这一帧存下来】
                 #   用户真机（realme RMX3800，`进图发了会呆就退出了.zip`）反馈：
                 #   「啥都没识别出来」；日志里 `marks_scan: none`，近失分 recommend 0.769 /
@@ -7005,9 +7271,20 @@ def one_round(b, log, rnd, prefix, st):
     #   真机实测：NCC 0.95+ 的已揭示宝库被判 ratio 0.638 = "未揭示" ⇒ 既不进 buy、
     #   又被当"点不动"⇒ 机器人看着宝库去开路打拦路 ✗（用户报的就是这个）
     #   ⇒ 强匹配(NCC≥0.85) + 名字是宝库/商人 ⇒ **验证式点它**（每格上限 BUY_PROBE_MAX 次）
+    # ⛔⛔ v1.44【默认关掉，严格走计划】（学 PC 端 b3f92d8 的【B】，用户口径原话）
+    #   PC 端用户定：「**也不要去额外点宝库了，严格走计划**」
+    #   ⇒ 雾里（判成"未揭示"）的宝库/商人**一律不点**，只按规划走 ✓
+    #   ⇒ 原因：ratio 抖动导致的"假未揭示"是**识别问题**，
+    #     用"多点几下试试"去掩盖它 = **拿体力赌识别**，而且会插队打乱规划 ✗✗
+    #   ⇒ 正确做法是把 `revealed` 判据修准（v1.35/v1.36 的 ratio 口径已在校准 ✓），
+    #     而不是靠暴力点击兜底 ✓
+    #   想恢复旧行为：设 `MAPBOT_VAULT_PROBE=1` ✓
+    VAULT_PROBE = (os.environ.get('MAPBOT_VAULT_PROBE', '0') or '0') \
+        not in ('0', '', 'no', 'false')
     _probe_px = set()
     try:
-        _probe_px = set(vault_probe_px(c, st))
+        if VAULT_PROBE:
+            _probe_px = set(vault_probe_px(c, st))
         _add = [p for p in _probe_px if p not in buy]
         if _add:
             buy = list(buy) + _add

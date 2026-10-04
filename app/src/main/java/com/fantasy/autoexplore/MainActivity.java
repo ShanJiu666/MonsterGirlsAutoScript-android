@@ -357,6 +357,17 @@ public class MainActivity extends Activity {
         card2.addView(rowC);
         content.addView(card2);
 
+        // ⭐ v1.41 热更新卡（用户 2026-10-03：「发给朋友的怎么搞热更新？」）
+        //   逻辑补丁**不用在这里点** —— 悬浮条一起来就自动查、自动下、重启即生效；
+        //   这张卡主要管**整包**：点一下 → 下载 → 系统安装器弹出 → 点「安装」。
+        LinearLayout card4 = card("更新");
+        LinearLayout rowU = new LinearLayout(this);
+        rowU.setOrientation(LinearLayout.HORIZONTAL);
+        rowU.addView(btn("检查更新（补丁+整包）", BTN_ACCENT, v -> doUpdate("auto")), lp());
+        rowU.addView(btn("只看状态", BTN_NORMAL, v -> doUpdate("check")), lp());
+        card4.addView(rowU);
+        content.addView(card4);
+
         // ══════ 卡片③：调试（**按钮默认关闭**：Prefs.showDebug 默认 false ⇒ 整盒藏起）════════
         LinearLayout card3 = card("调试");
         LinearLayout rowD = new LinearLayout(this);
@@ -750,6 +761,24 @@ public class MainActivity extends Activity {
 
     private void pySelftest() {
         pyCall("端上自检", () -> PyBridge.call("selftest", true));
+    }
+
+    /**
+     * ⭐ v1.41 热更新入口（悬浮条 / 广播 / 这里**同一条代码路径** ⇒ 我 adb 测的就是朋友跑的那条）。
+     *
+     * @param mode {@code auto} = 补丁优先、没补丁就下整包并弹安装 ／ {@code check} = 只查不动
+     * ⚠ 必须后台线程：整包 70MB 下载几十秒，主线程会 ANR ✗
+     */
+    private void doUpdate(String mode) {
+        new Thread(() -> {
+            try {
+                String r = Updater.run(getApplicationContext(), mode);
+                AppLog.i("[更新] " + r);
+            } catch (Throwable t) {
+                AppLog.i("[更新] ⚠ " + t);
+            }
+            ui.post(this::refreshStatus);
+        }, "ui-update").start();
     }
 
     /**

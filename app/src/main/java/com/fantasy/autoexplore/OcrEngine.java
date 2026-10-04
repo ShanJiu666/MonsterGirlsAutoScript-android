@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
@@ -37,6 +38,16 @@ public class OcrEngine {
     public static final int SCALED_H = Math.round(RefMapper.REF_H * OCR_SCALE);   // 1440
 
     private static final int LIMIT_SIDE = 736;
+    /**
+     * ⭐ v1.42：窄带 det 输入的**短边下限**（新口径用；不是 RapidOCR 的 736）。
+     *
+     * <p>旧口径把任何窄带放大到短边 736（band 140px ⇒ 5 倍放大，
+     * det 像素达 4.17M，比整帧 1.15M 还多 3.6 倍 —— 真机 2.33s/次，比整帧还贵一倍多）。
+     * <p>新口径只补到 {@code 320}：够 PP-OCRv4 的 det 检出文字，又比 736 省 57%。
+     * <p>调大 → 更稳但更慢；调小 → 更快但窄带可能漏检（最窄的 140px 带是读体力值的主力，
+     * <b>别低于 256</b>）。
+     */
+    private static final int MIN_SHORT_SIDE = 320;
     private static final float DET_MEAN = 0.5f;
     private static final float DET_STD = 0.5f;
     private static final float DET_THRESH = 0.3f;
@@ -109,6 +120,43 @@ public class OcrEngine {
     }
 
     /**
+     * ⭐⭐ v1.42【det 缩放口径】：{@code "max"}（默认，长边缩）or {@code "min"}（旧，短边放）。
+     *
+     * <p><b>为什么默认改成 max</b>：旧口径复刻 rapidocr 的 {@code limit_type=min} ——
+     * <b>短边不足 736 就放大回 736</b>，于是「裁得越窄、det 算得越多」：
+     * 真机实测读一条 140px 的体力条，det 像素（2.92M）比整帧（1.15M）<b>还多一倍半</b>，
+     * 单次 2.33s —— 比识别整幅棋盘（0.98s）贵一倍多 ✗
+     *
+     * <p><b>识别质量不变</b>：同一张图、同一模型，只是像素更少、文字等效更大（原来被放大，
+     * 现在 1:1 ⇒ 反而更清晰）。整帧两条口径完全相同 ⇒ 行为零变化。
+     *
+     * <p><b>回滚</b>：系统属性 {@code -DOcrLimitMode=min} 或环境变量
+     * {@code MGAS_OCR_LIMIT_MODE=min} 恢复旧口径。
+     */
+    public static String limitMode() {
+        String v = null;
+        try {
+            // ⚠ 用 java.lang.System 而不是 android.os.System：
+            //   `android.os.System.getProperty` 在部分设备/SDK 桩上不可用，
+            //   `java.lang.System.getProperty` 是标准的、端上一定能拿到 ✓
+            v = java.lang.System.getProperty("OcrLimitMode");
+        } catch (Throwable ignored) {
+            // 某些宿主（如 pythonw / 沙箱）会抛 ⇒ 忽略，走环境变量
+        }
+        if (v == null) {
+            try {
+                v = System.getenv("MGAS_OCR_LIMIT_MODE");
+            } catch (Throwable ignored) {
+                v = null;
+            }
+        }
+        if (v != null && "min".equals(v.trim().toLowerCase(Locale.US))) {
+            return "min";
+        }
+        return "max";
+    }
+
+    /**
      * ⭐ v0.61：**只识别参考帧的 [y0ref, y1ref) 这一段**（真裁图，不是识别后过滤）。
      *
      * <p>为什么必须裁：端侧 rec 占 OCR 总时间的 ~81%（累计 203.7s vs det 43.5s），而 rec 的
@@ -144,11 +192,38 @@ public class OcrEngine {
             int[] scaledPx = new int[sw * sh];
             scaled.getPixels(scaledPx, 0, sw, 0, 0, sw, sh);
 
-            // ② det 预处理（复刻 rapidocr 的 limit_type=min + /32 对齐）：
-            //    整帧：min(810,1440)=810 > 736 ⇒ ratio=1 ⇒ resize_w=round(810/32)*32=800、resize_h=1440 ✓
-            //    矮带：min 边 < 736 ⇒ ratio = 736/min（这就是"裁图反而更慢"的成因）
-            float mn = Math.min(sw, sh);
-            float ratio = mn < LIMIT_SIDE ? (LIMIT_SIDE / mn) : 1f;
+            // ② det 预处理（/32 对齐；**缩放口径见 DET_LIMIT_MODE**）
+            //
+            // ⭐⭐ v1.42【只给「窄带」去掉放大惩罚】—— 真机实测（Redmi/1280×2772）
+            //   整局 363 秒里 **OCR 占 185 秒（51%）**、109 次、平均 1.70s/次。
+            //   旧口径（复刻 rapidocr 的 `limit_type=min`）**短边不足 736 就放大回 736**
+            //   ⇒ 「裁得越窄、det 算得越多」：
+            //     band 0~140（读体力条）⇒ det 5664×736 = **4.17M 像素**（整帧的 3.6 倍）✗
+            //   真机耗时完全印证：`enter_stam`(140px) **2.33s/次**，
+            //     比占整帧 75.6% 像素的 `battle`（0.98s/次）**还贵一倍多** ✗✗
+            //
+            // ⚠⚠ **不能简单换成 `limit_type=max`**（我第一版就犯了这个错）：
+            //   max 的语义是「**长边**超 736 就缩小」⇒ 整帧 mx=1440 ⇒ 会被缩到
+            //   416×736，**整帧识别也降近 2 倍** ⇒ 识别质量受损 ✗✗
+            //   （而整帧/宽带正是 `round_full` 等大头，占 OCR 次数的相当一部分）
+            //
+            // ⇒ 现在的口径（`banded`，默认）：
+            //     · **短边已经 ≥ 736** ⇒ 什么都不做（ratio=1）——**整帧与宽带逐像素不变** ✓
+            //     · **短边 < 736（窄带）** ⇒ **按原尺寸**进 det（ratio=1），不再放大
+            //       ⇒ 代价是文字在 det 输入里偏小 ⇒ 用**下限保护**兜底：
+            //         短边至少放大到 320（够 det 检出文字，不会退化成"啥也认不出"）✓
+            //   ⇒ 影响面**只有窄带**，整帧/中带/宽带**完全零变化** ✓
+            // 回滚：系统属性 `-DOcrLimitMode=min` 或环境变量 `MGAS_OCR_LIMIT_MODE=min`
+            //       ⇒ 恢复旧口径（短边放大到 736）。
+            float ratio;
+            if ("min".equals(limitMode())) {
+                float mn = Math.min(sw, sh);
+                ratio = mn < LIMIT_SIDE ? (LIMIT_SIDE / mn) : 1f;
+            } else {
+                // ⭐ 只在「短边不足」时才按比例补到 MIN_SHORT_SIDE，**绝不缩小**
+                float mn = Math.min(sw, sh);
+                ratio = mn < MIN_SHORT_SIDE ? (MIN_SHORT_SIDE / mn) : 1f;
+            }
             int detW = Math.round(Math.round(sw * ratio / 32f)) * 32;
             int detH = Math.round(Math.round(sh * ratio / 32f)) * 32;
             Bitmap detBmp = Bitmap.createScaledBitmap(scaled, detW, detH, true);

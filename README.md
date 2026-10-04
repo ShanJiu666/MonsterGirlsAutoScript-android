@@ -2816,6 +2816,112 @@ python tools/pack_apk.py --no-build # APK 已经有了，只改名
 > 💡 这条同时解释了前两台机器「偏暗机型标记近失」（boss 形状 0.741 / 配色 0.841）：
 > 同一族取帧通道/色彩问题，只是宽高比不同、补位方式不同，严重程度不一样 ✓
 
+### 6.57 ⭐⭐⭐ v1.41 两层热更新：APK 发给朋友**之后**怎么更新（2026-10-03）
+
+**用户口径**（原话）：「发给朋友的怎么搞热更新？」
+
+**先答最容易被误解的一点**：更新包放公开 Gitee 仓库 ⇒ **朋友不用打开 Gitee、不用注册、不用登录**。
+那只是我放文件的"网盘"，App 自己发 HTTP 请求去拉（`Updater.MANIFEST_URL`）。
+
+#### 两层，各管各的
+
+| 层 | 换什么 | 体积 | 朋友要做什么 |
+|---|---|---|---|
+| **逻辑热更** | `app/src/main/python/*.py`（12~14 个模块，业务逻辑全在这） | **300 KB** | **什么都不用做**：悬浮条一起来就后台下载 → 下次冷启动自动生效 |
+| **APK 自更新** | Java 壳 / 权限 / 依赖 / 资源包 | ~71 MB | 进界面点一次「检查更新」→ 系统安装器弹一下 → 点「安装」 |
+
+实测体积：14 个 `.py` 压完 **300.5 KB**（`hot-141-8a8a040c.zip`）——
+所以日常改识别逻辑的代价从"发 71MB + 朋友重装"降到"2 秒静默下载"。
+
+#### 更新源（公开仓库 `geng-haojie/MGAS-update`）
+
+```
+manifest.json            ← App 拉这个判断有没有新版（raw 直读）
+hot/hot-<vc>-<sha8>.zip  ← 逻辑补丁（raw 直读；只留最近 5 个，防仓库配额爆）
+release 附件 v<x.y>      ← 整包 APK（放 releases/，**不占**仓库 1GB 配额）
+```
+
+**2026-10-03 匿名实测**（不带 token、不带 Referer）：
+
+| 通道 | 结果 |
+|---|---|
+| `raw/master/manifest.json` | `200` ✓ |
+| `releases/download/v0-test/xxx` | `200` ✓ |
+| 建仓库时 API 传 `private=false` | ⚠ **Gitee 实际建成 private=True** ⇒ 必须再 PATCH 一次 `private=false` 才是公开 |
+
+#### 我这边：一条命令
+
+```bash
+python tools/release.py --hot-only --notes "修 XX 误判"   # 日常（不构建，秒级）
+python tools/release.py --notes "壳改动"                  # 改 Java 时（跑 gradle）
+python tools/release.py --hot-only --dry-run              # 只看要发什么
+```
+
+- 版本号**现场读** `app/build.gradle`（不写死）；补丁 id = `hot-<versionCode>-<zip sha8>`
+- 只发补丁时**保留 manifest 里的 app 段**，反之亦然 ⇒ 不会因为"只发一半"让另一端以为没更新
+- 令牌从 `GITEE_TOKEN` 或 `~/.gitee_token` 读，⚠ **绝不进仓库**（`.gitignore` 也加了防呆条目）
+
+#### ⭐⭐ 回滚：这一层的正确性比"能更新"更重要
+
+Python 补丁有语法错/import 失败会让**整个脚本不可用**，而朋友**不会看日志、更不会报给我** ⇒
+必须有自动兜底。状态机在 `filesDir/hot/state.json`：
+
+```
+① 下载 → 解到 hot/pending/（写 meta.json）
+② **下次冷启动** bootRecover()：pending → active，state{active, confirmed=false}
+③ Python 起来后 onPythonStarted() 调 explore_android.hot_selftest()
+     · 通过  → confirmed=true（此后不再自检）
+     · 不通过 → **当场**把 active 挪到 hot/bad/（留证据不删）→ sys.path 那条失效
+                → 回落 APK 内置版 → **卸掉已加载的补丁模块** → 再自检一次
+④ 若上次激活后从未确认过（激活完就被杀），下次启动 bootRecover() 直接判坏包回滚
+```
+
+两个容易写错的点，都已在代码里钉住：
+- **`hot_selftest()` 必须真的 import 一遍**（连锁 `mapbot`/`explore_loop`/`cv2`）——
+  "文件在不在"永远为真，那种检查等于没检查（《错误教训》同族问题）
+- **回滚后要卸掉已加载的补丁模块**（`hot_reset_modules()`）——
+  否则"补丁里的 `mapbot` 加载成功、`explore_loop` 失败"会留下**一半补丁一半内置**的混血状态，比全内置难查得多
+- 同一个坏包 id 进 `rolledBack` ⇒ **不会再自动重装**（否则每次启动都下 300KB 再回滚）
+
+#### 为什么没往悬浮条上加「更新」按钮
+
+悬浮条的按钮行有**严格高度预算**（`chip()` 注释：按钮行高度必须精确可控，否则换密度就顶穿 1722），
+现有 6 颗按钮是用户逐轮验收过的 ⇒ 加第 7 颗有真实布局回归风险，而**逻辑补丁根本不需要按钮**（全自动）。
+⇒ 决定：悬浮条**只加自动检查**（`Updater.run(ctx,"bg")`，整包只提示不带下载），
+手动入口放界面「更新」卡（`MainActivity.doUpdate`）＋ adb 广播。
+
+#### 验证（adb，**跑的就是朋友那条代码路径**）
+
+```bash
+adb shell am broadcast -n com.fantasy.autoexplore/.CommandReceiver \
+     -a com.fantasy.autoexplore.CMD --es cmd update --es mode check   # 只查
+     ... --es cmd update --es mode hot     # 下补丁（重启后生效）
+     ... --es cmd update --es mode apk     # 下整包 + 弹系统安装器
+     ... --es cmd update_status            # 热更状态（补丁 id / 待激活 / 上次回滚）
+```
+
+#### 踩过的坑（写在这里省下一轮）
+
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| **Gitee `raw/` 有强缓存** | 刚 push 的 `manifest.json`，读回来还是旧内容（连加 `?t=<时间戳>` 破缓存**都无效**）⇒ 表现成"我发了新版，端上永远说已是最新" ✗✗；发版脚本还会因此把**另一段覆盖成 null** | 清单**必须走 `api/v5/.../contents/`**（实时）；raw 只作回落。⚠ 补丁/APK 走 raw 没事 —— 文件名带内容 sha，内容一变名字就变，天然免疫缓存 |
+| **API 建 Gitee 仓库给 `private=false`** | 实际建成私有，匿名 raw 403 `Access denied` | 建完再 PATCH 一次 `private=false` |
+| **MuMu 的 `PackageInstaller.Session` 是坏的** | createSession/openWrite/fsync/commit **全不抛异常**，回调却 `status=-1/msg=null`，系统日志里连一条 PackageInstaller 都没有、界面不弹；同机 `adb install` 同一个包却成功 | 弃用 Session，改 **MediaStore 写 `Download/autoexplore/` + `ACTION_VIEW`**（= 文件管理器点 APK 的标准路径），提示里带文件路径兜底 |
+| **MuMu 把 APK 安装 intent 劫持到自家商店** | `ACTION_VIEW` 后前台是 `com.mumu.store` 而不是安装器 | 模拟器上**验证不了安装成功路径** ⇒ 必须真机首测（见下） |
+| PowerShell 5.1 上传附件 | `Invoke-RestMethod` **没有 `-Form`** 参数 | 用 `curl.exe`，或 Python 手写 multipart（`release.py` 走后者） |
+| `pack_apk.py` 在 GBK 控制台**构建成功后仍 exit 1** | 末尾 `print('…✓…')` 抛 `UnicodeEncodeError` ⇒ `release.py` 误判"打包失败" | 脚本内 `sys.stdout.reconfigure(encoding='utf-8')`，调用方另传 `PYTHONIOENCODING=utf-8`（双保险） |
+| `manifest` 只更新一段 | 另一段丢失 ⇒ 那一层永远更不了 | 发版脚本先读现有 manifest 再合并；`--manifest-only` 用于只改清单（不必重传 71MB） |
+| 手工造坏包验证时用**旧快照**恢复 | 把刚发的完整清单覆盖回"只有 hot 段"的旧版 | 恢复**要用 `release.py --manifest-only` 重新生成**，别用旧快照 |
+
+#### ⚠ 尚未实测的一项（如实记下）
+
+**"安装成功"这最后一跳没有在真机上验证过**：手头只有两台 MuMu（x86_64/Android 12），
+其中安装 UI 被模拟器自家商店接管 ⇒ 只能验证到"**下载 71MB + sha256 校验通过 + 把包写进
+`Download/autoexplore/` + 拉起安装 intent**"。
+⇒ 第一次给朋友之前，**用一台真机跑一遍首测清单**：
+① 装新包 → ② 进「更新」卡点「检查更新」→ ③ 看到"安装界面应弹出" → ④ 点系统「安装」→
+⑤ 确认版本号变了、数据（截图授权除外）没丢。
+
 
 
 

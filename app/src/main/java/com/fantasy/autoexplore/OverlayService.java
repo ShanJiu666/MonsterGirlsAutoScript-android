@@ -424,6 +424,24 @@ public class OverlayService extends Service {
             }
         }
         ui.post(poll);
+
+        // ⭐⭐ v1.41 热更【自动】检查（用户 2026-10-03：「发给朋友的怎么搞热更新？」）
+        //   朋友**不该有任何操作** ⇒ 悬浮条一起来就在后台拉一次清单：
+        //     · 有逻辑补丁 → 自动下（1~2MB），日志提示"重启生效"
+        //       （重启后由 Updater.bootRecover 激活 + onPythonStarted 自检，坏包自动回滚 ✓）
+        //     · 有整包     → **只提示**，不自动下 70MB（见 Updater.run 的 "bg" 分支）
+        //   ⚠ 全程兜异常：更新这件事**绝不能影响悬浮条本身**（它是游戏里唯一的停止入口）。
+        //   ⚠ 网络慢/断网时这里会挂在后台线程上，不阻塞任何 UI ✓
+        new Thread(() -> {
+            try {
+                String r = Updater.run(getApplicationContext(), "bg");
+                if (r != null && !r.isEmpty()) {
+                    AppLog.i("› " + r);
+                }
+            } catch (Throwable t) {
+                AppLog.i("› 自动检查更新失败（不影响使用）：" + t);
+            }
+        }, "ovl-update").start();
     }
 
     @Override

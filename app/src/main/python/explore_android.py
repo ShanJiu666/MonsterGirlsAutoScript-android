@@ -61,7 +61,16 @@ def _bootstrap():
     os.environ['MAPBOT_RUNS'] = runs
     os.environ['MAPBOT_DT'] = os.path.join(root, 'server_datatable.json')
     os.environ.setdefault('MAPBOT_TPL_FRAMES', '3')     # 包里只有前 3 帧，保持一致
-    _BOOTED.update(env=True, root=root, runs=runs)
+    # ⭐ v1.41 热更：把"当前生效的补丁目录"记进环境变量（**只用于诊断/取证**）。
+    #   ⚠ 真正"用补丁覆盖内置模块"不靠这里 —— 靠 Java 侧把它插到 sys.path[0]
+    #     （PyBridge.injectHotPath）。等这里能读到它时，import 早就结束了。
+    try:
+        hot = str(dev.hotDir() or '')
+    except Exception:       # noqa: BLE001
+        hot = ''
+    if hot:
+        os.environ['MAPBOT_HOT'] = hot
+    _BOOTED.update(env=True, root=root, runs=runs, hot=hot)
     _install_log_tee()
 
 
@@ -113,6 +122,7 @@ def info():
     return {
         'root': _BOOTED['root'],
         'runs': _BOOTED['runs'],
+        'hot': _BOOTED.get('hot', ''),
         'dt': _mb.DT,
         'dt_exists': os.path.exists(_mb.DT),
         'tpl': _mb.TPL,
@@ -120,6 +130,65 @@ def info():
         'unit_codes': sorted(os.listdir(os.path.join(_mb.TPL, 'unit'))) if os.path.isdir(os.path.join(_mb.TPL, 'unit')) else [],
         'save_first': os.environ.get('MAPBOT_SAVE_FIRST', '1') != '0',
     }
+
+
+# ───────────────────────── v1.41 热更新 ─────────────────────────
+
+def hot_selftest():
+    """⭐⭐ v1.41 热更自检：**只做 import + 资源可见性**，不截图、不 OCR。
+
+    为什么必须"真的 import 一遍"，而不是看看文件在不在：
+      补丁坏掉的形态几乎全是**语法错 / 缺模块 / 版本不兼容**，这些只有 import 才暴露；
+      而"文件在不在"永远为真 ⇒ 那种检查等于没有检查（本项目《错误教训》同族问题：
+      把没验证过的东西当验证过）。
+
+    跑通即证明：sys.path 上那份补丁（若有）确实能被 CPython 加载 ✓
+    ⇒ Java 侧 `Updater.onPythonStarted` 据此决定「确认生效」还是「自动回滚」。
+
+    ⚠ 约定：**绝不抛异常**（Java 侧只认返回值前缀）：
+      成功 `'ok:...'` ／ 失败 `'err:<异常类型>: <信息>'`
+    """
+    try:
+        _bootstrap()
+        t0 = time.time()
+        import mapbot as _mb               # noqa: F401
+        import explore_loop as _el         # noqa: F401 ← 连锁 import 全部逻辑模块
+        hot = os.environ.get('MAPBOT_HOT', '')
+        return 'ok: %.2fs loop=%s tpl=%s dt=%s hot=%s' % (
+            time.time() - t0,
+            os.path.basename(str(getattr(_el, '__file__', '?'))),
+            os.path.isdir(_mb.TPL), os.path.exists(_mb.DT),
+            hot or '(内置)')
+    except BaseException as e:             # noqa: BLE001
+        return 'err:%s: %s' % (type(e).__name__, e)
+
+
+def hot_reset_modules():
+    """把**从热更目录加载的**模块从 sys.modules 里卸掉（回滚后必须调）。
+
+    ⚠ 不卸的后果：补丁里 `mapbot` 加载成功、`explore_loop` 失败 ⇒ 回滚后 mapbot 仍是补丁那份，
+      变成"一半补丁一半内置"的混血状态 —— 行为既不是补丁也不是内置，极难排查。
+
+    返回：卸下的模块数
+    """
+    hot = os.environ.get('MAPBOT_HOT', '')
+    n = 0
+    if hot:
+        pre = os.path.abspath(hot) + os.sep
+        for name, mod in list(sys.modules.items()):
+            f = getattr(mod, '__file__', None)
+            if not f:
+                continue
+            try:
+                if os.path.abspath(str(f)).startswith(pre):
+                    del sys.modules[name]
+                    n += 1
+            except Exception:              # noqa: BLE001
+                pass
+    # 环境变量/缓存同清：它现在指向一个已经不存在（或已回滚）的目录，留着只会误导诊断
+    os.environ.pop('MAPBOT_HOT', None)
+    _BOOTED['hot'] = ''
+    return n
 
 
 # ───────────────────────────── 自检 ─────────────────────────────
