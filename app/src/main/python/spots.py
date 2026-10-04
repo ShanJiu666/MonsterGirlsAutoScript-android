@@ -59,7 +59,56 @@ INNER = 3.0          # 裁掉设计尺寸的外圈像素（透明圆角，避免
 #      沙滩 139.5/201=0.694 ✓ ／ 草原 139.5/183=0.762 ✗ 越过 0.75 被误判成已揭示）
 RATIO_DEN = (os.environ.get('MAPBOT_RATIO_DEN', 'map') or 'map').strip().lower()
 
+# ⭐⭐⭐ v1.60【「已揭示」判定改**两趟相对法** —— 照抄 PC `mapbot_pc/spots.py:705-736`】
+#   用户口径：「**照抄就行**」⇒ 结构逐字抄 PC；**只有一处数值是手机端标定的**（见下 ⚠）。
+#
+#   ── PC 原文（`mapbot_pc/spots.py:705-736`，摘要，逐字见 PC 仓）────────────────
+#     # ── ⭐⭐⭐ 2026-10-02「已揭示」改**相对本帧基准**判定（两趟法）──────────
+#     #   根因：`ratio >= 0.75` 是**绝对阈值**，而那一帧的 ratio 分布是
+#     #       0.70 0.72 0.70 0.71 0.65 0.71 0.65   ← 第4行整排已揭示都只有 0.70~0.72
+#     #   ⇒ 改用**本帧自身的雾格基准**（10 分位）×1.06，并保底 0.66：
+#     #       雾格恒在基准附近 ⇒ 判为未揭示；明显高于基准 ⇒ 已揭示 ✓
+#     #   ⚠ **必须两趟**（先收齐全盘 ratio 再判定）—— 逐格算时拿不到分布。
+#     _base = 本帧 ratio 的 **10 分位**        # p10
+#     _rev  = max(0.66, _base * 1.06)          # 地板 0.66、系数 1.06
+#     revealed ⟺ ratio >= _rev
+#
+#   ## ⚠⚠ 手机端唯一的分叉：**地板不是 0.66，是 0.80**（有实测，不是口味）
+#     PC 的 0.66 之所以安全，是因为 PC 的 `ratio` 分母 = **该格自己的模板亮度**
+#     ⇒ 雾格恒定 ≈0.65（项目 §5/§7 实测），雾带**很窄**（p10≈0.63 ⇒ ×1.06=0.67 就盖住整条雾带）。
+#     手机端 v1.35 起分母 = **本图模板亮度中位**（治"换图就废"）⇒ 雾带按**格子美术亮度**
+#     摊开（真机草原帧实测 0.685~0.761，宽达 p10 的 **1.26 倍**）⇒ PC 的 ×1.06 远盖不住。
+#     实测（`_tmpman/probe_v160_reveal.py`，6 张真机帧逐格回代；草原两帧有人工标注真值）：
+#
+#       | 口径 | 草原帧A(35格,真值3格) | 草原帧B(35格,真值3格) |
+#       |---|---|---|
+#       | 地板 0.66（PC 逐字） | **FP 28 格**（雾格 0.685~0.735 全被判已揭示）✗✗ | **FP 23 格** ✗✗ |
+#       | 地板 0.80（本行默认） | FP 0 / FN 0 ✓ | FP 0 / FN 0 ✓ |
+#
+#     ⇒ 0.66 在手机端**不是保守/宽松之别，是直接坏掉**（28/35 格雾格被当已揭示 ⇒
+#       下游 `_infer_chain_consumed` 会把整盘雾格反推成"已消耗"⇒ 模型空掉 ✗✗）
+#     ⇒ 默认取 **0.80**（= v1.36 两帧真机标定的干净带中段，见下）——
+#       **相对部分（p10×1.06）照样生效**：偏亮帧的 p10 高 ⇒ 阈值被抬起 ⇒ 不会整盘误判 ✓
+#     ⚠ 想现场复现 PC 逐字口径做 A/B：`MAPBOT_REVEAL_FLOOR=0.66`（**只用于对拍取证**，
+#        别拿去跑真机 ✗ —— 上表就是它的实测后果）
+#
+#   ## 手机端真机帧回代（同一探针，逐格）
+#     · 广袤草原 A/B：p10=0.606/0.663 ⇒ 相对部分算出 0.642/0.702 ⇒ **都低于地板**
+#       ⇒ 判定 = 地板 0.80 ⇒ 与 v1.36 行为一致，**零回归** ✓
+#     · realme RMX3800（偏暗机型，雾格 0.361~0.472）：p10=0.386 ⇒ 相对部分 0.409
+#       ⇒ 地板 0.80 仍然兜住（不然会整盘判已揭示 ✗）✓
+#     ⇒ **相对部分的价值**：当整盘偏亮（雾格自己就到 0.85+）时，绝对阈值会整盘误判；
+#       相对法跟着本帧抬高 ⇒ 这才是 PC 那条修法的本意 ✓
+REVEAL_REL_Q = float(os.environ.get('MAPBOT_REVEAL_REL_Q', '0.10') or 0.10)     # 照抄 PC：10 分位
+REVEAL_REL_K = float(os.environ.get('MAPBOT_REVEAL_REL_K', '1.06') or 1.06)     # 照抄 PC：×1.06
+# ⚠ 唯一的分叉：地板。PC = 0.66；手机端 = 0.80（实测见上表，可用 MAPBOT_REVEAL_FLOOR 覆盖）
+REVEAL_REL_FLOOR = float(os.environ.get('MAPBOT_REVEAL_FLOOR', '0.80') or 0.80)
+
 # ⭐⭐ v1.36【「已揭示」阈值 + 双证据兜底】—— 0.75 踩线，0.80 才站得稳
+#   ⚠ **v1.60 起它的角色变了**：不再是"逐格主判据"，而是
+#     ① **两趟相对法的地板**（`REVEAL_REL_FLOOR` 的默认值就是它这个 0.80）；
+#     ② **两趟法抛异常时的兜底**（`REVEAL_RATIO_MIN`，正常路径走不到 ✓）
+#   下面这段标定结论（干净带 0.78~0.85 ⇒ 取 0.80）**原样有效**，是上面那个 0.80 的依据 ✓
 #   ## 为什么不能再用 0.75（2026-10-02 两帧真机实测，Redmi/1280×2772，广袤草原）
 #   同一台机、同一张图、同一套代码，两帧的分布**不一样**：
 #     帧A（12:45 诊断帧）：雾格 ratio 上界 **0.762** ← 越过 0.75 ⇒ 1 格误判成已揭示
@@ -82,6 +131,9 @@ RATIO_DEN = (os.environ.get('MAPBOT_RATIO_DEN', 'map') or 'map').strip().lower()
 #   ⇒ 规则：`已揭示 = (ratio ≥ 0.80) 或 (ratio ≥ DUAL_LO 且 剪影 < FOG_SIL_MIN)`
 #   ⚠ 默认仍走**纯亮度**（`single`）：两帧样本不足以证明双证据在所有盘型都更稳，
 #     先积累真机反馈再切（`MAPBOT_REVEAL_EVIDENCE=dual` 现场可开）✓
+#   ⚠⚠ v1.60：上面这条规则里的 `ratio ≥ 0.80` 已**换成本帧相对法**（见文件顶部 v1.60 段），
+#     `REVEAL_RATIO_MIN` 从此只当**两趟法抛异常时的兜底**（正常路径走不到它 ✓）——
+#     值**仍是 0.80**（v1.36 真机标定），门禁仍守着它，别当成主判据又改回去 ✗
 REVEAL_RATIO_MIN = float(os.environ.get('MAPBOT_REVEAL_RATIO_MIN', '0.80') or 0.80)
 REVEAL_EVIDENCE = (os.environ.get('MAPBOT_REVEAL_EVIDENCE', 'single') or 'single').strip().lower()
 # 双证据里的"低置信亮度带"：在这个区间里改用剪影裁决（实测干净带下沿 0.78）
@@ -679,26 +731,22 @@ class Board:
                     _sil = fog_silhouette(img, r, c, self)
                 except Exception:       # noqa: BLE001
                     _sil = None
-            # ⭐⭐⭐ v1.36「已揭示」判定：**0.80**（不是 0.75）
+            # ⭐⭐⭐ v1.36/v1.60「已揭示」判定的**来历**（v1.60 起这段的"绝对 0.80"已换成相对法）：
             #   2026-09-27 定的 0.75 是按"雾≈0.65 / 已揭示≈1.0"的空档拍的；
             #   2026-10-02 两帧真机实测（Redmi/1280×2772 广袤草原，70 格）：
             #     已揭示最低 **0.855**、雾格最高 **0.761** ⇒ 不重叠，干净带 **0.78~0.85**
             #     而 **0.75 离雾格上界只差 0.011** ⇒ 雾格分布一漂就踩线 ⇒ 实测有 1 格被咬 ✗
-            #   ⇒ 移到干净带中段 0.80（两边都留余量 ✓）；
-            #     ⚠ 旧值 0.85 太高会把 0.80 的正常偏暗格误判成未揭示，别退回去 ✗
-            _rev = ratio >= REVEAL_RATIO_MIN
-            if (not _rev) and REVEAL_EVIDENCE == 'dual' and _sil is not None \
-                    and ratio >= DUAL_BAND_LO:
-                # 双证据：亮度处在低置信带 ⇒ 交给剪影裁决
-                #   剪影小 = 雾下**平坦空地** ⇒ 空地本来没东西，不该被雾压住 ⇒ 算已揭示 ✓
-                #   剪影大 = 雾下**有东西** ⇒ 必然还没揭示（东西还盖在雾里）✓
-                _rev = bool(_sil < FOG_SIL_MIN)
-                out_k_ev = 'dual'
-            else:
-                out_k_ev = 'luma'
+            #   ⇒ 当时移到干净带中段 0.80 —— ⚠ **v1.60 起它不是主判据了**（见下）：
+            #     绝对阈值治不了"**部分揭开的盘 / 整盘偏亮偏暗的机型**"（PC 原文那个病）
+            #     ⇒ 改**本帧相对法** ✓
+            # ⭐⭐⭐ v1.60【揭示判定 = **两趟相对法**】—— **照抄 PC** `mapbot_pc/spots.py:722-736`
+            #   判据：`revealed ⟺ ratio ≥ max(REVEAL_REL_FLOOR, 第10分位 × REVEAL_REL_K)`
+            #   ⚠ 这里**只是占位**（`revealed=False`）：真实判定在下面**第二趟**里统一做
+            #     （逐格算时拿不到全盘分布 ⇒ PC 原文「**必须两趟**」✓）
+            #   ⚠ `rev_evidence`：'rel'（相对法）/'fallback'（异常兜底）/'dual'（剪影双证据）
             out[k] = {'sid': eff, 'name': (rows.get(eff) or {}).get('Name'),
                       'score': round(float(v), 3), 'ratio': round(ratio, 3),
-                      'revealed': _rev, 'rev_evidence': out_k_ev,
+                      'revealed': False, 'rev_evidence': None,
                       'anchor': anc, 'cells': cells, 'size': size,
                       'block_score': (round(blk['score'], 3) if blk else None),
                       'top': [(round(float(s), 3), s2, anch)
@@ -718,6 +766,47 @@ class Board:
                 #   （雾格上的模板名字很不可信：真机这盘中位分只有 0.276，平坦格还被
                 #    猜成「岩石/巨大木桩」✗ ⇒ 雾格的"是不是空地"以**剪影实测**为准 ✓）
                 out[k]['fog_flat'] = bool(sil < FOG_SIL_MIN)
+        # ── ⭐⭐⭐ v1.60「已揭示」= **两趟相对法**（照抄 PC `mapbot_pc/spots.py:722-736`）──
+        #   第二趟：先收齐全盘 ratio ⇒ 用**本帧自己的雾格基准**判每一格
+        #     `_base` = 本帧 ratio 的 **10 分位**（照抄 PC；雾格恒在基准附近）
+        #     `_thr`  = `max(REVEAL_REL_FLOOR, _base × REVEAL_REL_K)`
+        #   ⚠⚠ **手机端地板是 0.80，不是 PC 的 0.66**（实测依据见文件顶部 v1.60 段：
+        #     0.66 在真机草原帧上会把 **28/35 格雾格**判成已揭示 ✗✗）
+        #   ⚠ PC 在第一个 `if` 里还带 `isinstance(k, tuple)` 过滤（`out` 混进非格键时清掉）——
+        #     手机端 `state()` 的键**恒为 (r,c)**（`scores()` 只投格键）⇒ 那条清理分支
+        #     在这里是死代码，**不抄**（抄了反而多一个假分支）✓
+        try:
+            _rs = sorted(float(v.get('ratio') or 0.0) for v in out.values())
+            if _rs:
+                _base = _rs[max(0, int(len(_rs) * REVEAL_REL_Q) - 1)]
+                _thr = max(REVEAL_REL_FLOOR, _base * REVEAL_REL_K)
+                for _v2 in out.values():
+                    _v2['revealed'] = float(_v2.get('ratio') or 0) >= _thr
+                    _v2['rev_evidence'] = 'rel'
+            else:
+                # 空帧（一格都没认出来）：保持 False ⇒ 不能凭空说"已揭示" ✓
+                for _v2 in out.values():
+                    _v2['rev_evidence'] = 'rel'
+        except Exception:                                   # noqa: BLE001
+            # 兜底（PC 原文：`_v['revealed'] = ratio >= 0.75`）——
+            #   手机端用 `REVEAL_RATIO_MIN`（0.80，v1.36 真机标定）当兜底，理由见顶部注释 ✓
+            for _v2 in out.values():
+                _v2['revealed'] = (float(_v2.get('ratio') or 0)
+                                   >= REVEAL_RATIO_MIN)
+                _v2['rev_evidence'] = 'fallback'
+        # ⭐⭐ v1.36 的**双证据**（`MAPBOT_REVEAL_EVIDENCE=dual`，默认 `single` 不开）：
+        #   只对"相对法判未揭示、但亮度落在低置信带"的格**改用剪影裁决** ——
+        #   剪影小 = 雾下平坦空地 ⇒ 空地本来没东西，不该被雾压住 ⇒ 算已揭示 ✓
+        #   剪影大 = 雾下有东西 ⇒ 必然还没揭示（东西还盖在雾里）✓
+        #   ⚠ 剪影只作**否决/补救**，不能单独判已揭示（已揭示格剪影与雾格重叠，见顶部）✓
+        if REVEAL_EVIDENCE == 'dual':
+            for _v2 in out.values():
+                _rn = float(_v2.get('ratio') or 0)
+                _sn = _v2.get('fog_sil')
+                if (not _v2.get('revealed')) and _sn is not None \
+                        and _rn >= DUAL_BAND_LO:
+                    _v2['revealed'] = bool(_sn < FOG_SIL_MIN)
+                    _v2['rev_evidence'] = 'dual'
         return out
 
     # ---------- 紫/橙探索大块（2026-09-26 新） ----------

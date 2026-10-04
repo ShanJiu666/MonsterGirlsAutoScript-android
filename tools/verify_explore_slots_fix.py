@@ -2076,10 +2076,16 @@ try:
     _sp21 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py'),
                  encoding='utf-8').read()
     # ⚠ v1.36：不再是两处各写 0.75，而是**单一来源**（spots 定、explore_loop 引）
-    check('v1.21 ② "已揭示"口径与 spots 的 revealed **同源**（单一来源 ✓）',
+    # ⚠ v1.60：`spots` 的逐格判据换成**两趟相对法** ⇒ 这里不再断言 `ratio >= REVEAL_RATIO_MIN`
+    #   那句（它现在是**异常兜底**分支），改断言"兜底还在 + explore_loop 仍是引用而非写死" ✓
+    check('v1.21 ② "已揭示"口径与 spots 的 revealed **同源**（单一来源 ✓；'
+          'v1.60 起 spots 走两趟相对法，0.80 降级为**异常兜底** ⇒ 断言跟着改口径）',
           'REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN' in _src21
-          and 'REVEAL_RATIO_MIN = 0.75' not in _src21
-          and 'ratio >= REVEAL_RATIO_MIN' in _sp21
+          # ⚠ v1.60：`_cells_for_model` 的注释里**抄了 PC 原文**（"`REVEAL_RATIO_MIN = 0.75`"）
+          #   ⇒ 子串判定会把注释当代码（假红 ✗）⇒ 改判"**行首赋值**里没有 0.75" ✓
+          and not _re.search(r'(?m)^\s*REVEAL_RATIO_MIN\s*=\s*0\.75\s*$', _src21)
+          and 'REVEAL_RATIO_MIN = float(os.environ.get(' in _sp21
+          and 'REVEAL_REL_FLOOR' in _sp21
           and '_r >= REVEAL_RATIO_MIN' in _src21)
     check('v1.21 ③ 系数 = 实测缝中点 0.42（雾格 0.487~0.61 vs 真面板 0.25~0.35）',
           'DIM_RATIO_MAX = 0.42' in _src21
@@ -3466,7 +3472,14 @@ try:
           'MAPBOT_REVEAL_RATIO_MIN' in _sp36src and "'0.80'" in _sp36src)
     check('v1.36 ② 阈值**在 spots 定、explore_loop 引用**（单一来源，不两处各写 ✗）',
           'REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN' in _el36_src
-          and 'REVEAL_RATIO_MIN = 0.75' not in _el36_src)
+          # ⚠ v1.60：注释里**抄了 PC 的原文**（"…`REVEAL_RATIO_MIN = 0.75`"）⇒ 不能用
+          #   子串判定（会把注释当代码 ⇒ 假红 ✗）改用**行首赋值**判定 ✓
+          and not _re.search(r'(?m)^\s*REVEAL_RATIO_MIN\s*=\s*0\.75\s*$', _el36_src))
+    check('v1.36 ⑤ 剪影**只作否决**不作通过（已揭示格剪影与雾格重叠 ⇒ 不能单独判 ✓）',
+          # ⚠ v1.60：`state()` 的第二趟把那一段的变量名从 `_sil` 改成 `_sn`（避免与逐格的
+          #   `_sil` 同名混淆）⇒ 断言跟着改，**判据本身没变**（剪影只作否决 ✓）
+          ('bool(_sn < FOG_SIL_MIN)' in _sp36src or 'bool(_sil < FOG_SIL_MIN)' in _sp36src)
+          and 'rev_evidence' in _sp36src)
     # ⚠ v1.59：`_ready_boss_cells()` 已删（用户口径「去掉这个」，见 ㊾）⇒
     #   这条顺序断言**不能再引用它**。现在本文件里 `REVEAL_RATIO_MIN` 的**唯一**
     #   使用点在 `board_hidden()` 里 ⇒ 断言"定义 < board_hidden 定义 < 它的使用点" ✓
@@ -3477,8 +3490,6 @@ try:
           < _el36_src.index('>= REVEAL_RATIO_MIN'))
     check('v1.36 ④ 双证据开关在位（`dual` 可现场开，默认 `single` 保守 ✓）',
           'MAPBOT_REVEAL_EVIDENCE' in _sp36src and 'REVEAL_EVIDENCE' in _sp36src)
-    check('v1.36 ⑤ 剪影**只作否决**不作通过（已揭示格剪影与雾格重叠 ⇒ 不能单独判 ✓）',
-          'bool(_sil < FOG_SIL_MIN)' in _sp36src and 'rev_evidence' in _sp36src)
     _ci36 = _el36_src.index('def _candidate_codes(')
     _cbody36 = _el36_src[_ci36:_el36_src.index('\ndef ', _ci36 + 10)]
     check('v1.36 ⑥ 候选匹配**容忍差 1 字**，长度差 >1 不认（别乱勾别的图 ✓）',
@@ -5556,9 +5567,17 @@ try:
           "_out[_hit54]['camp'] = True" in _el53
           and 'camp_not_in_model' in _el53
           and 'camp_skip_done' not in _el53)
-    check('v1.55 ③ `camp_nb` 用**营地块 ∪ 营地格**的邻居，**再按 `observed` 滤雾**（块角营地也有候选 ✓ / 雾格仍不被当可点 ✓）',
-          '_camp_block_cells' in open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
-                                          encoding='utf-8').read())
+    check('v1.55 ③ 【v1.60 改口径】`camp_nb` 现在用**唯一的"营地揭示源" `camp_reveal`**'
+          '（不再用「营地块 ∪ 营地格」的并集 —— 那是与 `block_revealed` '
+          '**不同口径**的根源 ⇒ `cells_for_plan` 走兜底 `cells[0]` ⇒ 点雾格 ✗）；'
+          '`observed` 过滤**仍不在**（对齐 PC ✓）；块角营地由 `camp_reveal` 的'
+          '**块角兜底**保证有候选（v1.55 修的那半不丢 ✓）',
+          'camp_reveal' in open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                                             'mapsolve.py'),
+                                encoding='utf-8').read()
+          and '_camp_block_cells' not in open(os.path.join(PROJ, 'app', 'src', 'main',
+                                                           'python', 'mapsolve.py'),
+                                              encoding='utf-8').read())
     check('v1.53 ② 打不上时会**记日志**（camp_not_found ⇒ 下次能一眼看出 ✗）',
           'camp_not_found' in _el53)
 
@@ -5909,9 +5928,15 @@ try:
           "（对齐 PC `mapsolve.py:403-415`：**没有任何过滤**，"
           "用户口径「最开始就是只有**营地挨着的四个格子**可以点」✓）",
           "if not bool(getattr(prob.blocks.get(_nb), 'observed', True)):" not in _mv58s)
-    check('D-3 ② 保留「营地块 ∪ 营地格」的 4 邻、排除营地块自己（v1.55 修的那半别丢 ✓）',
-          '_camp_block_cells' in _mv58s and '_ccells | _camp_block_cells' in _mv58s
-          and '_nb < 0 or _nb == camp' in _mv58s)
+    check('D-3 ② 【v1.60 改口径】营地揭示源 = **唯一**那份 `prob.camp_reveal`'
+          '（排除营地块自己 ✓；v1.55 的「营地块 ∪ 营地格」并集已删 —— 它与 '
+          '`block_revealed` 不同口径 ⇒ 求解器可点、选格时找不到已揭示格 ⇒ **点雾格** ✗）；'
+          '`elif` 兜底（`camp_cells` 为空 ⇒ 退回整块 `NB_MASK[camp]`）照抄 PC ✓',
+          '_camp_block_cells' not in _mv58s
+          and '_ccells | _camp_block_cells' not in _mv58s
+          and 'def _camp_nb_blocks(self, cells, exclude_camp=True):' in _mv58s
+          and 'if exclude_camp and _nb == self.camp:' in _mv58s
+          and 'camp_nb = NB_MASK[camp] & ~camp_mask' in _mv58s)
     check('D-3 ③ ⚠ `Block.observed` 本身**必须留着** —— 那是**另一个**机制'
           '（M8 `block_revealed` 的观测闸门）✓',
           'self.observed = bool(revealed)' in _ms58s
@@ -6023,6 +6048,288 @@ try:
           and "entry['road'] = road_all[:6]" in _code58)
 except Exception as _e58s:      # noqa: BLE001
     check('v1.58 P0 落地守门可运行（%r）' % (_e58s,), False)
+
+# =====================================================================================
+# ㊿⭐ v1.60 ⭐⭐⭐ 照抄 PC 揭示判据（**相对两趟法** + 模型层 **0.75** 覆写）
+#                 ＋ `camp_nb` 与 `block_revealed` **同口径**
+#
+# 未决第 1 条（`会话接力.md` §3 / `PC规划算法对照报告.md` §D 的 M35 / M50 / M51）：
+#   「手机端**已揭示的格会被判成雾**（`observed=False`）⇒ `plain=False` ⇒ **空地连锁断裂**」
+#
+# PC 两处（**结构逐字抄**，见 `app/src/main/python/spots.py` 顶部与 `_cells_for_model` 注释）：
+#   ① `spots` 的**相对两趟法**：`revealed ⟺ ratio ≥ max(地板, 第10分位×1.06)`
+#   ② `_cells_for_model` 的**模型层覆写**：`ratio ≥ 0.75`
+#
+# ⚠⚠ **本门禁最重要的一条：0.66 地板在手机端是坏的（实测，不是口味）**
+#   手机端 `ratio` 分母是**本图模板亮度中位**（v1.35）⇒ 雾带按格子美术亮度摊开
+#   （真机草原帧实测 0.685~0.761 ⇒ 是 p10 的 **1.26 倍**）⇒ PC 的 ×1.06 盖不住。
+#   实测（`_tmpman/probe_v160_reveal.py`）：
+#     地板 0.66 ⇒ 真机草原帧 **FP 28/35 格**（[ok] 下面第 ③ 项把它固化成**反向断言**）
+#     地板 0.80 ⇒ FP 0 / FN 0
+#   ⇒ 门禁**同时**钉住"地板必须是 0.80"和"0.66 确实会 FP≥20"——
+#     谁把地板改回 0.66，这两条里的一条必然红 ✓
+# =====================================================================================
+print()
+print('㊿⭐ v1.60 揭示判据（PC 两趟相对法 + 模型层 0.75 覆写）+ camp_nb ≡ block_revealed')
+_SP60 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py')
+_EL60 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+_MV60 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py')
+try:
+    _sp60s = open(_SP60, encoding='utf-8').read()
+    _el60s = open(_EL60, encoding='utf-8').read()
+    _mv60s = open(_MV60, encoding='utf-8').read()
+
+    # ---------------- ① `spots` 两趟相对法 ----------------
+    check('v1.60 ① `spots` 有**两趟相对法**的三个常数（照抄 PC：10 分位 / ×1.06；'
+          '⚠ 地板是手机端标定值 0.80，PC 是 0.66 ⇒ 见 ③）',
+          'REVEAL_REL_Q' in _sp60s and 'REVEAL_REL_K' in _sp60s
+          and 'REVEAL_REL_FLOOR' in _sp60s
+          and float(EL.REVEAL_RATIO_MIN) == 0.80,
+          'spots.REVEAL_REL_FLOOR=%s Q=%s K=%s'
+          % (getattr(__import__('spots'), 'REVEAL_REL_FLOOR', '缺失'),
+             getattr(__import__('spots'), 'REVEAL_REL_Q', '缺失'),
+             getattr(__import__('spots'), 'REVEAL_REL_K', '缺失')))
+    _sp60 = __import__('spots')
+    check('v1.60 ② 判据 = `max(REVEAL_REL_FLOOR, _base * REVEAL_REL_K)`，'
+          '且 `_base` 取**第 10 分位**（照抄 PC `:726-727` ✓）',
+          'max(REVEAL_REL_FLOOR, _base * REVEAL_REL_K)' in _sp60s
+          and 'int(len(_rs) * REVEAL_REL_Q) - 1' in _sp60s)
+    check('v1.60 ③ 地板默认 **0.80**（手机端实测：0.66 在真机草原帧上 FP=28/35 ⇒ '
+          '`REVEAL_REL_FLOOR = 0.80`；想对拍 PC 用 `MAPBOT_REVEAL_FLOOR=0.66` ✓）',
+          abs(float(_sp60.REVEAL_REL_FLOOR) - 0.80) < 1e-9
+          and 'MAPBOT_REVEAL_FLOOR' in _sp60s,
+          'REVEAL_REL_FLOOR=%.2f' % float(_sp60.REVEAL_REL_FLOOR))
+    check('v1.60 ④ `REVEAL_RATIO_MIN`（0.80）**降级为两趟法的异常兜底**，'
+          "且 `revealed` 判定**只在第二趟**做（逐格算时拿不到全盘分布 ⇒ PC 原文"
+          '「**必须两趟**」✗ 逐格判）',
+          "'rev_evidence'] = 'fallback'" in _sp60s
+          and "'revealed': False, 'rev_evidence': None," in _sp60s
+          and 'revealed \u27fa ratio' not in _sp60s.split('def state')[1][:4000])
+except Exception as _e60a:      # noqa: BLE001
+    check('v1.60 ①~④ 源码守门可运行（%r）' % (_e60a,), False)
+
+# ---------------- ⑤⑥ 实跑：真机草原两帧（**用代码自己的 ratio**）+ 人工标注真值 -------
+#   ⚠⚠ 这里**必须调 `Board.state()`**（真流水线），**不能**像 v1.36 ⑨ 那样自己重算
+#     `mean/L_map` —— 2026-10-05 实测两者对**营地格**差了 0.08（自己算 0.861、
+#     代码算 0.780）⇒ 自己算的那版把"营地被判成雾"这个真 bug 整个盖住了 ✗✗
+_F60 = (os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_r0.png'),
+        os.path.join(PROJ, '_verify', 'phone_redmi_grassland', 'board_grassland_live.png'))
+_TR60 = ({(5, 6), (4, 7), (5, 7)}, {(1, 6), (1, 7), (2, 7)})
+try:
+    import cv2 as _cv60
+    import numpy as _np60
+    import spots as _sp60b
+    import mapsim as _sim60
+
+    if not all(os.path.exists(f) for f in _F60):
+        skip('v1.60 ⑤⑥ 实跑（缺真机草原帧 ⇒ 没真验证）')
+    else:
+        _st60 = []
+        for _f in _F60:
+            _im = _cv60.imdecode(_np60.fromfile(_f, dtype=_np60.uint8),
+                                 _cv60.IMREAD_COLOR)
+            _st60.append(_sp60b.Board('S10002').state(_im))
+        # ⑤ spots 层：**零 FP**；FN 只许是营地（营地 ratio 0.780 < 0.80 是已知的，
+        #    下一层（模型层 0.75）负责把它捞回来 ⇒ 见 ⑥ ✓）
+        _fp60, _fn60 = [], []
+        for _s, _tr in zip(_st60, _TR60):
+            for _k, _v in _s.items():
+                _rv = bool(_v.get('revealed'))
+                if _rv and _k not in _tr:
+                    _fp60.append('%d,%d' % _k)
+                if (not _rv) and _k in _tr:
+                    _fn60.append(('%d,%d' % _k, _v.get('name')))
+        _ev60 = sorted({v.get('rev_evidence') for s in _st60 for v in s.values()})
+        check('v1.60 ⑤ 实跑（真流水线 `Board.state()` + 人工标注 70 格）：spots 层'
+              '**零 FP**；FN 只许是**营地**（known：它 ratio≈0.78 被模型层捞回 ✓）',
+              not _fp60 and all(n == '营地' for _k, n in _fn60),
+              'FP=%s FN=%s ev=%s' % (_fp60, _fn60, _ev60))
+        check("v1.60 ⑤b 判定走了**相对法**路径（`rev_evidence=='rel'`，不是兜底/逐格 ✗）",
+              _ev60 == ['rel'], 'ev=%s' % (_ev60,))
+        # ⑥ 模型层 0.75：FN 归零；且多出来的 FP **必须全是非空地**
+        #    （是空地就会"假连锁穿雾" —— 那正是 v1.03 用户口径要防的 ✗）
+        _fp60b, _fn60b, _plain_fp = [], [], []
+        for _s, _tr in zip(_st60, _TR60):
+            for _k, _v in _s.items():
+                _r = float(_v.get('ratio') or 0)
+                _rv = _r >= float(EL.MODEL_REVEAL_RATIO_MIN)
+                if _rv and _k not in _tr:
+                    _fp60b.append('%d,%d' % _k)
+                    _row = dict(_v)
+                    _row['revealed'] = True
+                    if _sim60.Block(0, _row, revealed=True).plain:
+                        _plain_fp.append('%d,%d' % _k)
+                if (not _rv) and _k in _tr:
+                    _fn60b.append('%d,%d' % _k)
+        check('v1.60 ⑥ 实跑：模型层 `ratio ≥ %.2f` ⇒ **FN 归零**'
+              '（营地 0.780 被捞回 = "已揭示被判成雾"那一族被修 ✓）'
+              % float(EL.MODEL_REVEAL_RATIO_MIN),
+              not _fn60b, 'FN=%s FP=%s' % (_fn60b, _fp60b))
+        check('v1.60 ⑥b 实测：模型层多放行的格**没有一例是空地**'
+              '（否则会"假连锁穿雾" ✗✗）',
+              not _plain_fp,
+              'FP=%s 其中空地=%s（实测都是非空地格，如 2,3 符文岩石 ✓）'
+              % (_fp60b, _plain_fp))
+except Exception as _e60b:      # noqa: BLE001
+    check('v1.60 ⑤⑥ 实跑闸可运行（%r）' % (_e60b,), False)
+
+# ---------------- ⑦ 反向断言：PC 逐字地板 0.66 在真机帧上必须 **FP 一大片** -------
+#   ‼ 这条是"**别把地板改回 0.66**"的**实测**防线（不是注释、不是口味）：
+#     断言它 FP ≥ 20；同时断言线上地板不是 0.66 ⇒ 改回去必然红一条 ✓
+try:
+    if not all(os.path.exists(f) for f in _F60):
+        skip('v1.60 ⑦ 0.66 地板反例（缺真机帧 ⇒ 没真验证）')
+    else:
+        _fp066 = 0
+        for _s, _tr in zip(_st60, _TR60):
+            _rs60 = sorted(float(v.get('ratio') or 0) for v in _s.values())
+            _b60 = _rs60[max(0, int(len(_rs60) * 0.10) - 1)]
+            _t66 = max(0.66, _b60 * 1.06)
+            for _k, _v in _s.items():
+                if float(_v.get('ratio') or 0) >= _t66 and _k not in _tr:
+                    _fp066 += 1
+        check('v1.60 ⑦ 反例（实测）：地板取 PC 的 **0.66** ⇒ 两帧共 **FP %d 格**'
+              '（雾格 0.685~0.761 全被当已揭示 ✗✗）⇒ 所以默认 0.80；'
+              '线上地板 = %.2f'
+              % (_fp066, float(_sp60.REVEAL_REL_FLOOR)),
+              _fp066 >= 20 and abs(float(_sp60.REVEAL_REL_FLOOR) - 0.66) > 1e-9)
+except Exception as _e60c:      # noqa: BLE001
+    check('v1.60 ⑦ 反例闸可运行（%r）' % (_e60c,), False)
+
+# ---------------- ⑧⑨ 模型层覆写：位置 + 执行级（真流水线跑 `_cells_for_model`） -------
+try:
+    _i60_ov = _el60s.index('MODEL_REVEAL_RATIO_MIN')
+    _i60_rescue = _el60s.index('拆掉"误并的多格块"')
+    check('v1.60 ⑧ 模型层常数 `MODEL_REVEAL_RATIO_MIN = 0.75`'
+          '（**照抄 PC** `explore_loop.py:2866`；手机端换名是因为 `REVEAL_RATIO_MIN` '
+          '已被 `spots` 别名占用 ✓）+ `MAPBOT_MODEL_REVEAL_MIN` 可现场覆盖',
+          abs(float(EL.MODEL_REVEAL_RATIO_MIN) - 0.75) < 1e-9
+          and 'MAPBOT_MODEL_REVEAL_MIN' in _el60s,
+          'MODEL_REVEAL_RATIO_MIN=%.2f' % float(EL.MODEL_REVEAL_RATIO_MIN))
+    check('v1.60 ⑨ 覆写**在 `_rescue` 拆块之前**（与 PC `:1009-1029` 同位置 ✓）、'
+          '且**只覆盖能读到 ratio 的格**（`ratio=None` 的标记补格保持原值 ✓）',
+          0 < _i60_ov < _i60_rescue
+          and "if _rr is not None:" in _el60s
+          and "_vv['revealed'] = bool(" in _el60s)
+    if not all(os.path.exists(f) for f in _F60):
+        skip('v1.60 ⑩ 执行级 `_cells_for_model`（缺真机帧 ⇒ 没真验证）')
+    else:
+        _s60 = _st60[0]
+        _obs60 = {_k: dict(_v) for _k, _v in _s60.items()}
+        _spawn_px = EL.cell_center(5, 7)        # 真值说 (5,7) 是营地，且它 ratio=0.780
+        _st60in = {'obs': _obs60, 'spawn': _spawn_px, 'camp': _spawn_px,
+                   'done': [], 'marks': {}}
+        _out60 = EL._cells_for_model(_st60in, {'st': _obs60}, log=None,
+                                     tag='solver', mark_revealed=False,
+                                     drop_done=False)
+        _rv60 = {_k: bool(_v.get('revealed')) for _k, _v in _out60.items()}
+        check('v1.60 ⑩ 执行级（真流水线）：`_cells_for_model` 把**营地格 (5,7)**'
+              '从 `spots` 的"雾"（ratio 0.780）翻成**已揭示**'
+              '（= `Block.observed=True` ⇒ `plain` 不再走雾剪影分支 ⇒ 连锁不断 ✓）',
+              _rv60.get((5, 7)) is True
+              and bool(_s60[(5, 7)].get('revealed')) is False
+              and bool(_out60[(5, 7)].get('camp')) is True,
+              'spots=%s cells_for_model=%s camp=%s'
+              % (_s60[(5, 7)].get('revealed'), _rv60.get((5, 7)),
+                 _out60[(5, 7)].get('camp')))
+        check('v1.60 ⑩b 执行级负样本：真雾格（3,3 露天矿石 ratio 0.533 < 0.75）'
+              '**仍必须判未揭示**（别把整盘雾格一起放行 ✗）',
+              _rv60.get((3, 3)) is False,
+              'ratio=%.3f revealed=%s'
+              % (float(_s60[(3, 3)].get('ratio') or 0), _rv60.get((3, 3))))
+except Exception as _e60d:      # noqa: BLE001
+    check('v1.60 ⑧~⑩ 模型层守门可运行（%r）' % (_e60d,), False)
+
+# ---------------- ⑪~⑮ `camp_nb` 与 `block_revealed` **同口径**（M30/③） ----------------
+try:
+    import mapsim as _sim60b
+    import mapsolve as _mv60b
+
+    check('v1.60 ⑪ `Problem.camp_reveal` = **唯一**的营地揭示源；'
+          '`block_revealed` / `visible` / `camp_nb` **三处都只读它**'
+          '（PC 的第三处 `visible` 用整块 ⇒ 那是 PC 的疏漏，故意不抄 ✓）',
+          'self.camp_reveal = set(self.camp_cells)' in _mv60s
+          and 'camp_cells = self.camp_reveal' in _mv60s
+          and 'for cc2 in self.camp_reveal:' in _mv60s
+          and "getattr(prob, 'camp_reveal', None)" in _mv60s)
+    check('v1.60 ⑫ 邻接算法**只有一份**（`_camp_nb_blocks`）：`__init__` 的块角兜底判定'
+          '与 `_build_cache` 的 `camp_nb` 掩码都走它 ⇒ 两处不可能再漂开 '
+          '（PC `:403-415` 与 `:258-260` 就是这么漂开的 ✗）',
+          'def _camp_nb_blocks(self, cells, exclude_camp=True):' in _mv60s
+          and _mv60s.count('_camp_nb_blocks(') >= 3)
+    check('v1.60 ⑬ `_build_cache` 的 `elif` 兜底**照抄 PC**'
+          '（`camp_cells` 为空才退回整块 `NB_MASK[camp] & ~camp_mask` ✓）',
+          'camp_nb = NB_MASK[camp] & ~camp_mask' in _mv60s)
+    check('v1.60 ⑭ ⚠ `Block.observed`（M8 观测闸门）**必须留着**'
+          '（那是另一个机制，别跟这次的 camp_nb 一起删 ✗）',
+          "_obs = bool(getattr(_bb, 'observed', False))" in _mv60s
+          and "if n in self.obs_consumed and not _obs:" in _mv60s)
+
+    def _mk60(cells, camp_cell=None, block=None, camp_block_cells=()):
+        _o = {}
+        for _k, _sid in cells.items():
+            _row = {'sid': _sid, 'name': '草地', 'revealed': True, 'score': 0.99,
+                    'ratio': 1.0, 'anchor': _k, 'cells': [_k], 'size': (1, 1), 'top': []}
+            if block and _k in block:
+                _row['anchor'] = block[0]
+                _row['cells'] = list(block)
+            _o[_k] = _row
+        if camp_cell:
+            _o[camp_cell]['camp'] = True
+            _o[camp_cell]['camp_cells'] = [camp_cell]
+            _o[camp_cell]['name'] = '营地'
+        return _sim60b.MapSim.from_observation(_o, {})
+
+    def _nb60(prob):
+        _mv60b.solve(prob, report={})
+        _ch = prob._cache
+        return sorted(_ch['idx_of_bit'][1 << _i] for _i in range(40)
+                      if _ch['idx_of_bit'].get(1 << _i) is not None
+                      and (_ch['camp_nb'] & (1 << _i)))
+
+    _cells60 = {(r, c): 'S00003_001' for r in range(1, 6) for c in range(1, 8)}
+    # (a) PC 真机帧形状：营地 (2,1) 被 4 格块吞掉
+    _pa = _mv60b.Problem(_mk60(_cells60, camp_cell=(2, 1),
+                               block=[(1, 1), (2, 1), (2, 2), (2, 3)]))
+    _nba = _nb60(_pa)
+    _cnsa = _pa.consumed_cells(frozenset())
+    _bada = [b for b in _nba if not _pa.block_revealed(b, _cnsa)]
+    check('v1.60 ⑮【不变量】**`camp_nb` 里每一块在空状态下都必须 `block_revealed=True`**'
+          '（= 求解器可点 ⇒ `cells_for_plan` 一定找得到已揭示格 ⇒ **不会点雾格** ✓）',
+          bool(_nba) and not _bada,
+          'camp_nb 块=%s 破的=%s' % (_nba, _bada))
+    # (b) 块角营地：营地格的 4 邻全在自己块里 ⇒ 营地格口径会 camp_nb=0
+    #     ⇒ 手机端补的"块角兜底"必须把它放宽（且 block_revealed 同步放宽 ⇒ 不变量仍成立）
+    _pb = _mv60b.Problem(_mk60(_cells60, camp_cell=(1, 1),
+                               block=[(1, 1), (1, 2), (2, 1), (2, 2)]))
+    _nbb = _nb60(_pb)
+    _cnsb = _pb.consumed_cells(frozenset())
+    _badb = [b for b in _nbb if not _pb.block_revealed(b, _cnsb)]
+    check('v1.60 ⑮b 块角营地（营地 (1,1) 的四邻全是自己那块）⇒ **块角兜底**把 '
+          '`camp_reveal` 放宽成整块 ⇒ `camp_nb` 非空（v1.55 修的那半不丢 ✓）'
+          '**且不变量仍成立**（两边读同一个属性 ✓）',
+          len(_pb.camp_reveal) > len(_pb.camp_cells) and bool(_nbb) and not _badb,
+          'camp_reveal=%s camp_nb=%s 破的=%s'
+          % (sorted(_pb.camp_reveal), _nbb, _badb))
+    # (c) 单格营地（常规盘）：行为与 PC 一字不差
+    _pc = _mv60b.Problem(_mk60(_cells60, camp_cell=(3, 4)))
+    _nbc = _nb60(_pc)
+    check('v1.60 ⑮c 单格营地（常规盘）：`camp_reveal` **就是那一格**（不放宽）'
+          '⇒ `camp_nb` = 它的 4 个邻居（与 PC 一字不差 ✓）',
+          len(_pc.camp_reveal) == 1 and len(_nbc) == 4,
+          'camp_reveal=%s camp_nb 块数=%d' % (sorted(_pc.camp_reveal), len(_nbc)))
+    # (d) 反向断言：`camp_nb` 不许再出现"营地块里**非营地**的成员格的邻居"
+    #     （v1.55 的并集口径会让 boss(1,2) 这种格进 camp_nb ⇒ 计划点雾格）
+    _pd = _mv60b.Problem(_mk60(_cells60, camp_cell=(2, 1),
+                               block=[(1, 1), (2, 1), (2, 2), (2, 3)]))
+    _nbd = _nb60(_pd)
+    _blk_d = _pd.board[_sim60b.cell_of(1, 2)]
+    check('v1.60 ⑮d 反向断言：与**营地块**相邻、但与**营地格**不相邻的格'
+          '（(1,2)，PC 真机那把的 boss ⇒ ratio 0.665 是雾 ✗）**不许**进 `camp_nb`',
+          _blk_d not in _nbd,
+          'camp_nb=%s (1,2) 的块=%s' % (_nbd, _blk_d))
+except Exception as _e60e:      # noqa: BLE001
+    check('v1.60 ⑪~⑮ camp_reveal 守门可运行（%r）' % (_e60e,), False)
 
 print()
 print('=' * 78)

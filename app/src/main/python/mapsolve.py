@@ -125,6 +125,45 @@ class Problem:
             _cb2 = self.blocks.get(self.camp)
             self.camp_cells = (set(getattr(_cb2, 'camp_cells', None) or ())
                                or set(self.cells_of.get(self.camp, ())))
+        # ⭐⭐⭐ v1.60【「营地揭示源」= **单一来源**（一处定义、三处消费）】—— 修「口径不一致」
+        #   ## 病根（报告编号 ③：`camp_nb` 与 `block_revealed` 不同口径）
+        #     `_build_cache` 的 `camp_nb`（**求解器 `solve()` 的候选掩码**）原先用的是
+        #     「**营地块 ∪ 营地格**」的邻居，而 `block_revealed`（**真正选格的那份**，
+        #     `cells_for_plan` 用它挑"当下已揭示"的格）只看 `camp_cells` ⇒ **两者不一致** ✗
+        #     ⇒ 求解器以为某块可点（进了 `camp_nb`）⇒ `cells_for_plan` 在那块里
+        #       找不到"已揭示"的格 ⇒ 走兜底 `pick = cells[0]`（PC 注释写着「**不该发生**」）
+        #     ⇒ **计划点雾格** ✗✗
+        #   ## PC 怎么写这两处（先读了再动手：`mapbot_pc/mapsolve.py`）
+        #     · `Problem.__init__ :88-93`   → `self.camp_cells = Block.camp_cells or 整块`
+        #     · `block_revealed   :151`     → 用 `self.camp_cells` ✓
+        #     · `_build_cache.camp_nb :403-415` → 用 `prob.camp_cells`；
+        #       **只有当 `camp_cells` 为空**时才退回 `NB_MASK[camp] & ~camp_mask`（整块口径）
+        #   ⇒ **PC 那两处其实是同口径的**（都读 `Problem.camp_cells`）—— PC 唯一的不一致
+        #     在第三处：`Problem.visible()`（`mapbot_pc/mapsolve.py:258-260`）用**整块**
+        #     `cells_of[camp]` ⇒ 与 `block_revealed` 不同口径 ✗（PC 的疏漏）
+        #   ## 手机端怎么做（用户口径）
+        #     「让 `block_revealed` 与 `camp_nb` **同口径**（两边都用同一份"营地揭示源"
+        #       集合），而**不是**把 `camp_nb` 改回去」
+        #     ① 本属性 `camp_reveal` = **唯一**的营地揭示源，**三处**都只读它：
+        #        `block_revealed` / `Problem.visible` / `_build_cache.camp_nb`
+        #        （把 PC 第三处也一起对齐——`block_revealed` 是真正选格的那份，以它为准
+        #         ⇒ PC 那条整块口径的疏漏**故意不抄** ✓）
+        #     ② **块角兜底**（v1.55 修过的场景，**不许丢** ✗）：
+        #        营地格在多格块的**角上**（如营地 (1,1)、块盖住 (1,1)(1,2)(2,1)(2,2)）
+        #        ⇒ 营地那一格的 4 邻**全是自己那块**（或出界）⇒ `camp_nb = 0`
+        #        ⇒ `visible(空状态) = camp_nb | empty_adj = 0` ⇒ `expanded:1` / `exhausted`
+        #        （v1.55 注释里「`Problem.visible()` = 4 个候选，`camp_nb` = 0」就是它）
+        #        PC 在这个几何下**也会** `camp_nb = 0`（PC 的 elif 只在 `camp_cells` 为空时兜底）
+        #        ⇒ 这是 PC 的另一个疏漏，手机端补上：
+        #        ⚠ 兜底**必须成对生效**：`camp_reveal` 一旦放宽，`block_revealed` 也一起放宽
+        #          （两处读同一个属性）⇒ 满足不变量
+        #          「**求解器可点 ⇒ 选格时一定找得到已揭示格**」✓
+        #        ⚠ 触发条件很窄：**只在营地格口径算出来是空候选时**才放宽 ⇒ 常规盘
+        #          行为与 PC 一字不差 ✓（boss 相邻误判那类事故不受影响 ✓）
+        self.camp_reveal = set(self.camp_cells)
+        if self.camp is not None and not self._camp_nb_blocks(self.camp_cells):
+            self.camp_reveal = (set(self.camp_cells)
+                                | set(self.cells_of.get(self.camp, ())))
         self.targets = set()
         for b in self.blocks.values():
             # ⭐⭐⭐ 2026-09-28 用户要求（「勾选某一种方块，后续就专门去拿；不勾就不规划」）：
@@ -138,6 +177,28 @@ class Problem:
                 self.targets.add(b.idx)
 
     # ---------- 状态派生 ----------
+    def _camp_nb_blocks(self, cells, exclude_camp=True):
+        """给定「营地揭示源格集合」⇒ 它们的 4 邻**块**集合（**唯一**的邻接算法）
+
+        ⭐ v1.60：`__init__`（块角兜底的触发判定）与 `_build_cache`（`camp_nb` 掩码）
+        都**只能**走这一份实现 —— 两处各写一遍就是"求解器可点、选格时找不到已揭示格"
+        的温床（PC `mapbot_pc/mapsolve.py:403-415` 与 `:258-260` 就是这么漂开的 ✗）✓
+        """
+        out = set()
+        for _c0 in (cells or ()):
+            _r0, _q0 = _c0 // COLS, _c0 % COLS
+            for _dr, _dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                _rr, _qq = _r0 + _dr, _q0 + _dc
+                if not (0 <= _rr < ROWS and 0 <= _qq < COLS):
+                    continue
+                _nb = self.board[_rr * COLS + _qq]
+                if _nb < 0:
+                    continue
+                if exclude_camp and _nb == self.camp:
+                    continue
+                out.add(_nb)
+        return out
+
     def consumed_cells(self, state):
         """「已消耗的格」= 观测里**本来就是空的格**（`board < 0`）+ 本状态吃掉的格
 
@@ -180,8 +241,10 @@ class Problem:
         #     `tap` 的 nochange/拉黑逻辑管的（这里只管"观测说它是雾"的那一类）✓
         _bb = self.blocks.get(bi)
         _obs = bool(getattr(_bb, 'observed', False)) if _bb is not None else True
-        # ⚠ 营地揭示源只认"营地那一格"（见 __init__ 说明 ✓）
-        camp_cells = self.camp_cells or ()
+        # ⚠⚠ v1.60：营地揭示源改读**唯一**那份 `camp_reveal`（见 `__init__` 的长注释）——
+        #   原来这里读 `self.camp_cells`、`_build_cache` 读「营地块 ∪ 营地格」⇒ 口径不一致 ✗
+        #   ⚠ 不再写 `or ()`：`camp_reveal` 在 `__init__` 里**恒为 set**（不会 None）✓
+        camp_cells = self.camp_reveal
         for c in self.cells_of.get(bi, ()):
             r, cc = c // COLS, c % COLS
             for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -294,8 +357,14 @@ class Problem:
         for c in self.consumed_cells(state):
             _add_nb(c)
         # ② 营地的四个邻居（开局起手 ✓）—— 营地自己**不加** ✗
+        #   ⚠⚠ v1.60：这里原来用 `self.cells_of.get(self.camp, ())`（**整块**）——
+        #     PC `mapbot_pc/mapsolve.py:258-260` 也是整块 ⇒ PC 自己就与 `block_revealed`
+        #     （`:151` 用 `camp_cells`）**不同口径** ✗ —— 用户口径：「以 `block_revealed`
+        #     为准（它是真正选格的那份）」。故这里改读**唯一**那份 `camp_reveal`
+        #     （= `camp_cells`；块角场景它在 `__init__` 里已放宽成整块 ⇒ v1.55 的行为不丢 ✓）
+        #   ⇒ 三处（`block_revealed` / `visible` / `camp_nb`）**同口径** ✓
         if self.camp is not None:
-            for cc2 in self.cells_of.get(self.camp, ()):
+            for cc2 in self.camp_reveal:
                 _add_nb(cc2)
         # ⭐ v1.44：拉黑块**既不是候选动作、也不能当通路** ✓
         #   （根因：拉黑块原本只"事后从点序剔除"⇒ 求解器算连通性/代价时仍按能走算
@@ -455,11 +524,10 @@ def _build_cache(prob):
     #   ⇒ 用 `prob.camp_cells`（真正带 camp 标记的格）算邻接；
     #     没有该信息（单格营地的常规情形）才退回整块口径 ⇒ 对老盘行为不变 ✓
     camp_nb = 0
-    _ccells = set(getattr(prob, 'camp_cells', None) or ())
     if camp is not None:
         # ⭐⭐⭐ v1.58【去掉 `observed` 过滤 —— **对齐 PC 的不变量：营地四邻恒为候选**】
         #
-        #   PC 基准（`mapbot_pc/mapsolve.py:403-415`）：`camp_nb` = 营地块 ∪ 营地格的 4 邻，
+        #   PC 基准（`mapbot_pc/mapsolve.py:403-415`）：`camp_nb` = 营地揭示源的 4 邻，
         #     **没有任何 revealed/observed 过滤**；PC 注释里的用户口径是
         #     「最开始就是只有**营地挨着的四个格子**可以点」（`mapsolve.py:233-236`）✓
         #   ⚠⚠ 而手机端 v1.55 自己加的那道 `if not observed: continue` 是 **PC 没有的**：
@@ -468,21 +536,31 @@ def _build_cache(prob):
         #     ⇒ `visible(空状态) = camp_nb | empty_adj = 0` ⇒ `expanded:1` / `exhausted`
         #     ⇒ 与 `Problem.visible()`（无 gate）**两份实现算出来不一样** ✗✗
         #       —— v1.55 注释里记的「`Problem.visible()` = 4 个候选，`camp_nb` = 0」正是这道 gate ✓
-        #   ⇒ 现在只保留「**营地块 ∪ 营地格**的 4 邻、排除营地块自己」这条口径：
-        #       · 块角营地也有候选 ✓（v1.55 修的那半，保留）
+        #   ⇒ 现在只保留「**营地揭示源**的 4 邻、排除营地块自己」这条口径：
+        #       · 块角营地也有候选 ✓（v1.55 修的那半，保留 —— 由 `camp_reveal` 的
+        #         **块角兜底**实现，见 `Problem.__init__` 的长注释 ✓）
         #       · 不再按 observed 滤 ✓（去掉 v1.55 自己加的那半，对齐 PC）
+        #       · **v1.60 起不再用「营地块 ∪ 营地格」的并集**（那是与 `block_revealed`
+        #         不一致的根源 ✗）⇒ 唯一来源 = `prob.camp_reveal` ✓
         #   ⚠ `Block.observed` 本身**必须留着** —— 那是**另一个**机制（M8 `block_revealed`
         #     的观测闸门，见本文件 `:155-201`），与这里无关，别一起删 ✗
-        _camp_block_cells = set(prob.cells_of.get(camp, ()))
-        for _c0 in (_ccells | _camp_block_cells):
-            _r0, _q0 = _c0 // COLS, _c0 % COLS
-            for _dr, _dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                _rr, _qq = _r0 + _dr, _q0 + _dc
-                if 0 <= _rr < ROWS and 0 <= _qq < COLS:
-                    _nb = prob.board[_rr * COLS + _qq]
-                    if _nb < 0 or _nb == camp:
-                        continue
-                    camp_nb |= bit[_nb]
+        # ⭐⭐⭐ v1.60【与 `block_revealed` **同口径** —— 用户口径原话：
+        #   「正确做法是让 `block_revealed` 与 `camp_nb` **同口径**（两边都用同一份
+        #     "营地揭示源"集合），而不是把 `camp_nb` 改回去」】
+        #   · 原来这里是「**营地块 ∪ 营地格**」（`_ccells | prob.cells_of[camp]`，v1.55 加的），
+        #     而 `block_revealed` 只看 `camp_cells` ⇒ `camp_nb` 里会多出
+        #     `block_revealed` 判不出来的块 ⇒ `cells_for_plan` 走兜底 `cells[0]`
+        #     ⇒ **计划点雾格** ✗✗（PC 那条注释写着「不该发生」）
+        #   · 现在**唯一**来源 = `prob.camp_reveal`（`__init__` 里算好，块角场景已放宽 ✓）
+        #     = PC 的 `prob.camp_cells` 口径（`mapbot_pc/mapsolve.py:403-415`）✓
+        #   · `elif` 兜底（`camp_cells` 为空 ⇒ 退回整块 `NB_MASK[camp]`）**照抄 PC** ✓
+        _camp_src = set(getattr(prob, 'camp_reveal', None)
+                        or getattr(prob, 'camp_cells', None) or ())
+        if camp is not None and _camp_src:
+            for _nb in prob._camp_nb_blocks(_camp_src):
+                camp_nb |= bit[_nb]
+        elif camp is not None:
+            camp_nb = NB_MASK[camp] & ~camp_mask
     # ⭐⭐ 2026-09-30：「观测里本来就是空的格」（已消耗）⇒ 它的邻居块**现在就已经揭示**。
     #   全知盘（新生成的盘）没有任何 -1 ⇒ EMPTY_ADJ = 0，行为一字不变 ✓
     #   观测盘（真机 / 在线推演）则有 -1 ⇒ 模型终于知道"已经走到哪了" ✓
