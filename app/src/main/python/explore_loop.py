@@ -806,9 +806,30 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
     #     于是拉黑格被当成**能连锁穿过的空地**，规划整条走法都错 ✗✗）
     try:
         _blk_rc = set()
+        _blk_low = []          # ⭐ v1.46：名字命中但**分数太低** ⇒ 不拉黑（记下来给人看 ✓）
         for _k2, _v2 in list(_cells_merged.items()):
-            if tcfg_mod.is_blocked(_v2.get('name')):
-                _blk_rc.add(_k2)
+            _n2 = _v2.get('name')
+            if not tcfg_mod.is_blocked(_n2):
+                continue
+            # ⭐⭐⭐ v1.46【拉黑要带置信度门槛】—— 学 PC 端 `is_blocked_cell`
+            #   真机事故（PC）：boss 格被误当"用户拉黑"永久剔除 ⇒ **14 点体力的首领不打了** ✗
+            #   根因：只判名字、不看认得准不准 ⇒ 同一帧里 0.30~0.32 的**乱猜**也中招 ✗
+            #   ⇒ 低置信度没有资格代表"用户拉黑了它"（那是用户的明确意图 ✓）
+            #   ⇒ 分数 < `BLOCKED_SCORE_MIN`(0.70) ⇒ **不拉黑**（宁可多点一格，
+            #     也别把 boss 静默丢掉 ✓）
+            try:
+                _sc2 = float(_v2.get('score') or 0.0)
+            except (TypeError, ValueError):
+                _sc2 = 0.0
+            if _sc2 < float(getattr(tcfg_mod, 'BLOCKED_SCORE_MIN', 0.70)):
+                _blk_low.append('%d,%d(%s %.2f)' % (_k2[0], _k2[1], _n2, _sc2))
+                continue
+            _blk_rc.add(_k2)
+        if _blk_low and log is not None:
+            log.append({tag: 'blocked_low_score_kept', 'n': len(_blk_low),
+                        'cells': _blk_low[:12],
+                        'note': '名字疑似拉黑但**分数不够** ⇒ 不拉黑（宁可多点一格，'
+                                '也别把 boss 静默丢掉 ✓）'})
         if _blk_rc:
             for _k2 in _blk_rc:
                 _v2 = _cells_merged.get(_k2) or {}
@@ -3124,6 +3145,40 @@ def start_fight(b, log, btn, marks=()):
                                   band=(LAYOUT.sy(130), LAYOUT.sy(1700)))
             except Exception:       # noqa: BLE001
                 pass
+            # ⭐⭐⭐ v1.48【结算面板**模板快查**先行】—— 学 PC 端 `dd03218` / `d6c0b53`
+            #   PC 端真机耗时分账（126 图/4724s）：`OCR 1782.4s/2954 次`（占 63%），
+            #   其中很大一部分是 `start_fight()` **反复付 OCR 只为问一句「开打了没」** ✗
+            #   ⇒ 而「打完了」= **结算面板出现** = **固定 UI** ⇒ 该走模板（几毫秒）✓
+            #
+            #   ⭐ 手机端本来就**已有**这套能力（v1.45e 的 `settle_panel_hit()` +
+            #     `templates/ui/settle_{replay,close,skip}_btn.png`，真机参考帧裁的 1080×1920）
+            #     —— 这一步只是把它**接进 `start_fight`**（原来只在 `wait_end` 用）✓
+            #
+            #   ⚠⚠ **安全设计（PC 端明写「一个字都不能省」，照搬）**：
+            #     ① **模板只做"加分"，绝不改判据语义** ——
+            #        `settle_panel_hit()` 返回 `False/None` **不等于**"没打完" ✗
+            #        （`None` = 模板缺失/帧拿不到 ⇒ 这一路**判不了**）
+            #        ⇒ 只有 `True` 才提前返回；其余一律**原路走下面的 OCR**（一行没动 ✓）
+            #     ② **必须重新取帧**（PC 血泪史 #3）：`b.img()` 返回的是**上次 snap 的
+            #        ndarray、不重新抓** ⇒ 不 snap 就看同一张旧帧 ⇒ 误判
+            #        （PC 端后果：判「标记格打不开」⇒ **boss 没打就退图** ✗✗）
+            #        ✅ `b.snap()` 有帧戳去重（同帧不重编码）⇒ 便宜 ✓
+            try:
+                b.snap('fight_fast')
+                # ⚠ 这里用**严格版**（要 ≥2 个结算按钮同时命中）而不是 `settle_panel_hit`
+                #   —— 因为这条路误判 True 的代价是「**跳过一场战斗、丢奖励**」✗✗
+                #     而漏判只是多付一次 OCR（= 原行为 ✓）⇒ 宁严勿宽 ✓
+                _sh48 = settle_panel_strong(b, log)
+            except Exception:       # noqa: BLE001
+                _sh48 = None
+            if _sh48:
+                # 结算面板真的在 ⇒ 这一场**已经打完了**（自动跳过/极速战斗 ⇒
+                # 直接进结算 ✓ 与下面那条 OCR 判据语义**完全一致**，只是更快 ✓）
+                log.append({'battle': 'settle_tpl_hit', 'try': i,
+                            'secs': round(time.time() - _t0, 2), 'marks': list(marks),
+                            'note': '模板命中结算按钮 ⇒ 判定已打完（**省掉这一次 OCR** ✓）'})
+                say('       · 结算面板（模板命中）⇒ 这一场已打完 ✓')
+                return True
             items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(980)), tag='tap')
             if battle_started(items):
                 log.append({'battle': 'started', 'at': (btn['cx'], btn['cy']),
@@ -3585,6 +3640,45 @@ def settle_panel_hit(b, log=None):
         best = got[2] if best is None else max(best, got[2])
     if best is not None:
         return True
+    return None if missing else False
+
+
+def settle_panel_strong(b, log=None, need=2):
+    """结算面板在不在 —— **要 ≥`need` 个按钮同时命中**才算 ✓（比 `settle_panel_hit` 严格）
+
+    ⭐⭐ v1.48：专供 `start_fight()` 用 —— 因为**那里误判的代价不对称** ✗：
+      · 误判 `True` ⇒ 以为这一场打完了 ⇒ **跳过一场战斗、丢奖励** ✗✗（不可接受）
+      · 漏判        ⇒ 只是**多付一次 OCR**（= 原行为）✓（无害）
+    ⇒ 用「**≥2 个按钮同时命中**」把假阳性压到几乎不可能：
+        三个按钮（回放战斗 y≈1223 / 关闭 y≈1440 / 自动跳过 y≈1560）**位置彼此独立**，
+        各自还在 `±(160,60)` 的定点窗口里比 78×200 的模板（`thr=0.80`）——
+        非结算帧要同时在**两个**正确位置命中，实际不可能 ✓
+    ``settle_panel_hit()` 的「任一命中即 True」保留给 `wait_end` 那条路不动 ✓
+
+    返回 `True` / `False` / `None`（`None` = **判不了** ⇒ 调用方**必须**回退 OCR ✓）
+    """
+    try:
+        import fixed_ref as _fxr
+    except Exception:       # noqa: BLE001
+        return None
+    img = b.img()
+    if img is None:
+        return None
+    hits = 0
+    missing = False
+    for nm, (cx, cy) in SETTLE_TPL.items():
+        hx, hy = SETTLE_TPL_HALF
+        got = _fxr.find(img, nm, region=(cx - hx, cy - hy, cx + hx, cy + hy),
+                        thr=SETTLE_TPL_THR)
+        if got is None:
+            if _fxr.load(nm) is None:
+                missing = True            # 模板不在 ⇒ 这一路判不了 ✓
+            continue
+        hits += 1
+        if hits >= int(need):
+            if log is not None:
+                log.append({'settle_tpl': 'strong_hit', 'hits': hits, 'need': need})
+            return True
     return None if missing else False
 
 
@@ -4150,6 +4244,18 @@ def count_slot_timers(items):
         elif ':' in t and _EXPLORE_TIMER_BROKEN_RE.match(t):
             loose += 1
     return strict, loose
+
+
+# ⭐⭐⭐ v1.48【探索小队「已完成」自动领取】的常量 —— 学 PC 端 `4ac67cf`/`dda68b8`/`677d5d9`
+#   ⚠ **一个槽位坐标都不写死**（手机端全分辨率 ⇒ 写死必错 ✗）——
+#     用**同一帧里别的槽位标签**（「空闲」/倒计时）的 y 当锚，要求「已完成」落在同一行 ✓
+_CLAIM_ROW_DY = 60      # 「已完成」与其它槽位标签的**行距容差**（参考系像素）
+_CLAIM_COL_DX = 140     # 复检时的**同槽**横向容差（槽位宽度量级 ✓）
+_CLAIM_FAIL_MAX = 3     # 连续领不掉几次 ⇒ 停止自动领取（PC 口径「连续 3 次」✓）
+# ⚠ 这两个是**跨图**计数（照 PC 的 `_CLAIM_FAIL_STREAK`）——
+#   用 `st`（每图一份）的话每张图都会重置 ⇒ 永远到不了 3 ⇒ 自愈失效 ✗
+_CLAIM_FAIL_STREAK = 0
+_CLAIM_FAIL_LOGGED = False
 
 
 def explore_slots_free(items):
@@ -6033,6 +6139,67 @@ def find_in(items, *keys):
     return None
 
 
+#: 「返回」窄带搜索区间（**参考系** y；`LAYOUT` 是 1080×1920 参考系、`sy` 恒等 ✓）
+#  ⚠ 必须 ≥ `mapbot.BAND_CROP_MIN`(520) 才会走**真裁图**那条（更矮的会退化成整帧+过滤，
+#    等于没省 ⇒ 这里取 540 ✓）
+BACK_BAND_REF = (LAYOUT.sy(980), LAYOUT.sy(1520))
+
+
+def back_poll(b, log=None, tag='back', band=None, timeout=6.0, poll=0.5,
+              full_after=4, full_max=2):
+    """「返回」两级搜索 + 轮询（学 PC 端 `d2832a7`，用户口径原话）
+
+    PC 端用户原话：「**最后这个返回能做成轮询吗，0.5s 搜索一次**」+
+                  「**探索已完成领取后的那个返回不一定都在一个位置**」✓
+    ⚠ PC 端踩过的坑：第一版**只扫底部窄带** ⇒ 返回跑到别处就永远找不到 ✗
+      ⇒ 只能靠标定坐标兜底 ⇒ 一旦位置不同就点空 ✗
+
+    两级（又快又稳）：
+      ① 每 `poll`(0.5s) 先扫**窄带** `band`（~真裁图 ⇒ 便宜 ✓；常见位置就在那 ✓）
+      ② 窄带连续 `full_after`(4) 次没中 ⇒ 做一次**全屏 OCR**（最多 `full_max`(2) 次）
+         —— 返回可能在别处 ✓
+      ③ `timeout`(6s) 仍没有 ⇒ 返回 None（**交给调用方用自己的标定坐标兜底** ⇒ 不卡死 ✓）
+
+    返回 `(x, y, via, polls)`，`via` ∈ {`'band'`, `'full'`}；没找到 ⇒ `None` ✓
+    ⚠ 每次轮询都 **先 `snap`**（`Bot.ocr` 有 v1.45 的**帧戳缓存** ——
+      不重新抓帧的话，同一帧同一带会直接复用上次结果 ⇒ **轮询等于只查了一次** ✗）
+    """
+    y0, y1 = band or BACK_BAND_REF
+    t0 = time.time()
+    polls = 0
+    full_tries = 0
+    while time.time() - t0 < timeout:
+        polls += 1
+        try:
+            b.snap('%s%d' % (tag, polls))
+        except Exception:       # noqa: BLE001
+            pass
+        try:
+            hi = b.ocr(band=(y0, y1), tag=tag) or []
+        except Exception:       # noqa: BLE001
+            hi = []
+        for it in hi:
+            if '返回' in (it.get('text') or ''):
+                return it['cx'], it['cy'], 'band', polls
+        # ② 窄带连续没中 ⇒ 全屏找一次（返回可能不在这个带里 ✓）
+        if polls >= full_after and full_tries < full_max:
+            full_tries += 1
+            try:
+                fi = b.ocr(tag='%s_full' % tag) or []
+            except Exception:       # noqa: BLE001
+                fi = []
+            cand = sorted((it['cy'], it['cx']) for it in fi
+                          if '返回' in (it.get('text') or ''))
+            if cand:
+                if log is not None:
+                    log.append({tag: 'back_found_full', 'polls': polls,
+                                'at': [cand[0][1], cand[0][0]],
+                                'note': '窄带没找到 ⇒ **全屏**找到「返回」✓'})
+                return cand[0][1], cand[0][0], 'full', polls
+        time.sleep(poll)
+    return None
+
+
 GUILD_BTN = (95, 1889)        # 主界面左下角「公会」
 BAG_BTN = (964, 1680)         # 公会界面右下角「背包」（在「招募」正下方）
 #   ⭐ 2026-09-30 重标定 (969,1700)→(964,1680)：模拟器 720x1600 放大条带实测背包图标中心
@@ -6286,17 +6453,30 @@ def use_supply(b, log, names=('结实补给',)):
         #     找不到就**跳过**，绝不盲点左上角 ✗（用户明确要求删掉这个动作 ✗）
         b.snap('supply_ret')
         it_ret = b.ocr(tag='supply')
-        back = find_button(it_ret, '返回', maxlen=4) or find_in(it_ret, '返回')
-        if back:
-            _panel_tap(b, back['cx'], back['cy'], 'norm', log=log, what='返回(文字)')
-            log.append({'supply_return': 'back_text', 'at': (back['cx'], back['cy']),
-                        'text': back['text']})
+        # ⭐⭐ v1.48【两级轮询找「返回」】—— 学 PC 端 `d2832a7`（用户口径原话）：
+        #   「**最后这个返回能做成轮询吗，0.5s 搜索一次**」+
+        #   「**探索已完成领取后的那个返回不一定都在一个位置**」✓
+        #   ⚠ 原来是**一次 OCR + 写死 BACK_BTN 兜底** ✗ ⇒
+        #     「返回」**不是立刻出现**的（PC 端实测：领取后 3s 抓的第一张里还没有它 ✗）
+        #     ⇒ 抓早了就漏点 ⇒ 只能盲点标定坐标 ⇒ 位置一变就点空 ✗
+        #   ⇒ `back_poll()`：0.5s 一次扫窄带 → 连 4 次没中⇒全屏找 → 6s 仍没有⇒标定兜底 ✓
+        _hb48 = back_poll(b, log=log, tag='supply_ret')
+        if _hb48:
+            _bx, _by, _bvia, _bpolls = _hb48
+            _panel_tap(b, _bx, _by, 'norm', log=log,
+                       what='返回(%s)' % ('窄带命中' if _bvia == 'band' else '全屏命中'))
+            log.append({'supply_return': 'back_%s' % _bvia, 'at': (_bx, _by),
+                        'polls': _bpolls})
+            say('       · 点「返回」(%d,%d)（%s，轮询 %d 次）✓'
+                % (_bx, _by, '窄带命中' if _bvia == 'band' else '全屏命中', _bpolls))
         else:
             # 交接文档里记的实测坐标：中间「返回」= (539,1212)（**归一化系** ✓ 仅作兜底）
             # ⭐ 2026-10-01 体检修：走 `_panel_tap` ⇒ 没生效会自动换通道（弹窗系）再试 ✓
-            _panel_tap(b, BACK_BTN[0], BACK_BTN[1], 'norm', log=log, what='返回(标定)')
+            _panel_tap(b, BACK_BTN[0], BACK_BTN[1], 'norm', log=log, what='返回(标定兜底)')
             log.append({'supply_return': 'back_coord', 'at': BACK_BTN,
                         'texts': [i['text'] for i in it_ret][:10]})
+            say('       · ⚠ 轮询 6s 没找到「返回」⇒ 用标定坐标 (%d,%d) 兜底'
+                % (BACK_BTN[0], BACK_BTN[1]))
         # ② 关闭背包（⭐⭐ 2026-10-01 真机修：背包那个 X 落在 toRef 丢弃的弹性带里
         #    ⇒ 只有**弹窗帧**看得见，且必须 `tap_dlg`（归一化系硬点会偏 C≈209 ✗）
         #    ⇒ 先按面板颜色判"背包还开着吗"，开着就点弹窗系 X；关了就直接走下一步 ✓）
@@ -6657,6 +6837,10 @@ def _board_dimmed(c):
 
 
 def one_round(b, log, rnd, prefix, st):
+    # ⭐ v1.48：探索「已完成」自动领取的**跨图自愈计数**要改模块级变量
+    #   （不声明 global 的话，下面的赋值会让它变成**局部变量** ⇒ 前面那次读取
+    #    直接 `UnboundLocalError` ✗ —— 这是 Python 的闭包陷阱，必须显式声明 ✓）
+    global _CLAIM_FAIL_STREAK, _CLAIM_FAIL_LOGGED
     cold, done = st['cold'], st['done']
     _t_round = time.time()       # ⭐ 诊断用：本轮起点（点序里每次点击相对它记秒数，见 §37.3）
     b.snap('%sr%03d' % (prefix, rnd))
@@ -6719,6 +6903,83 @@ def one_round(b, log, rnd, prefix, st):
     #   ⚠ `explore_slots_free` 认不到「空闲」时返回 None ⇒ **保留旧值**（不瞎写 ✓）；
     #     认到「空闲」= 硬证据 ⇒ 顺手把"两次点不动"的计数清零（说明槽真的空出来了）
     if EXPLORE_DISPATCH:
+        # ⭐⭐⭐ v1.48【探索小队「已完成」⇒ 自动领取】—— 学 PC 端 `4ac67cf` / `dda68b8` / `677d5d9`
+        #   PC 用户原话：「**槽位里有个已完成，点击已完成就能领取**」+
+        #                「**领取流程应该只在进图那次扫描触发**」（每图一次 ✓）+
+        #                「**明明没有完成，还一直去领取探索奖励**」✗（自愈的来历 ✓）
+        #   ⚠ 手机端原来**完全没有**这个功能 ⇒ 一个槽位显示「已完成」就**永远占着** ✗
+        #     ⇒ 少派一支小队（少一份产出）—— 这是"功能缺失"，不是"识别错了" ✓
+        #
+        #   ⭐ 零额外 OCR：判据直接用**轮首这一次** `b.ocr(tag='round')` 的 `items` ✓
+        #   ⭐⭐ **不硬编码槽位坐标**（手机端全分辨率 ⇒ 写死必错 ✗）：
+        #     用**同一帧里别的槽位标签**（「空闲」/ 倒计时）的 y 当锚 ⇒ 「已完成」必须
+        #     落在同一行（±`_CLAIM_ROW_DY`）才认 ✓
+        #     ⚠ 这条锚**是安全关键**：没有它的话，别处一个「已完成」可能把点击引到
+        #       **棋盘格**上 ⇒ 白花体力 ✗✗；有锚则只可能在探索槽那一行点 ✓
+        #   ⭐ 自愈（跨图计数，照 PC `_CLAIM_FAIL_STREAK`）：领完复检，连续 3 次领不掉
+        #     ⇒ 停止领取（治"没完成还一直领"、防日志刷屏 ✓）
+        if not st.get('claim_checked'):                 # ① 每图只跑一次 ✓
+            st['claim_checked'] = True
+            _cf48 = int(_CLAIM_FAIL_STREAK or 0)
+            if _cf48 >= _CLAIM_FAIL_MAX:
+                if not _CLAIM_FAIL_LOGGED:
+                    _CLAIM_FAIL_LOGGED = True
+                    log.append({'explore': 'claim_disabled',
+                                'streak': _cf48,
+                                'note': '连续 %d 次领不掉 ⇒ **停止自动领取**'
+                                        '（治"没完成还一直领" ✗）' % _cf48})
+                    say('       · ⚠ 连续 %d 次「已完成」领不掉 ⇒ 停止自动领取 ✗' % _cf48)
+            else:
+                _cd48 = [i for i in (items or [])
+                         if (i.get('text') or '').strip() == '已完成']
+                if _cd48:
+                    # 锚：同帧里其它槽位标签（「空闲」/ 倒计时）的 y
+                    _anchor48 = [i['cy'] for i in (items or [])
+                                 if ('空闲' in (i.get('text') or '')
+                                     or _EXPLORE_TIMER_RE.findall(
+                                         (i.get('text') or '').replace('：', ':')))]
+                    _tgt48 = None
+                    if _anchor48:
+                        _y48 = sorted(_anchor48)[len(_anchor48) // 2]     # 中位
+                        _cand48 = [i for i in _cd48
+                                   if abs(i['cy'] - _y48) <= _CLAIM_ROW_DY]
+                        if _cand48:
+                            _tgt48 = sorted(_cand48, key=lambda z: z['cy'])[0]
+                    if _tgt48 is None:
+                        log.append({'explore': 'claim_lonely',
+                                    'at': [(i['cx'], i['cy']) for i in _cd48[:3]],
+                                    'anchors': len(_anchor48),
+                                    'note': '有「已完成」但**不在槽位那一行**（或没有别的'
+                                            '槽位标签可当锚）⇒ **不点**（防点到棋盘格 ✗）'})
+                    else:
+                        _cx48, _cy48 = _tgt48['cx'], _tgt48['cy']
+                        _panel_tap(b, _cx48, _cy48, 'norm', log=log,
+                                   what='领取(已完成)')
+                        log.append({'explore': 'claim_done', 'at': (_cx48, _cy48),
+                                    'anchor_y': _y48})
+                        say('       · 探索槽「已完成」⇒ 点它领奖 (%d,%d) ✓'
+                            % (_cx48, _cy48))
+                        # ② **复检同一位置**（自愈的核心：以"有没有真领掉"为准 ✓）
+                        time.sleep(1.2)
+                        try:
+                            b.snap('claim_re')
+                            _re48 = [i for i in (b.ocr(tag='claim_re') or [])
+                                     if (i.get('text') or '').strip() == '已完成'
+                                     and abs(i['cy'] - _cy48) <= _CLAIM_ROW_DY
+                                     and abs(i['cx'] - _cx48) <= _CLAIM_COL_DX]
+                        except Exception:       # noqa: BLE001
+                            _re48 = None
+                        if _re48:
+                            _CLAIM_FAIL_STREAK = int(_CLAIM_FAIL_STREAK or 0) + 1
+                            log.append({'explore': 'claim_not_cleared',
+                                        'streak': _CLAIM_FAIL_STREAK,
+                                        'at': (_cx48, _cy48),
+                                        'note': '领完复检**同位置仍是「已完成」** ⇒ 判失败 ✗'})
+                            say('       · 领完复检：那槽**还是「已完成」**⇒ 判失败（连续 %d 次）✗'
+                                % _CLAIM_FAIL_STREAK)
+                        elif _re48 is not None:
+                            _CLAIM_FAIL_STREAK = 0
+                            log.append({'explore': 'claim_cleared', 'at': (_cx48, _cy48)})
         _sf_now, _si = explore_slots_free(items)
         entry['slots'] = _si
         if _sf_now is not None:

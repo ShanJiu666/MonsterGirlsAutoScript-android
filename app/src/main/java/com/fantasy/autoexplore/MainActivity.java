@@ -64,6 +64,16 @@ public class MainActivity extends Activity {
     /** 红装锁状态文案（由后台 tick 更新；refreshStatus 只负责画，不再同步调 Python） */
     private volatile String redLockText = "?";
 
+    // ── 特殊方块勾选（v1.46；学 PC 端 `0e43db5` / `2ab3105`）──
+    /** 勾选排所在卡片（放「更新」下面 —— 用户口径 ✓） */
+    private LinearLayout cardSp;
+    /** 勾选行的容器（buildUi 只搭骨架；行由 `fillSpecialRows()` 在 PyBridge 绑好后填 ✓） */
+    private LinearLayout spBody;
+    /** 占位/错误提示行 */
+    private TextView spLoading;
+    /** 已成功填过一次就不重复填（避免每次 tick 都重建 View ✓） */
+    private boolean spFilled = false;
+
     /** 界面自动刷新（可见时才跑）：后台读 Python → 回主线程画（⚠ 绝不在 UI 线程调 Python） */
     private final Runnable tick = new Runnable() {
         @Override
@@ -86,6 +96,10 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     redLockText = (fr.isEmpty() || "{}".equals(fr)) ? "无" : "有（先解锁）";
                     showSummary(ft);
+                    // ⭐ v1.46：特殊方块勾选**兜底重试** ——
+                    //   Python 冷启动要几秒，onCreate 里那一次可能还没就绪；
+                    //   这里每轮试到填上为止（`spFilled` 置位后本调用直接返回 ✓）
+                    fillSpecialRows();
                     refreshStatus();
                 });
             }, "ui-poll").start();
@@ -106,6 +120,10 @@ public class MainActivity extends Activity {
         logListener = line -> ui.post(() -> appendLog(line));
         AppLog.addListener(logListener);
         DeviceApi.bind(getApplicationContext());      // ⭐ Python 桥依赖 appCtx（解包/OCR/RUNS）
+        // ⚠ 必须在 bind **之后**才能填特殊方块勾选（真机踩过：
+        //   bind 之前调 ⇒ `PyBridge.bind 还没调用过` ⇒ 整个勾选排空 ✗）
+        //   这里先试一次；Python 冷启动慢就在 tick 里继续重试 ✓
+        fillSpecialRows();
 
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
@@ -401,6 +419,37 @@ public class MainActivity extends Activity {
         card4.addView(rowU);
         content.addView(card4);
 
+        // ══════ 卡片④：特殊方块勾选（用户口径：**放在「更新」下面**）════════
+        //  学 PC 端 `0e43db5` / `2ab3105`：
+        //  用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中**商人和宝库默认勾选**，
+        //    其他的默认不勾选（就是拉黑），**暂时也无法勾选**」✓
+        //  语义（`targets_cfg` 顶部注释）：`types` 里 **true = 主动去处理**；
+        //    缺/False ⇒ `is_blocked(name)` = True ⇒ **拉黑**（不进目标、也不借道 ✓）
+        //  ⚠ 勾选变化**立刻落盘** ✓（PC 端 `2ab3105` 修的坑：攒着不写 ⇒ 改了没用 ✗）
+        //  ⚠ 取消勾选要**显式写 False** ✓ —— 不能删键，否则 `load()` 的
+        //    `setdefault(k, True)` 会把它补回 True ⇒ 取消勾选**永远无效** ✗✗
+        //  ⚠⚠ 真机踩到的坑：**不能在 `buildUi()` 里调 Python** ✗ ——
+        //    `DeviceApi.bind()` 是 `setContentView(buildUi())` **之后**才调的
+        //    ⇒ 那时 `PyBridge` 还没绑 ⇒ `IllegalStateException: bind 还没调用过`
+        //    ⇒ 整个勾选排填不出来（真机实测：卡片在、里面只有一行"读不到清单"）
+        //    ⇒ 所以这里**只搭骨架**，行由 `fillSpecialRows()` 在 bind 之后填 ✓
+        cardSp = card("特殊方块（不勾 = 拉黑）");
+        TextView spHint = new TextView(this);
+        spHint.setText("商人和宝库默认勾选；其余特殊方块暂时锁定（= 拉黑）。"
+                + "改动立刻生效，下一轮规划就按新口径走 ✓");
+        spHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        spHint.setTextColor(UI_SUB);
+        cardSp.addView(spHint);
+        spBody = new LinearLayout(this);
+        spBody.setOrientation(LinearLayout.VERTICAL);
+        cardSp.addView(spBody);
+        spLoading = new TextView(this);
+        spLoading.setText("（正在读清单…）");
+        spLoading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        spLoading.setTextColor(UI_SUB);
+        spBody.addView(spLoading);
+        content.addView(cardSp);
+
         // ══════ 卡片③：调试（**按钮默认关闭**：Prefs.showDebug 默认 false ⇒ 整盒藏起）════════
         LinearLayout card3 = card("调试");
         LinearLayout rowD = new LinearLayout(this);
@@ -504,6 +553,79 @@ public class MainActivity extends Activity {
         tv.setTextColor(UI_SUB);
         tv.setPadding(0, dp(2), 0, dp(6));
         return tv;
+    }
+
+    /**
+     * 「特殊方块」勾选排 —— 学 PC 端 `0e43db5` / `2ab3105` / `5de0e9c`。
+     *
+     * <p>用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中<b>商人和宝库默认勾选</b>，
+     * 其他的默认不勾选（就是拉黑），<b>暂时也无法勾选</b>」✓
+     *
+     * <p>语义：`targets_cfg.types` 里 <b>true = 主动去处理</b>；缺/False ⇒ 拉黑 ✓
+     * <p>勾选变化<b>立刻落盘</b> ✓（PC 端 `2ab3105` 修的坑：攒着不写 ⇒ 改了没用 ✗）
+     * <p>可勾的两个 = `explore_android.SP_EDITABLE`（旅行商人 / 黄金宝库），
+     * 其余 `locked=true` ⇒ <b>灰掉</b>（用户口径「暂时无法勾选」✓）
+     *
+     * <p>⚠⚠ 真机踩到的坑：<b>不能在 `buildUi()` 里调它</b> ✗ ——
+     * `DeviceApi.bind()` 是 `setContentView(buildUi())` <b>之后</b>才调，
+     * 那时 `PyBridge` 还没绑 ⇒ `IllegalStateException: bind 还没调用过`
+     * ⇒ 卡片建出来了、里面只有一行「读不到清单」（真机实测 ✗）
+     * ⇒ 所以本方法<b>幂等 + 可重试</b>：在 bind 之后调一次，
+     * 没成功就让 tick 每轮再试（Python 冷启动慢也能补上 ✓）
+     */
+    private void fillSpecialRows() {
+        if (spFilled || spBody == null) {
+            return;
+        }
+        String js = PyBridge.call("special_list");
+        org.json.JSONArray arr = null;
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(
+                    (js == null || js.isEmpty()) ? "{}" : js);
+            arr = o.optJSONArray("items");
+        } catch (Throwable e) {
+            AppLog.i("特殊方块：解析列表失败 " + e);
+        }
+        if (arr == null || arr.length() == 0) {
+            if (spLoading != null) {
+                spLoading.setText("（正在读清单…若一直这样，看日志）");
+            }
+            return;                    // 不置 spFilled ⇒ 下一轮 tick 会再试 ✓
+        }
+        spBody.removeAllViews();
+        spFilled = true;
+        LinearLayout box = spBody;
+        // 排布：横向流式放，每行最多 2 个（手机上再窄也不挤 ✓）
+        LinearLayout row = null;
+        for (int i = 0; i < arr.length(); i++) {
+            org.json.JSONObject it = arr.optJSONObject(i);
+            if (it == null) {
+                continue;
+            }
+            final String nm = it.optString("name", "");
+            final boolean on = it.optBoolean("on", false);
+            final boolean locked = it.optBoolean("locked", true);
+            if (i % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                box.addView(row);
+            }
+            CheckBox cb = new CheckBox(this);
+            cb.setText(nm + (locked ? "（锁定）" : ""));
+            cb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            cb.setTextColor(locked ? UI_SUB : UI_TXT);
+            cb.setChecked(on);
+            cb.setEnabled(!locked);            // 锁定的灰掉（用户口径「暂时无法勾选」✓）
+            if (!locked) {
+                cb.setOnCheckedChangeListener((v, val) -> {
+                    String r = PyBridge.call("special_set", nm, val);
+                    AppLog.i("特殊方块「" + nm + "」⇒ "
+                            + (val ? "勾选·主动处理" : "取消·拉黑") + "（" + r + "）");
+                });
+            }
+            row.addView(cb, lp());
+        }
     }
 
     /** 给任意 View 铺圆角底（状态芯片用） */

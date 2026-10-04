@@ -769,3 +769,72 @@ def _cmd_run_snippet(code):
         import traceback
         print(traceback.format_exc()[-1500:], flush=True)
         return 'error: %r' % (e,)
+
+
+# ─────────────── 特殊方块勾选（学 PC 端 `0e43db5` / `2ab3105`）───────────────
+#  用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中**商人和宝库默认勾选**，
+#    其他的默认不勾选（就是拉黑），**暂时也无法勾选**」✓
+#  ⭐ 手机端的载体不是 Tk 窗口，而是 `MainActivity` 的勾选排（新增「特殊方块」卡片）✓
+#  ⭐ 语义（`targets_cfg` 顶部注释）：`types` 里 **true = 主动去处理**；
+#     缺/False ⇒ `is_blocked(name)` = True ⇒ **拉黑** ✓
+
+#: 界面上**可勾**的两个（其余锁定为"不勾 = 拉黑"，与 PC 端一致 ✓）
+SP_EDITABLE = ('旅行商人', '黄金宝库')
+
+
+def special_list():
+    """特殊方块勾选状态（JSON；给 MainActivity 建勾选排用 ✓）
+
+    返回 `{"items": [{"name":…, "on":bool, "locked":bool}, …], "hint": …}`
+    ⚠ `locked=true` ⇒ 界面上**灰掉**（用户口径「暂时也无法勾选」✓）
+    """
+    _bootstrap()
+    import json as _json
+    try:
+        import targets_cfg as TC
+        cfg = TC.current()
+        items = []
+        # ⭐ 顺序：可勾的两个在前，其余按名字排（与 PC 端勾选排同款 ✓）
+        names = list(SP_EDITABLE) + sorted(
+            n for n in (TC.SPECIAL_NAMES or ()) if n not in SP_EDITABLE)
+        for nm in names:
+            items.append({
+                'name': nm,
+                'on': bool(TC.enabled(nm, cfg)),
+                'locked': nm not in SP_EDITABLE,
+            })
+        return _json.dumps({'items': items,
+                            'editable': list(SP_EDITABLE)},
+                           ensure_ascii=False)
+    except Exception as e:      # noqa: BLE001
+        print('特殊方块：读配置失败 %r' % (e,), flush=True)
+        return _json.dumps({'items': [], 'error': repr(e)}, ensure_ascii=False)
+
+
+def special_set(name, on):
+    """勾选/取消一个特殊方块 ⇒ **立刻落盘** ✓（学 PC 端 `2ab3105`）
+
+    ⚠⚠ 取消勾选必须**显式写 `False`**，**不能删键** ✗ ——
+      `targets_cfg.load()` 有 `for k in DEFAULT_ON: types.setdefault(k, True)`
+      ⇒ 删键会被补回 True ⇒ **取消勾选永远无效** ✗✗（PC 端踩过这个坑 ✓）
+    """
+    _bootstrap()
+    import targets_cfg as TC
+    try:
+        nm = str(name or '')
+        if nm not in SP_EDITABLE:
+            return 'locked: %s（暂不可勾选）' % nm
+        cfg = dict(TC.current() or {})
+        types = dict(cfg.get('types') or {})
+        types[nm] = bool(on)                    # ⭐ 显式写 True/False（不删键 ✓）
+        cfg['types'] = types
+        ok = TC.save(cfg)
+        # ⚠ save 会刷新 mtime ⇒ current() 下一轮立即看到新值 ✓（无需重启 ✓）
+        print('特殊方块「%s」⇒ %s（%s）'
+              % (nm, '勾选·主动处理' if on else '取消·拉黑',
+                 '已落盘 ✓ 下一轮生效' if ok else '落盘失败 ✗'),
+              flush=True)
+        return 'ok' if ok else 'error: save failed'
+    except Exception as e:      # noqa: BLE001
+        print('特殊方块：保存失败 %r' % (e,), flush=True)
+        return 'error: %r' % (e,)

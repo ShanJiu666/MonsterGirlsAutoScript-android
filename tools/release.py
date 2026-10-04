@@ -85,6 +85,29 @@ def read_manifest_live():
 # 补丁里带哪些文件：**只带 .py（顶层）** —— 解出来直接是模块名，
 # 因为 Java 侧把 hot/active 插到 sys.path[0]，模块名 = 文件名 ✓
 HOT_PATTERNS = ('.py',)
+
+# ⭐⭐⭐ 2026-10-04【桥模块**永不进补丁**】—— 学 PC 端 `hotupdate.BOOT_LAYER` 的教训
+#
+#   真机事故（v1.47，Redmi 25053RT47C）：
+#     我给 `MainActivity` 加了「特殊方块勾选」卡片，Java 侧调
+#     `PyBridge.call("special_list")` ⇒ 报
+#       `AttributeError: module 'explore_android' has no attribute 'special_list'`
+#     而 APK 里那份 `explore_android.pyc` **明明有**这个函数（验过 ✓）
+#   根因：`Updater.bootRecover` 会把 `hot/active` 插到 **`sys.path[0]`**
+#     ⇒ 补丁里那份**旧的** `explore_android.py` **覆盖**了 APK 里的新版 ✗✗
+#     ⇒ 而 `explore_android` 是 **Java↔Python 的唯一入口** ——
+#        Java 新增的任何桥函数（`special_list` / `special_set` / …）都会被旧补丁吃
+#        ⇒ 症状是"界面空白 / 功能静默失效"，且**看 APK 内容完全正常**，极难排查
+#   为什么之前没人踩到：以前动的是 `explore_loop/buypanels` 那些**业务模块**，
+#     补丁里带着它们的新版，行为是对的 ⇒ 直到这次动了**桥模块本身**才暴露 ✗
+#   ⇒ 口径：`explore_android.py` = **引导/桥层**，与 PC 端 `bootstrap.py`/`hotupdate.py` 同级
+#     · 补丁里**不带它** ⇒ 端上永远用 APK 里那份 ✓
+#     · 改它 ⇒ **必须重发整包**（和 PC 端同一个规矩 ✓）
+#   ⚠ 已装的老补丁里若含它，会**继续遮蔽**到下次补丁激活为止 ——
+#     而激活时旧 active 会被整体移到 `hot/bad/prev-*`（不是逐文件合并 ✓）
+#     ⇒ 发一次**不含它**的新补丁，端上就自动净化 ✓
+BOOT_LAYER = ('explore_android.py',)
+
 # 资源包（模板/数据表 ~57MB）默认**不进补丁**：它占体积、且改模板属于"大改"，走整包更稳。
 #   ⇒ 真要热更资源时用 --with-pack（zip 里带 pack/ 前缀，Python 侧另行认领）。
 KEEP_HOT_ZIPS = 5                      # 仓库配额有限（1GB），只留最近 5 个补丁
@@ -175,12 +198,18 @@ def build_hot_zip(vc, with_pack):
     ⚠ 两个坑：
       ① **不带 `__pycache__`** —— .pyc 的 mtime 校验会让端上误用旧码，而且白占体积；
       ② **不带 `runs/` `templates/`** —— 那些是运行期目录，塞进补丁会把玩家的现场数据覆盖掉。
+    ⭐ v1.47 第三个坑：**不带 `BOOT_LAYER`**（桥/引导层）—— 见 `BOOT_LAYER` 的注释
+      （它会遮蔽 APK 里 Java 要调的新桥函数 ✗）
     """
     tmp = os.path.join(tempfile.gettempdir(), 'mgas_hot_%d.zip' % int(time.time()))
     names = []
+    skipped = []
     with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
         for fn in sorted(os.listdir(PY_DIR)):
             if not fn.endswith(HOT_PATTERNS):
+                continue
+            if fn in BOOT_LAYER:
+                skipped.append(fn)          # ⭐ 引导层不进补丁（改了要重发整包 ✓）
                 continue
             full = os.path.join(PY_DIR, fn)
             if not os.path.isfile(full):

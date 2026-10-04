@@ -58,9 +58,27 @@ DEFAULT_ON = (PSEUDO_MARK, '旅行商人', '黄金宝库', PSEUDO_EXPLORE)
 #     （商人/宝库/宝箱怪/勇者之墓/祭坛/礼包/石碑…）⇒ 只有**这一组**享受
 #     "不勾 = 拉黑"语义；普通拾取格/建筑不勾只是"不去拿"，仍可当路 ✓
 SPECIAL_NAMES = {
-    '旅行商人', '黄金宝库', '金属宝箱怪', '机巧宝箱怪', '献祭宝箱怪',
-    '勇者之墓', '传承祭坛', '限时礼包', '预言石碑', '预言石板',
+    '旅行商人', '黄金宝库', '金属宝箱怪', '机巧宝箱怪',
+    '勇者之墓', '传承祭坛', '限时礼包', '预言石碑',
 }
+# ⭐⭐⭐ v1.46 删两个**数据表里根本不存在**的名字（学 PC 端 `1e9afce` + `b5f08a6`）：
+#   · `献祭宝箱怪` —— 查 `Area_Spot` 全部 482 行：它虽在 15 个区域有条目，
+#     但 **`MaxNum = 0`** ⇒ **游戏根本不会生成它** ✗（对比：金属宝箱怪 ≥11/MaxNum=1、
+#     机巧宝箱怪 ≥21/MaxNum=1 ⇒ 这两个才会出 ✓）⇒ 用户"从来没见过"是正常的 ✓
+#   · `预言石板` —— **数据表里没这个名字**，真名是 **`预言石碑`** ✓（已有，重复项）
+#   ⇒ 清单里的幽灵项会让勾选排多出两个永远勾不动的框 ✗ ⇒ 删掉 ✓
+
+
+# ⭐⭐⭐ v1.46【拉黑要带**置信度门槛**】—— 学 PC 端 `is_blocked_cell`（真机事故）
+#   PC 端事故：boss 格被当「用户拉黑」永久剔除 ⇒ 规划里根本没有它 ⇒
+#     **14 点体力的首领不打了**（用户原话报「紫探索块且有大拇指直接打了就关闭」）。
+#   根因：老口径 `is_blocked(name)` **只判名字**、不看认得准不准 ⇒
+#     同一帧里 5,1/5,2/5,5 都是 **0.30~0.32 的乱猜**，照样被当成"用户拉黑了它" ✗✗
+#   ⇒ **低置信度的分类结果没有资格代表「用户拉黑了它」** —— 拉黑是用户的明确意图，
+#     不该由一个 0.3 分的猜测来代替 ✓
+#   门槛 0.70 的依据（PC 端实测分布）：真识别 **≥0.994** 与乱猜 **≤0.397** 之间几乎是空的
+#     （35 格里：28 格 ≥0.9、4 格 ≤0.4、**中间 0 格**）⇒ 0.70 离两侧都远，稳 ✓
+BLOCKED_SCORE_MIN = 0.70
 
 
 def is_blocked(name, cfg=None):
@@ -68,6 +86,7 @@ def is_blocked(name, cfg=None):
 
     ⚠ 只有 `SPECIAL_NAMES`（商店/大奖励那一组）适用；别的名字不勾 = 不去拿，但不当路障 ✓
     ⚠ 勾上了 ⇒ 立即变成"主动处理"，无需改代码 ✓（用户要求"能自由选择" ✓）
+    ⚠⚠ **本函数只看名字、不看置信度** ⇒ 有 score 时请用 `is_blocked_cell()` ✓（v1.46）
     """
     n = str(name or '')
     if not n:
@@ -76,6 +95,23 @@ def is_blocked(name, cfg=None):
         if k in n:
             return not enabled(k, cfg)      # 没勾 ⇒ 拉黑 ✓ ／ 勾了 ⇒ 主动处理 ✓
     return False
+
+
+def is_blocked_cell(cell, cfg=None):
+    """这一格是不是**真的**被拉黑（比 `is_blocked` 多一道置信度门槛）★ v1.46
+
+    `cell` = `{'name':…, 'score':…}`（`spots.Board.state()` 的单格产物 ✓）
+    ⚠ 老口径 `is_blocked(name)` **只判名字**、不看认得准不准 ⇒ 低分乱猜也会中招 ✗
+    ⚠ **不认得准 ⇒ 一律不拉黑**（宁可多点一格，也别把 boss 静默丢掉 ✓）
+    """
+    name = (cell or {}).get('name')
+    if not is_blocked(name, cfg):
+        return False
+    try:
+        sc = float((cell or {}).get('score') or 0.0)
+    except (TypeError, ValueError):
+        sc = 0.0
+    return sc >= BLOCKED_SCORE_MIN
 
 # 算作「标记格」的标记名（与 marks.py 的口径一致；battle = 认不出但带标记的兜底 ✓）
 MARK_KEYS = ('boss', 'redEquip', 'recommend', 'clover', 'battle')
@@ -109,6 +145,10 @@ def load(path=None, tag=None, base=None):
     for k in DEFAULT_ON:                                # 默认口径兜底（新装/删过都能跑）
         d['types'].setdefault(k, True)
     _CACHE['cfg'], _CACHE['path'] = d, p
+    try:                                                # ⭐ mtime 记下来（供 current 判陈旧 ✓）
+        _CACHE['mtime'] = os.path.getmtime(p)
+    except Exception:                                   # noqa: BLE001
+        _CACHE['mtime'] = None
     if not os.path.exists(p):
         save(d, p)
     return d
@@ -130,6 +170,23 @@ def save(cfg, path=None):
 
 
 def current():
+    """当前配置 —— ⭐⭐⭐ v1.46 **mtime 感知**（学 PC 端 `0578bb6`，用户口径）
+
+    PC 端用户口径（原话）：「**之后取消拉黑也能随时改计划吧？**」✓
+
+    ⚠ 原来的坑：`_CACHE` **只读一次、没有 mtime 校验** ✗ ⇒
+      界面上改了「特殊方块」勾选 ⇒ **跑着的循环根本不知道** ✗
+      ⇒ 必须**重启循环**才生效 ✗✗（用户以为随时能改 ✗）
+    ⇒ 现在每次询问都先比一下文件 mtime ✓（一次 stat，微秒级 ⇒ 可忽略 ✓）：
+        文件被改过 ⇒ 立即重读 ✓ ⇒ **下一轮规划就用新口径** ✓
+    """
+    try:
+        p = _CACHE.get('path') or cfg_path()
+        _mt = os.path.getmtime(p)
+        if _CACHE.get('mtime') != _mt:
+            return load(p)                  # 文件变了 ⇒ 重读（并刷新 mtime ✓）
+    except Exception:                       # noqa: BLE001
+        pass
     return _CACHE.get('cfg') or load()
 
 
