@@ -866,6 +866,10 @@ public class OverlayService extends Service {
         btnStart.setVisibility(startVis);
         btnStop.setVisibility(vis);
         btnClose.setVisibility(vis);
+        // ⭐⭐ 2026-10-04 用户口径：「悬浮窗的反馈按钮只有展开的时候才能看到，和启动停止那些类似，
+        //   **不要关闭了也能看到**」⇒ 反馈与 ■/✕ **同类**：只在展开态露出。
+        //   ⚠ 原来 `btnFb` 建好之后**从没调过 setVisibility** ⇒ 收起态也一直露着（用户看到的 bug）✗
+        btnFb.setVisibility(vis);
         if (!showLog && expanded) {
             tvLog.showActionOnly();
         }
