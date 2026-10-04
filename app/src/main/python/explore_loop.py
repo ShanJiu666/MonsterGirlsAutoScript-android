@@ -796,43 +796,6 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
         if log is not None:
             log.append({tag: 'mark_cell_added', 'cell': '%d,%d' % _k,
                         'marks': _ml})
-    # ⭐⭐⭐ v1.53【给观测里的**营地那一格**打 `camp=True`】—— 抄 PC（这一步是地基）
-    #   PC 原话：「循环侧用 `find_camp_cell()`（老判据 + sid 后缀 000 兜底）认出来后，
-    #     **在观测里给那一格打 `camp=True`**，这里（`mapsim.Block.camp`）接住它」
-    #
-    #   ⚠⚠ **真机日志实测（v1.52，用户跑的那把）**：
-    #     `{"solver":"no_plan","reason":"exhausted","expanded":1}` —— **只展开 1 个节点
-    #     就判无解** ⇒ 说明**开局的候选集是空的** ✗✗
-    #     开局候选 = `camp_nb | empty_adj`：新图没有任何已消耗格 ⇒ `empty_adj=0`；
-    #     营地若没被认出来（`Problem.camp=None`）⇒ `camp_nb=0`
-    #     ⇒ **两个都是 0 ⇒ 一步都走不了** ✗✗
-    #   而 `Problem` 找营地有两条路：① 块名含「营地」② `Block.camp` 兜底
-    #     —— **手机端以前只存了 `st['camp']`（像素），从没在观测里打 `camp` 标**
-    #     ⇒ 路② 永远不触发 ⇒ 营地格被多格块吞掉时（真机常见）**直接无解** ✗
-    #   ⇒ 按 PC 补齐：`st['camp']` 命中的那一格打标；再退一步用 **sid 后缀 000** 兜底 ✓
-    try:
-        _cmp53 = st.get('camp') or st.get('spawn')
-        _hit53 = None
-        if _cmp53:
-            _rc53 = cell_of(_cmp53[0], _cmp53[1])
-            _hit53 = _rc53 if _rc53 in _cells_merged else None
-        if _hit53 is None:                       # 兜底：sid 后缀 000 就是营地 ✓
-            for _k53, _v53 in _cells_merged.items():
-                if str(_v53.get('sid') or '').endswith('_000'):
-                    _hit53 = _k53
-                    break
-        if _hit53 is not None:
-            _cells_merged[_hit53]['camp'] = True
-            if log is not None:
-                log.append({tag: 'camp_tagged', 'cell': '%d,%d' % _hit53,
-                            'note': '营地那一格打 `camp` 标 ⇒ `Problem.camp` 有锚点 ✓'
-                                    '（没它开局候选集会空 ⇒ `no_plan exhausted` ✗）'})
-        elif log is not None:
-            log.append({tag: 'camp_not_found',
-                        'note': '⚠ 没认出营地格 ⇒ `Problem.camp` 可能为空 '
-                                '⇒ 开局可能无解（看 solver 的 expanded 是不是 1）✗'})
-    except Exception:       # noqa: BLE001
-        pass
     # ---- ⭐⭐⭐ 2026-10-01 用户报「点了金属宝箱怪（说了不点的）」----
     #   根因：`_blocked_px` 只把拉黑格从 `nones_extra`（内容格/开路池）剔掉了，
     #   但**规划器（solver/eff）喂进去的 cells 里没剔** ⇒ 它照样把宝箱怪排进点序 ✗
@@ -950,6 +913,66 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
     if _dropped and log is not None:
         log.append({tag: 'done_cells_dropped', 'n': len(_dropped),
                     'cells': ['%d,%d' % k for k in _dropped[:12]]})
+    # ⭐⭐⭐ v1.54【营地打标必须在**删除之后**、且只打在**存活格**上】—— 修我 v1.53 的 bug
+    #
+    #   **真机日志铁证（v1.53，用户跑的那把）**：
+    #     {"solver":"camp_tagged","cell":"1,7"}                  ← 营地被标在 (1,7)
+    #     {"solver":"done_cells_dropped","n":1,"cells":["1,7"]}  ← 紧接着 (1,7) **被删掉** ✗✗
+    #     {"solver":"no_plan","reason":"exhausted","expanded":1} ← 候选 0 ⇒ 无解
+    #   ⇒ **一格不可能既是营地又是已消耗格** —— 我把 `camp` 打在了**马上要被删**的格上
+    #     ⇒ `Problem.camp` 指向一个**不存在的块** ⇒ `camp_nb=0`
+    #     ⇒ 开局候选集空 ⇒ `expanded:1` + `exhausted` ✗✗
+    #
+    #   ⚠ 用户口径（原话）：「**不可能出现开局没有一个地方能点的情况**」✓
+    #     —— 开局一定有可点的格（营地 + 它周围一圈，游戏规则）
+    #     ⇒ 所以"候选 0"**只能是模型 bug**，必须清干净 ✓
+    #
+    #   三条闸门（缺一不可）：
+    #     ① **顺序**：必须在 `_dropped` 之后的 `_out` 上打（删掉的格不算数 ✓）
+    #     ② **`_000` 兜底要挑分最高的那个** —— 原来取"第一个遇到的" ⇒
+    #        低分误判出的 `_000` 也会被认成营地 ✗（真机这次就是这样）
+    #     ③ 命中格**必须在 `_out` 里**（存活）且**不在 `done` 里**（没被消耗）✓
+    try:
+        _cmp54 = st.get('camp') or st.get('spawn')
+        _hit54, _how54 = None, ''
+        if _cmp54:
+            _rc54 = cell_of(_cmp54[0], _cmp54[1])
+            if _rc54 in _out:
+                _hit54, _how54 = _rc54, 'st.camp'
+        if _hit54 is None:          # 兜底：`_000` 是营地 —— **取分最高的那个** ✓
+            _best54 = None
+            for _k54, _v54 in _out.items():
+                if not str(_v54.get('sid') or '').endswith('_000'):
+                    continue
+                try:
+                    _sc54 = float(_v54.get('score') or 0.0)
+                except (TypeError, ValueError):
+                    _sc54 = 0.0
+                if _best54 is None or _sc54 > _best54[0]:
+                    _best54 = (_sc54, _k54)
+            if _best54 is not None:
+                _hit54, _how54 = _best54[1], '_000(score=%.2f)' % _best54[0]
+        # ③ 存活 + 未被消耗
+        if _hit54 is not None and cell_of(*_hit54) in done:
+            if log is not None:
+                log.append({tag: 'camp_skip_done', 'cell': '%d,%d' % _hit54,
+                            'how': _how54,
+                            'note': '命中格**已被消耗** ⇒ 不可能是营地 ⇒ 拒绝打标 ✓'
+                                    '（真机 v1.53 就在这踩过：标了 (1,7) 又被删 ✗）'})
+            _hit54 = None
+        if _hit54 is not None:
+            _out[_hit54]['camp'] = True
+            if log is not None:
+                log.append({tag: 'camp_tagged', 'cell': '%d,%d' % _hit54,
+                            'how': _how54,
+                            'note': '营地打标（**在删除之后、存活格上** ✓）'
+                                    '⇒ `Problem.camp` 有锚点 ⇒ 开局候选非空 ✓'})
+        elif log is not None:
+            log.append({tag: 'camp_not_found',
+                        'note': '⚠ 没认出营地格 ⇒ `Problem.camp` 可能为空 '
+                                '⇒ 开局可能无解（看 solver 的 expanded 是不是 1）✗'})
+    except Exception:       # noqa: BLE001
+        pass
     return _out
 
 

@@ -5294,10 +5294,14 @@ try:
     import mapsolve as _ms53
     _el53 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
                              'explore_loop.py'), encoding='utf-8').read()
-    check('v1.53 ① _cells_for_model 给营地的格子打 camp 标'
-          '（PC 口径：st[\'camp\'] + **sid 后缀 000 兜底** ✓）',
-          "_cells_merged[_hit53]['camp'] = True" in _el53
-          and "endswith('_000')" in _el53)
+    check('v1.54 ① 营地打标在**删除之后**、只打**存活格**'
+          '（修我 v1.53 的 bug：标了立刻被删的格 ⇒ `Problem.camp` 指向不存在的块 ✗）',
+          "_out[_hit54]['camp'] = True" in _el53
+          and 'camp_skip_done' in _el53)
+    check('v1.54 ② `_000` 兜底**取分最高的**（低分误判也认营地 ⇒ v1.53 真机踩过 ✗）',
+          '_best54' in _el53 and '_sc54' in _el53)
+    check('v1.54 ③ 命中格**已被消耗就拒绝打标**（一格不可能既是营地又是已消耗 ✗）',
+          'camp_skip_done' in _el53 and 'cell_of(*_hit54) in done' in _el53)
     check('v1.53 ② 打不上时会**记日志**（camp_not_found ⇒ 下次能一眼看出 ✗）',
           'camp_not_found' in _el53)
 
