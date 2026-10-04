@@ -3009,83 +3009,247 @@ except Exception as _e33b:      # noqa: BLE001
     check('v1.33 ⑫⑬ 实证闸可运行（%r）' % (_e33b,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
-# ㊾ v1.34 ⭐⭐⭐【能点的首领格必须立刻打，不许先点它周围的素材格】
-#   用户 2026-10-02 报（朋友真机 Redmi 1280×2772）：「会把能点的素材格全点开，
-#   **boss 格已经能打了**，还是会先点 boss 格周围的素材格」✗
-#   **真机铁证**（`fb_20261002_015406/mgas_log.txt`）：
-#     `marks {"2,3": ["boss","recommend"]}` + `solver order ["3,5","2,3"]`
-#     同一轮还有 `{"popup":"fight_panel","cell_marks":["boss","recommend"]}`
-#     ⇒ boss 当下**完全可打**（战斗面板都弹出来了），点序却把它排在**第 2 位** ✗
-#   根因：解算器优化的是**总花费最小**，不知道"这格现在就能直接打"的价值；
-#        加上计划是**静态**的，排后面的 boss 会被前面的动作一路挤到最后 ✗
-#   修法：`_hoist_ready_boss_first()` 把**当下能点**的首领/红装格提到最前，
-#        其余顺序不动；雾里（点不动）的首领**绝不提**（提了也白花体力）✓
+# ㊾ v1.59 ⛔【**防「能点的首领优先」重排被加回来**】（反向断言，v1.34 那组已反转）
+#
+#   ⛔ **2026-10-04 v1.59：用户口径「去掉这个」⇒ 删除** ✓
+#     · 删的函数：`_hoist_ready_boss_first()` + `_ready_boss_cells()`
+#       （v1.34 加的：把**当下能点的首领/红装格**提到点序最前，其余顺序不动）
+#     · 删的调用点：`solver_order()` 与 `eff_order()` 两处（原话「不两处漂移」）
+#     · **为什么可以删**：这是**手机端独有的分叉** —— 报告已记 PC **明确不跟随**
+#       这个重排 ⇒ 删掉即**回退到 PC 的行为**（点序一律按解算器/策略给的顺序执行 ✓）
+#
+#   v1.34 的起因（保留作历史，别再"修"回去）：用户 2026-10-02 报（朋友真机）
+#     「会把能点的素材格全点开，**boss 格已经能打了**，还是会先点 boss 格周围的素材格」✗
+#     真机铁证（`fb_20261002_015406/mgas_log.txt`）：`marks {"2,3": ["boss","recommend"]}`
+#     + `solver order ["3,5","2,3"]`，同一轮还有 `{"popup":"fight_panel",…}`
+#     ⇒ boss 当下完全可打，点序却把它排在第 2 位。v1.34 的修法是"提到最前"，
+#       用户 2026-10-04 明确不要这个行为 ⇒ 撤销它，**不是**"把判据改成别的"
+#
+#   ⚠ 本组照 PC `verify_fog_only_start.py` 的做法：**防它被加回来**（反向断言）
+#     ① 三个符号**不许出现在代码里**（`def` 与调用点都查；解释性注释不算 ——
+#        4 处删除说明注释必须能提到这些名字，否则后人看不懂为什么删）
+#     ② 两个调用点位置现在是「**直接按解算器/策略顺序执行**」（`out` / `plan`
+#        不再被任何重排赋值）
+#     ③ **行为验收**（只查字符串不算验过）：真造一张「boss 当下可点、ratio 0.96
+#        ≥ `REVEAL_RATIO_MIN` 0.80，但解算器把它排在第 2 位」的盘，真跑
+#        `solver_order()` / `eff_order()` ⇒ 断言**结果保持原顺序**（boss 没被提前 ✓）
 # ─────────────────────────────────────────────────────────────────────────
 print()
-print('㊾ v1.34 能点的首领格优先打（不许先点周围素材）')
+print('㊾ v1.59 ⛔ 防「能点的首领优先」重排回归（用户口径「去掉这个」）')
 try:
-    _el34 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
+    _el59 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'),
                  encoding='utf-8').read()
-    check('v1.34 ① 重排函数在位（`_hoist_ready_boss_first` / `_ready_boss_cells`）',
-          'def _hoist_ready_boss_first(st, order' in _el34
-          and 'def _ready_boss_cells(st, order)' in _el34)
-    check('v1.34 ② **solver 与 eff 两条路径都调**（不两处漂移 ✓）',
-          _el34.count('_hoist_ready_boss_first(st,') >= 2
-          and "_hoist_ready_boss_first(st, _hoisted" not in _el34)
-    check('v1.34 ③ 只提**首领/红装**（普通标记/幸运草维持原顺序 ✓）',
-          "any(m in ('boss', 'redEquip') for m in _marks)" in _el34)
-    check('v1.34 ④ 雾里（ratio 低）的首领**不提出去**（提了也点不动，白花体力 ✗）',
-          'if _ratio < _min_ratio:' in _el34 and 'continue' in _el34)
-    # ⚠ 常量名陷阱：注释里写 `REVEALED_RATIO_MIN`，真名是 **`REVEAL_RATIO_MIN`**（少 ED）。
-    #   写成 `globals().get('REVEALED_RATIO_MIN', 0.75)` 会**静默吃默认值**、
-    #   拼错了也测不出来（2026-10-02 当场踩过）⇒ 这里断言**真名**在模块里 ✓
-    # ⚠ v1.36：改成**直接引用**模块常量 —— globals().get(默认) 会在
-    #   常量名拼错时**静默吃默认值**，永远测不出来（2026-10-02 已踩过 ✗）
-    check('v1.34 ⑤ 揭示阈值**直接引用**模块常量（不用 globals().get 兜底 ✗）',
-          '_min_ratio = REVEAL_RATIO_MIN' in _el34
-          and "globals().get('REVEAL_RATIO_MIN'" not in _el34)
-except Exception as _e34:       # noqa: BLE001
-    check('v1.34 源码守门可运行（%r）' % (_e34,), False)
+    # ⚠ 只剔**整行注释**后再查符号名：v1.59 在 4 处留了"为什么删"的说明注释
+    #   （`:84` / `:1191` / `:1402` / `:6956` 一带），它们**必须**能提到这两个名字
+    #   ⇒ 不能拿"名字在不在全文里"当判据（那会把好注释判成回归 ✗）
+    _code59 = '\n'.join(_l59 for _l59 in _el59.splitlines()
+                        if not _l59.lstrip().startswith('#'))
+    check('v1.59 ① ⛔ 重排三符号**不在代码里**（`_hoist_ready_boss_first` /'
+          ' `_ready_boss_cells` / 日志键 `boss_hoisted`）—— 用户口径「去掉这个」✓',
+          all(_n not in _code59
+              for _n in ('_hoist_ready_boss_first', '_ready_boss_cells',
+                         'boss_hoisted')))
+    check('v1.59 ② ⛔ **`def` 与调用点都查**：函数本体没了，'
+          '`_hoist_ready_boss_first(st, …)` / `_ready_boss_cells(st, …)` 调用式也没了',
+          'def _hoist_ready_boss_first(' not in _el59
+          and 'def _ready_boss_cells(' not in _el59
+          and '_hoist_ready_boss_first(st,' not in _el59
+          and '_ready_boss_cells(st,' not in _el59
+          and 'out = _hoisted' not in _el59)
+    # ---- ② 两个调用点位置：现在是「直接按解算器/策略顺序执行」----
+    _i59_cfp = _el59.index('for _rc, _bi, _w in prob.cells_for_plan(plan[:max_steps]):')
+    _i59_nt = _el59.index('_nt = len(sim.targets())')
+    _seg59_solver = _el59[_i59_cfp:_i59_nt]
+    check('v1.59 ③ solver 调用点：`cells_for_plan` 之后**直接**执行解算器顺序'
+          '（这段里再没有 `out = …` 的重排赋值 ✓）',
+          0 < _i59_cfp < _i59_nt
+          and 'out.append(_rc)' in _seg59_solver
+          and 'out = ' not in _seg59_solver,
+          '段内 %d 行' % (len(_seg59_solver.splitlines()),))
+    _i59_effp = _el59.index('plan = _Eff().plan(sim, max_click=max_steps, '
+                            'stop_when_no_target=False)')
+    _i59_effp_end = _el59.index('\n', _i59_effp)      # ⚠ 从**那一行之后**开始算
+    _i59_effl = _el59.index("log.append({'eff': 'ok'")
+    _seg59_eff = _el59[_i59_effp_end:_i59_effl]
+    check('v1.59 ④ eff 调用点：`plan = _Eff().plan(…)` 之后**直接**记日志/返回'
+          '（这段里再没有 `plan = …` 的重排赋值 ✓）',
+          0 < _i59_effp < _i59_effl
+          and all(not _l59.strip().startswith(('plan =', 'plan='))
+                  for _l59 in _seg59_eff.splitlines()
+                  if not _l59.strip().startswith('#')),
+          '段内 %d 行' % (len(_seg59_eff.splitlines()),))
+except Exception as _e59:       # noqa: BLE001
+    check('v1.59 源码反向守门可运行（%r）' % (_e59,), False)
 
-# ⑯ **实跑闸**：用**朋友那一局的真机数据**直接打真函数（不 mock、不复刻 ✓）
+# ③ **行为验收**（这次删除的真正验收：只查字符串不算验过）：
+#   造一张「boss **当下可点**（已揭示 / ratio 0.96 ≥ `REVEAL_RATIO_MIN` 0.80）
+#   但解算器把它排在**第 2 位**」的盘 ⇒ 真跑 `solver_order()` / `eff_order()`
+#   ⇒ 断言**结果保持解算器/策略原样顺序**（boss 没被提到最前 ✓）
+#   ⚠ 场景必须**确实命中旧判据**（marks 含 boss + ratio ≥ 阈值）—— 否则"
+#     旧代码也不会重排" ⇒ 这组断言等于恒绿 ✗（下面 ⑦/⑨ 就是这条自证 ✓）
 try:
-    # 真机那一局：boss 在 (2,3) 且已揭示（ratio 0.958），点序被排成 ["3,5","2,3"]
-    _st34 = {
-        'marks': {(2, 3): {'marks': ['boss', 'recommend']}},
-        'obs': {(2, 3): {'ratio': 0.958}, (3, 5): {'ratio': 0.99}},
-    }
-    _out34 = EL._hoist_ready_boss_first(_st34, [(3, 5), (2, 3)])
-    check('v1.34 ⑥ 实跑：**真机那一局**的首领被提到第 1 位',
-          bool(_out34) and _out34[0] == (2, 3), '%s' % (_out34,))
-    check('v1.34 ⑦ 实跑：素材格**没被丢掉**（只是换到后面 ✓）',
-          set(_out34) == {(2, 3), (3, 5)}, '%s' % (_out34,))
-    # 雾里的首领：提上去也点不动 ⇒ 必须**原样不动**（否则白花体力、挤掉该点的格 ✗）
-    _stfog = {
-        'marks': {(4, 6): {'marks': ['boss']}},
-        'obs': {(4, 6): {'ratio': 0.65}, (1, 1): {'ratio': 0.99}},
-    }
-    _outfog = EL._hoist_ready_boss_first(_stfog, [(1, 1), (4, 6)])
-    check('v1.34 ⑧ 实跑：雾里的首领**不提出去**（点不动，提了更差 ✓）',
-          _outfog == [(1, 1), (4, 6)], '%s' % (_outfog,))
-    # 阈值边界：证明用的是真阈值 0.75，而不是别的数
-    _b = []
-    # ⚠ v1.36：阈值标定到 0.80，边界跟着走（0.76 已**低于**阈值 ⇒ 不该提）
-    for _r, _want in ((0.70, False), (0.84, True)):
-        _o = EL._hoist_ready_boss_first(
-            {'marks': {(2, 3): {'marks': ['boss']}},
-             'obs': {(2, 3): {'ratio': _r}, (3, 5): {'ratio': 0.99}}},
-            [(3, 5), (2, 3)])
-        _b.append((_o[0] == (2, 3)) == _want)
-    check('v1.34 ⑨ 实跑：阈值边界 **0.80**（0.70 雾不提 / 0.84 揭示提 ✓）',
-          all(_b), 'ratio 0.70/0.84 ⇒ %s' % (_b,))
-    # 没有首领标记时**一动不动**（绝不多余地重排点序 ✓）
-    _plain = EL._hoist_ready_boss_first(
-        {'marks': {(3, 5): {'marks': ['clover']}}, 'obs': {(3, 5): {'ratio': 0.99}}},
-        [(3, 5), (1, 1)])
-    check('v1.34 ⑩ 实跑：盘上没有首领/红装 ⇒ 点序**原样**（不瞎改 ✓）',
-          _plain == [(3, 5), (1, 1)], '%s' % (_plain,))
-except Exception as _e34b:      # noqa: BLE001
-    check('v1.34 实跑闸可运行（%r）' % (_e34b,), False)
+    import spots as _sp59
+    import mapsim as _sim59
+    import mapsolve as _mv59
+    from strategy import EffPolicy as _Eff59
+
+    def _c59(sid, name, anchor, revealed=True, ratio=1.0, score=0.99,
+             marks=None, top=None):
+        return {'sid': sid, 'name': name, 'revealed': revealed, 'ratio': ratio,
+                'score': score, 'marks': list(marks or []), 'anchor': anchor,
+                'top': list(top or [(score, sid, anchor)])}
+
+    def _frame59(boss_rc, boss_ratio):
+        """5×7 全已揭示草地 + 营地 (1,1)（单格候选 `S00003_000` ⇒ 揭示链起点）
+        + 近处幸运草 (1,2) + 远处的 boss（**已揭示**，ratio 0.96 ✓）"""
+        _c = {}
+        for _r in range(1, 6):
+            for _cc in range(1, 8):
+                _c[(_r, _cc)] = _c59('S00003_001', '草地', (_r, _cc))
+        _c[(1, 1)] = _c59('S00003_211', '巨大沙堡', (1, 1),
+                          top=[(1.000, 'S00003_000', (1, 1)),
+                               (0.998, 'S00003_001', (1, 1))])
+        _c[(1, 2)] = _c59('S00003_001', '草地', (1, 2), marks=['clover'])
+        _c[boss_rc] = _c59('S00003_002', '沙地', boss_rc,
+                           revealed=True, ratio=boss_ratio, marks=['boss'])
+        return _c
+
+    _boss59 = (5, 7)
+    _cells59 = _frame59(_boss59, 0.96)
+    _marks59 = {_boss59: {'marks': ['boss']}, (1, 2): {'marks': ['clover']}}
+    _st59 = {'marks': dict(_marks59), 'obs': _cells59, 'done': set()}
+    _min59 = float(EL.REVEAL_RATIO_MIN)
+
+    # ---- 参考顺序 = 解算器/策略**原样输出**（与生产同一链，不含任何重排 ✓）----
+    def _ref59(tag59):
+        _m = EL._cells_for_model({'marks': dict(_marks59), 'obs': _cells59,
+                                  'done': set()},
+                                 {'st': _cells59}, log=None, tag=tag59,
+                                 mark_revealed=False)
+        return _sim59.MapSim.from_observation(_m, _sp59.spot_rows())
+
+    _prob59 = _mv59.Problem(_ref59('ref59'))
+    _cost59, _plan59 = _mv59.solve(_prob59, max_states=60000, max_secs=8)
+    _raw59 = []
+    for _rc59, _bi59, _w59 in _prob59.cells_for_plan((_plan59 or [])[:10]):
+        if _rc59 not in _raw59:
+            _raw59.append(_rc59)
+    _ord59 = EL.solver_order(_st59, {'st': _cells59}, log=None, max_steps=10)
+
+    # ⚠ 旧口径的判据（marks 含 boss/redEquip + ratio ≥ `REVEAL_RATIO_MIN`）在本场景
+    #   里**确实命中** ⇒ v1.34 的旧代码在此**必然**把 boss 提到第 1 位
+    #   ⇒ 这组断言**不是恒绿**（把 `_hoist_ready_boss_first` 加回来这条就红 ✓）
+    _hit59 = [rc for rc in _raw59
+              if 'boss' in ((_marks59.get(rc) or {}).get('marks') or [])
+              and float(((_cells59.get(rc) or {}).get('ratio')) or 0) >= _min59]
+    check('v1.59 ⑤ 行为：`solver_order()` 的返回 == **解算器原样顺序**'
+          '（逐项相等 ⇒ `out` 没被任何重排改过 ✓）',
+          bool(_raw59) and _ord59 == _raw59,
+          'solver=%s raw=%s cost=%s' % (_ord59, _raw59, _cost59))
+    check('v1.59 ⑥ 行为：场景正确 —— boss 当下**可点**（ratio 0.96 ≥ %.2f）'
+          '却在解算器里排**第 %s 位**（v1.34 的旧行为会把它提到第 1 位 ✗）'
+          % (_min59, (_ord59.index(_boss59) + 1) if _boss59 in _ord59 else '—'),
+          _boss59 in _ord59 and _ord59.index(_boss59) >= 1,
+          'order=%s boss=%s' % (_ord59, _boss59))
+    _eff59 = EL.eff_order({'marks': dict(_marks59), 'obs': _cells59, 'done': set()},
+                          {'st': _cells59}, log=None, max_steps=10)
+    _plan59e = _Eff59().plan(_ref59('ref59e'), max_click=10,
+                             stop_when_no_target=False)
+    check('v1.59 ⑦ 行为：兜底路径 `eff_order()` 的返回 == **EffPolicy 原样输出**'
+          '（`plan` 没被任何重排改过 ✓）',
+          bool(_plan59e) and list(_eff59) == list(_plan59e),
+          'eff=%s raw=%s' % (_eff59, _plan59e))
+    check('v1.59 ⑧ 行为：同一张盘在兜底路径里 —— boss 也排**第 %s 位**'
+          '（旧代码会把 `plan` 改写成 boss 打头 ✗）'
+          % ((_eff59.index(_boss59) + 1) if _boss59 in _eff59 else '—',),
+          _boss59 in _eff59 and _eff59.index(_boss59) >= 1,
+          'plan=%s boss=%s' % (_eff59, _boss59))
+    check('v1.59 ⑨ 旧判据在本场景**确实命中**（`%s`）'
+          '⇒ ⑥/⑧ 不是恒绿：v1.34 的"能点的首领提到最前"在此一定会发生 ✓'
+          % (['%d,%d' % p for p in _hit59] or '【未命中 ⇒ 场景失效，必须换盘】',),
+          bool(_hit59) and _boss59 in _hit59)
+    # ⚠ 删掉的是**重排那一步**，不是常量本身：`REVEAL_RATIO_MIN` 必须还在、
+    #   仍是 `spots` 的单一来源（`board_hidden()` 还在用它 ✓）
+    check('v1.59 ⑩ 揭示阈值**没被顺手删掉**：`EL.REVEAL_RATIO_MIN` 仍 == '
+          '`spots.REVEAL_RATIO_MIN` == 0.80（单一来源 ✓）',
+          float(EL.REVEAL_RATIO_MIN) == float(_sp59.REVEAL_RATIO_MIN)
+          and float(EL.REVEAL_RATIO_MIN) == 0.80,
+          '%s / %s' % (EL.REVEAL_RATIO_MIN, _sp59.REVEAL_RATIO_MIN))
+    # ═══ ⑪~⑭ v1.59【诊断 `plan_blocks`】════════════════════════════════════
+    #   用户 2026-10-04 口径（原话）：「**我的意思是目标和营地直接有两个空地，明明点
+    #   一个空地就能直接打目标，结果手机端规划非要两个都点**」✗
+    #   推理链：`solve()` 有硬闸门 `ns = st | PGM[bi]; if ns == st: continue`
+    #     —— 点过一片空地再点**同一片** ⇒ 状态不变 ⇒ **不会进计划** ✓
+    #     而 `plain_group`/`step`/`PGM` 三处已与 PC 逐字对拍（22/22、5/5、8/8 行零差异）
+    #   ⇒ 计划里出现"两步空地"**只可能**是模型把这两格切成**两片**（中间被内容格/
+    #     非空地切断）⇒ 用 `plain` + `group`（同片成员格）一次打全，不再猜 ✓
+    _bi59s = _el59.index('def solver_order(')
+    _body59 = _el59[_bi59s:_el59.index('\ndef ', _bi59s + 10)]
+    # ⚠ 数调用必须**剔掉注释**：solver_order 的注释里也写着 `Problem.cells_for_plan()`
+    #   （讲那次 bug 的来历）⇒ 直接 count 会数成 2、把这段守门变成假红 ✗
+    _body59c = '\n'.join(_l for _l in _body59.splitlines()
+                         if not _l.lstrip().startswith('#'))
+    check('v1.59 ⑪ 诊断在位：`_plan_step_info()` + `plan_blocks` 日志，且 '
+          '`cells_for_plan` 在 `solver_order()` 里**只调一次**'
+          '（逐步推演：重复调既浪费、又可能不一致 ✗）',
+          'def _plan_step_info(' in _el59
+          and "'solver': 'plan_blocks'" in _body59
+          and _body59c.count('cells_for_plan(') == 1,
+          '调用数=%d' % (_body59c.count('cells_for_plan('),))
+    _lg59d = []
+    EL.solver_order(_st59, {'st': _cells59}, log=_lg59d, max_steps=10)
+    _pb59 = [x for x in _lg59d if isinstance(x, dict)
+             and x.get('solver') == 'plan_blocks']
+    _need59 = ('cell', 'cost', 'bi', 'sid', 'name', 'plain', 'size', 'marks',
+               'observed', 'group', 'group_bi')
+    _stp59 = (_pb59[0].get('steps') or []) if _pb59 else []
+    check('v1.59 ⑫ 执行级：真跑 `solver_order()` ⇒ 日志里**真落了** `plan_blocks`，'
+          '且每一步字段齐全（`cell`/`cost`/`bi`/`sid`/`name`/**`plain`**/`size`/'
+          '`marks`/`observed`/**`group`**/`group_bi` ✓）',
+          bool(_stp59) and _pb59[0].get('n') == len(_stp59)
+          and all(all(_k in _s for _k in _need59) for _s in _stp59),
+          'n=%s steps=%d' % (_pb59[0].get('n') if _pb59 else None, len(_stp59)))
+    check('v1.59 ⑬ 执行级：每一步的 `cell` **在它自己的 `group` 里**'
+          '（`group` 是**同片成员格**、不是块 id ✗ —— 块 id 另留 `group_bi` ✓）',
+          bool(_stp59) and all(_s['cell'] in _s['group'] for _s in _stp59),
+          '%s' % ([( _s['cell'], len(_s['group'])) for _s in _stp59],))
+    # ⚠ 同片 / 不同片**必须能区分** —— 否则这条诊断等于没有（所以配对照盘 ✓）
+    def _mk59d(_skip):
+        _c = {}
+        for _r in range(1, 4):
+            for _cc in range(1, 4):
+                _c[(_r, _cc)] = _c59('S00003_002', '沙地', (_r, _cc))
+        for _k in ((1, 1), (1, 2), (1, 3)):
+            if _k == _skip:
+                continue              # 中间那格留成「沙地」（非空地）⇒ 切断连通 ✓
+            _c[_k] = _c59('S00003_001', '草地', _k)
+        _c[(3, 3)] = _c59('S00003_211', '巨大沙堡', (3, 3),
+                          top=[(1.000, 'S00003_000', (3, 3)),
+                               (0.998, 'S00003_001', (3, 3))])
+        return _c
+
+    def _grp59(_skip):
+        _c = _mk59d(_skip)
+        _m = EL._cells_for_model({'marks': {}, 'obs': _c, 'done': set()},
+                                 {'st': _c}, log=None, tag='d59',
+                                 mark_revealed=False)
+        _p = _mv59.Problem(_sim59.MapSim.from_observation(_m, _sp59.spot_rows()))
+        _acts = [(_p.board[_sim59.cell_of(1, 1)], 1),
+                 (_p.board[_sim59.cell_of(1, 3)], 1)]
+        return [EL._plan_step_info(_p, _rc, _bi, _w)
+                for _rc, _bi, _w in _p.cells_for_plan(_acts)]
+
+    _same59, _diff59 = _grp59(None), _grp59((1, 2))
+    check('v1.59 ⑭ 执行级：**同片**盘 ⇒ 两步的 `group` **相同**；'
+          '**不同片**盘（中间隔一格非空地）⇒ `group` **不同**'
+          '（⇒ 真机"两格空地排两步"= 模型切成两片，一条日志坐实 ✓）',
+          len(_same59) == 2 and len(_diff59) == 2
+          and _same59[0]['group'] == _same59[1]['group']
+          and _diff59[0]['group'] != _diff59[1]['group'],
+          'same=%s diff=%s' % ([_s['group'] for _s in _same59],
+                               [_s['group'] for _s in _diff59]))
+except Exception as _e59b:      # noqa: BLE001
+    check('v1.59 行为验收闸可运行（%r）' % (_e59b,), False)
 
 # ─────────────────────────────────────────────────────────────────────────
 # ㊿ v1.35 ⭐⭐⭐【`ratio` 分母换成本图模板亮度中位】—— 治「同一台机，换张地图就废」
@@ -3240,10 +3404,14 @@ try:
     check('v1.36 ② 阈值**在 spots 定、explore_loop 引用**（单一来源，不两处各写 ✗）',
           'REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN' in _el36_src
           and 'REVEAL_RATIO_MIN = 0.75' not in _el36_src)
-    check('v1.36 ③ 定义在**所有使用点之前**（v1.34 顺序坑 `NameError` 连踩两次 ✗）',
+    # ⚠ v1.59：`_ready_boss_cells()` 已删（用户口径「去掉这个」，见 ㊾）⇒
+    #   这条顺序断言**不能再引用它**。现在本文件里 `REVEAL_RATIO_MIN` 的**唯一**
+    #   使用点在 `board_hidden()` 里 ⇒ 断言"定义 < board_hidden 定义 < 它的使用点" ✓
+    check('v1.36 ③ 定义在**所有使用点之前**'
+          '（v1.59 后本文件唯一使用点 = `board_hidden()` ✓）',
           _el36_src.index('REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN')
-          < _el36_src.index('def _ready_boss_cells(')
-          < _el36_src.index('def board_hidden('))
+          < _el36_src.index('def board_hidden(')
+          < _el36_src.index('>= REVEAL_RATIO_MIN'))
     check('v1.36 ④ 双证据开关在位（`dual` 可现场开，默认 `single` 保守 ✓）',
           'MAPBOT_REVEAL_EVIDENCE' in _sp36src and 'REVEAL_EVIDENCE' in _sp36src)
     check('v1.36 ⑤ 剪影**只作否决**不作通过（已揭示格剪影与雾格重叠 ⇒ 不能单独判 ✓）',
@@ -3323,7 +3491,9 @@ except Exception as _e36b:      # noqa: BLE001
 # ─────────────────────────────────────────────────────────────────────────
 # ㊲ v1.37 ⭐⭐⭐【真机三连修】商人买不全 / 首领格误标 / 没目标了还打拦路
 #   全部来自用户 2026-10-02 真机报告 + v1.34 日志铁证（Redmi 25053RT47C）：
-#   ① 「会把能点的素材格全点开」已由 v1.34 治；本段治剩下三个
+#   ① 「会把能点的素材格全点开」v1.34 曾用「能点的首领优先」重排治过 ——
+#      ⛔ 那个重排**已于 v1.59 按用户口径「去掉这个」删除**（回退到 PC 行为，见 ㊾）；
+#      本段治剩下三个
 #   ② 「打完拦路的却显示打了首领格，后面又打了首领格」
 #   ③ 「第一次只买了三个格子，第二次又打开商人买了第四格」
 #   ④ 「打完首领格子且棋盘上没有目标了还在打拦路格子」

@@ -81,8 +81,12 @@ _BOT = None             # 当前 Bot（统计要读它的耗时埋点）
 #   · `spots.REVEAL_RATIO_MIN` = 0.80（2026-10-02 两帧真机实测标定，见 spots.py 注释）
 #     已揭示最低 0.855 / 雾格最高 0.761 ⇒ 干净带 0.78~0.85 ⇒ 0.75 踩在雾格那侧 ✗
 #   · 以前这里**自己写死 0.75**、`spots` 另写一份 ⇒ 两处漂移的典型 ✗✗
-#   · ⚠ 必须定义在**所有使用点之前**：v1.34 的 `_ready_boss_cells()` 在 1000 行就用它，
-#     放文件后段会 NameError（2026-10-02 当场踩过这个顺序坑两次 ✗）
+#   · ⚠ 定义顺序的来历：v1.36 就是因为 **1000 行处的 `_ready_boss_cells()` 也要用它**
+#     才从文件后段上移到这里的；那个函数 **v1.59 已删**（用户口径「去掉这个」，
+#     见 `solver_order` / `eff_order` 里的删除说明 ✓）⇒ 本文件现在**唯一**的使用点
+#     是 `board_hidden()`（约 7000 行）✓
+#     但仍**留在模块顶部**：单一来源 + 少一处漂移面 ✓ —— 别顺手往下搬
+#     （顺序坑真踩过：2026-10-02 连踩两次 `NameError` ✗）
 REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN
 # ⭐ 2026-10-02 v1.21：`board_hidden()` 判据② 的"被压暗"系数（实测标定见 `board_hidden` 注释）
 DIM_RATIO_MAX = 0.42
@@ -1187,8 +1191,12 @@ def eff_order(st, c, log=None, max_steps=20):
         # ⭐ stop_when_no_target=False：观测盘上目标可能还在雾里（targets 空 ≠ 图清完）
         #   ⇒ 没目标也继续开路（2026-09-28 离线验证抓到的坑，见 strategy.plan 注释 ✓）
         plan = _Eff().plan(sim, max_click=max_steps, stop_when_no_target=False)
-        # ⭐ v1.34：兜底路径**同样**"能点的首领优先"（与 solver 同一口径，不两处漂移 ✓）
-        plan = _hoist_ready_boss_first(st, plan, log=log, tag='eff')
+        # ⛔ v1.59（2026-10-04）【**已删掉**「能点的首领优先」重排】——
+        #   用户口径：「**去掉这个**」✓（指 v1.34 的 `_hoist_ready_boss_first()`：
+        #   把"当下能点的首领/红装格"提到点序最前）。**函数本体 + 两个调用点全删** ✓
+        #   **回退到 PC 的行为**：报告已记 —— PC **明确不跟随**这个重排，
+        #   它是手机端独有分叉 ✓
+        #   ⇒ 兜底路径现在**原样返回 EffPolicy 给的顺序**（与 solver 同一口径 ✓）
         if log is not None:
             log.append({'eff': 'ok', 'steps': len(plan),
                         'order': ['%d,%d' % p for p in plan]})
@@ -1291,76 +1299,58 @@ def plan_next(st, rest_n, targets_left):
     return 'none', 'no_targets'
 
 
-def _ready_boss_cells(st, order):
-    """⭐ v1.34 纯函数：点序里**当下就能点**的首领/红装格（按原顺序）
+def _plan_step_info(prob, rc, bi, w):
+    """⭐ v1.59 诊断：把点序里的**一步**翻成"模型眼里的块信息"（供 `plan_blocks` 日志 ✓）
 
-    「能点」= 该格在 `st['obs']`/本帧分类里是**已揭示**（`ratio` 落在揭示区间）
-    —— 分类器能看穿雾，所以**必须用 `ratio`** 判揭示，不能看 `score`（见
-    `_cells_for_model` 里那段踩坑注释：score≥0.8 的雾格是常见误判 ✗）。
+    用户 2026-10-04 口径（原话）：
+      「**我的意思是目标和营地直接有两个空地，明明点一个空地就能直接打目标，
+        结果手机端规划非要两个都点**」✗
 
-    ⚠ **点不动的首领（还在雾里）绝不返回** —— 提上来也点不动，
-      只会白花一体力并把真正该点的素材格挤掉 ⇒ 反而更差 ✗
+    推理链（**为什么这条诊断能一次定位根因，而不是再猜**）：
+      · `mapsolve.solve()` 里有硬闸门 `ns = st | PGM[bi]; if ns == st: continue`
+        —— 点过一片空地、再点**同一片**的任意格 ⇒ 状态不变 ⇒ **根本不会进计划** ✓
+      · 而 `plain_group` / `step` / `PGM` 三处已与 PC **逐字对拍**（22/22、5/5、8/8 行零差异）
+      ⇒ 计划里出现"两步空地"**只可能**是：**模型里这两格不是同一片**
+        —— 中间某格被模型判成非空地/被并进内容块，把连通性切断了 ✗
+      ⇒ 所以要看的就是每一步的 `plain` + `group`（同片成员格）：
+        「两格空地的 `group` 不同」= 模型确实切成两片 = 根因坐实 ✓
+
+    PC 已知的**三种切法**（拿到日志对号入座）：
+      ① 一格空地被并进**内容块**（单格识别是草地，但被邻格内容块的 anchor 吞了
+         ⇒ 块 sid 是内容格 ⇒ `plain=False`）—— v1.58 D-2 `_rescue` 治的就是这条
+      ② 空地被判成**非空地**（剪影 `fog_object` / 战斗保护顺序）—— v1.58 D-6 治的就是这条
+      ③ 同 anchor **混不同 sid** —— v1.51 已治
+    ⛔ **删掉这条诊断的条件**：①②③ 全部在真机复现不了、且用户不再报"非要两个都点" ✓
+
+    ⚠ 空间陷阱（v1.51 踩过 ✗）：`prob.plain_group(bi)` 返回的是**块 id 集合**，**不是格**！
+      这里翻成**成员格**（`group`，人一眼能看懂"哪几格同片" ✓）并**另留** `group_bi`
+      原值 —— 免得后人再把块 id 当格用。
+    ⚠ 非 plain 块：`plain_group` 返回 `{bi}` 自身 ⇒ `group` 只有自己的格
+      —— 正好说明"它是独立一片，跟旁边那格空地**不同片**" ✓
     """
-    # ⭐ v1.36：揭示口径**取模块级 `REVEAL_RATIO_MIN`**（它自己又来自 `spots`，单一来源 ✓）
-    #   ⚠ 不用 `globals().get(默认)` —— 那样常量名拼错会**静默吃默认值**、永远测不出
-    #     （2026-10-02 v1.34 踩过：`REVEALED_…` vs 真实的 `REVEAL_…`）✗
-    _min_ratio = REVEAL_RATIO_MIN
-    try:
-        _mk = st.get('marks') or {}
-        if not _mk:
-            return []
-        _obs = st.get('obs') or {}
-        _frame = st.get('frame_st') or {}
-        out = []
-        for _rc in order:
-            _k = (_rc[0], _rc[1])
-            _marks = list((_mk.get(_k) or {}).get('marks') or [])
-            if not any(m in ('boss', 'redEquip') for m in _marks):
-                continue                                   # 只管首领/红装 ✓
-            _cell = _obs.get(_k) or _frame.get(_k) or {}
-            _ratio = _cell.get('ratio')
+    import mapsolve as _mv
+    _b = prob.blocks.get(bi)
+    _grp = sorted(prob.plain_group(bi)) if _b is not None else []
+    _cells = []
+    for _gb in _grp:
+        for _c in (prob.cells_of.get(_gb) or ()):
             try:
-                _ratio = float(_ratio) if _ratio is not None else None
-            except (TypeError, ValueError):
-                _ratio = None
-            if _ratio is None:
-                continue          # 认不出揭示状态 ⇒ 保守当"点不动"（fail-safe ✓）
-            # 已揭示格 ratio≈1.0，雾格≈0.65（真机实测间隔很干净）
-            if _ratio < _min_ratio:
-                continue
-            out.append(_rc)
-        return out
-    except Exception:       # noqa: BLE001
-        return []
-
-def _hoist_ready_boss_first(st, order, log=None, tag='solver'):
-    """⭐⭐ v1.34：把「当下能点的高价值格」提到点序**最前面**，其余顺序不动
-
-    用户 2026-10-02 报（朋友真机）：「会把能点的素材格全点开，**boss 格已经能打了**，
-    还是会先点 boss 格周围的素材格」✗
-    真机铁证（`fb_20261002_015406`）：`marks {"2,3": ["boss","recommend"]}` +
-    `solver order ["3,5","2,3"]`，同一轮 `popup: fight_panel` 已弹出 ⇒ boss **可打**
-    却被排在第 2 位 ✗
-
-    ⚠ 只调整**执行顺序**，不碰解算器的结果本身（cost/其余步骤一律不变 ✓）
-    ⚠ 任何异常都不改变点序（fail-open ✓）
-    """
-    try:
-        if not order:
-            return order
-        _ready = _ready_boss_cells(st, order)
-        if not _ready:
-            return order
-        _rest = [rc for rc in order if rc not in _ready]
-        _new = _ready + _rest
-        if log is not None and _new != list(order):
-            log.append({tag: 'boss_hoisted',
-                        'ready': ['%d,%d' % p for p in _ready],
-                        'was': ['%d,%d' % p for p in order],
-                        'now': ['%d,%d' % p for p in _new]})
-        return _new
-    except Exception:       # noqa: BLE001
-        return order
+                _cells.append('%d,%d' % _mv.rc_of(_c))      # ⚠ 坐标换算用现成的 ✓
+            except Exception:       # noqa: BLE001
+                pass
+    return {
+        'cell': '%d,%d' % rc,
+        'cost': w,
+        'bi': bi,
+        'sid': getattr(_b, 'sid', None),
+        'name': getattr(_b, 'name', None),
+        'plain': bool(getattr(_b, 'plain', False)),
+        'size': getattr(_b, 'size', None),
+        'marks': getattr(_b, 'mark', None),
+        'observed': getattr(_b, 'observed', None),
+        'group': sorted(set(_cells)),
+        'group_bi': _grp,
+    }
 
 
 def solver_order(st, c, log=None, max_steps=6, out=None):
@@ -1462,25 +1452,34 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
         #   ⇒ 改用 `Problem.cells_for_plan()`：逐步推演模型状态，每一步在目标块（片）
         #     里挑一个**当下已揭示**的格 ✓
         out = []
+        _psteps = []                      # ⭐ v1.59 诊断（见 `_plan_step_info` 注释 ✓）
         for _rc, _bi, _w in prob.cells_for_plan(plan[:max_steps]):
             if _rc not in out:
                 out.append(_rc)
-        # ⭐⭐⭐ v1.34【能点的首领格必须**立刻打**，不许先点它周围的素材格】
-        #   用户 2026-10-02 报（朋友真机）：「会把能点的素材格全点开，**boss 格已经能打了**，
-        #   **还是会先点 boss 格周围的素材格**」✗
-        #   真机铁证（`fb_20261002_015406`，Redmi 1280×2772）：
-        #     `marks {"2,3": ["boss","recommend"]}` + `solver order ["3,5","2,3"]`
-        #     同一轮日志里 `popup: fight_panel` **弹出来了** ⇒ boss 当下**完全可打**，
-        #     可点序还是把它排在**第 2 位**、先点了一格素材 ✗
-        #   根因：解算器优化的是**总花费最小**，它不知道"这格现在就能直接打"有多重要
-        #     （且计划是**静态**的，排在后面的 boss 会被前面的动作挤到最后）✗
-        #   修法：**当下能点的首领/红装格一律提到最前面**（不动解算器给出的其余顺序 ✓）
-        #     · 只提「**已揭示**且**在点序里**」的 ⇒ 雾里点不动的 boss 不会被提上来
-        #       （提上来也点不动，只会把一格素材浪费掉 ⇒ 反而更差 ✗）
-        #     · 只提**高价值**目标（首领/红装），普通标记/幸运草维持原顺序 ✓
-        _hoisted = _hoist_ready_boss_first(st, out, log=log, tag='solver')
-        if _hoisted:
-            out = _hoisted
+            # ⚠ `cells_for_plan` **只调这一次**（逐步推演：重复调既浪费、又可能不一致 ✗）
+            #   ⇒ 同一个生成器的结果**同时**供「执行点序 out」和「诊断 plan_blocks」✓
+            if len(_psteps) < 12:         # ⚠ 最多 12 步：日志别爆（够看出"同片/两片"✓）
+                try:
+                    _psteps.append(_plan_step_info(prob, _rc, _bi, _w))
+                except Exception:         # noqa: BLE001
+                    pass
+        # ⭐⭐ v1.59【诊断】一条 `plan_blocks` 把"两格空地到底同不同片"一次打全 ✓
+        #   用户口径：「目标和营地直接有两个空地，明明点一个空地就能直接打目标，结果
+        #   手机端规划非要两个都点」⇒ 求解器不可能重复点**同一片**空地（`ns == st` 硬闸门）
+        #   ⇒ 排两步 = 模型把它们切成两片 ⇒ 用 `plain` / `group` 直接坐实 ✓
+        #   ⚠ fail-open：诊断任何异常都不许影响点序 ✓
+        try:
+            if log is not None:
+                log.append({'solver': 'plan_blocks', 'n': len(_psteps),
+                            'steps': _psteps})
+        except Exception:       # noqa: BLE001
+            pass
+        # ⛔ v1.59（2026-10-04）【**已删掉**「能点的首领优先」重排】——
+        #   用户口径：「**去掉这个**」✓（指 v1.34 的 `_hoist_ready_boss_first()`：
+        #   它当时的用户口径是「boss 格已经能打了，还是会先点它周围的素材格」✗）
+        #   函数本体 + 两个调用点**全删**；**回退到 PC 的行为** —— 报告已记：
+        #   PC **明确不跟随**这个重排，它是手机端独有分叉 ✓
+        #   ⇒ 一律**按解算器给的顺序执行**（`out` 不再被任何重排改动 ✓）
         try:
             _nt = len(sim.targets())
         except Exception:       # noqa: BLE001
@@ -7028,8 +7027,11 @@ def _close_bag(b, items, log):
 
 # ⭐ 2026-10-02 v1.21：`board_hidden()` 判据② 的两个口径（实测标定见函数注释）
 #   REVEAL_RATIO_MIN / DIM_RATIO_MAX —— ⚠ **已上移到模块顶部常量区**（v1.36）
-#     原因：本文件 1000 行处的 `_ready_boss_cells()` 也要用 `REVEAL_RATIO_MIN`，
+#     当时的理由：1000 行处的 `_ready_boss_cells()` 也要用 `REVEAL_RATIO_MIN`，
 #     定义放这儿会 NameError（顺序坑，2026-10-02 连踩两次）✗
+#     ⚠ v1.59 那个函数**已删**（用户口径「去掉这个」）⇒ 现在本文件里 `REVEAL_RATIO_MIN`
+#     的**唯一**使用点就是下面这个 `board_hidden()`——**仍留在顶部**（单一来源 ✓，
+#     别顺手搬回来）
 #   `DIM_RATIO_MAX` = 0.42 的来历：真面板/已揭示 = 0.25~0.35、雾格/已揭示 = 0.49~0.61
 #     ⇒ 取这条缝的中点（两侧余量 16%/17%）。⚠ 别凭感觉调，改了要重跑标定脚本 ✓
 
