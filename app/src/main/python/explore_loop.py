@@ -1332,9 +1332,11 @@ def _plan_step_info(prob, rc, bi, w):
     ⚠ 非 plain 块：`plain_group` 返回 `{bi}` 自身 ⇒ `group` 只有自己的格
       —— 正好说明"它是独立一片，跟旁边那格空地**不同片**" ✓
     ⚠⚠ **日志会被截断**：真机实测整条塞进一条日志时**超 300 字符 ⇒ `json.loads` 失败** ✗
-      ⇒ 调用方（`solver_order`）改成**每步一行**（`{'solver':'plan_block','i':…}`）；
-        同时这里把 `group` **只留前 12 格 + `+N`**、并给出 `group_head`（片内**最小格**
-        = 该连通片的**规范标识**）与 `group_n` ⇒ 「两格同片 ⟺ `group_head` 相同」✓
+      ⇒ 调用方（`solver_order`）改成**每步一行**（`{'solver':'plan_block','i':…}`），
+        并且**只留关键字段**（丢掉 `group_bi`）+ `group` 只留前 6 格 + `+N`
+        （实测满盘那步 ≤ 260 字符 ✓）；完整性由 `group_n`/`group_head` 保底 ——
+        `group_head` 是片内**最小格** = 该连通片的**规范标识**
+        ⇒ 「两格同片 ⟺ `group_head` 相同」✓
     """
     import mapsolve as _mv
     _b = prob.blocks.get(bi)
@@ -1496,12 +1498,25 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
                 for _i59, _s59 in enumerate(_psteps):
                     _rec59 = {'solver': 'plan_block', 'i': _i59}
                     _rec59.update(_s59)
-                    # ⚠ 单行**截断保护**：`group`/`group_bi` 超 12 项 ⇒ 只留前 12 + `+N`
-                    #   （完整集合看 `group_n`/`group_head`；否则整行超 300 字符被系统截 ✗）
-                    for _k59 in ('group', 'group_bi'):
-                        _v59 = _rec59.get(_k59) or []
-                        if len(_v59) > 12:
-                            _rec59[_k59] = list(_v59[:12]) + ['+%d' % (len(_v59) - 12)]
+                    # ⚠⚠ **单行必须塞得进 300 字符**（真机实测：超了会被系统截断 ⇒
+                    #   `json.loads` 直接失败 ✗）。实测满盘 35 格那步：留 12 格 group
+                    #   ⇒ 401 字符 ✗ ⇒ 这里按"只留关键字段"压到 ~215：
+                    #     · 丢 `group_bi`（块 id 原值）—— `group`/`gn` 已能定位那片 ✓
+                    #     · `group` 只留**前 6 格** + `+N`；⚠ 它是**排过序**的 ⇒
+                    #       片内**最小格** = `group[0]` ⇒ 不用再单列 `group_head` ✓
+                    #     · 丢 `size`（这条诊断用不到）、键名压短 `observed`→`obs`、
+                    #       `fog_object`→`fog_obj`（`fog_sil`/`plain`/`sid` 保持可读 ✓）
+                    _rec59.pop('group_bi', None)
+                    _rec59.pop('size', None)
+                    if 'observed' in _rec59:
+                        _rec59['obs'] = _rec59.pop('observed')
+                    if 'fog_object' in _rec59:
+                        _rec59['fog_obj'] = _rec59.pop('fog_object')
+                    _rec59.pop('group_head', None)      # == `group[0]`（已排序 ✓）
+                    _rec59['gn'] = _rec59.pop('group_n', None)
+                    _v59 = _rec59.get('group') or []
+                    if len(_v59) > 6:
+                        _rec59['group'] = list(_v59[:6]) + ['+%d' % (len(_v59) - 6)]
                     log.append(_rec59)
         except Exception:       # noqa: BLE001
             pass

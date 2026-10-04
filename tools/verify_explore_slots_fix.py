@@ -3202,25 +3202,29 @@ try:
              and x.get('solver') == 'plan_blocks']
     _pl59 = [x for x in _lg59d if isinstance(x, dict)
              and x.get('solver') == 'plan_block']
-    _need59 = ('i', 'cell', 'cost', 'bi', 'sid', 'name', 'plain', 'size', 'marks',
-               'observed', 'fog_sil', 'fog_object', 'group', 'group_n',
-               'group_head', 'group_bi')
+    _need59 = ('i', 'cell', 'cost', 'bi', 'sid', 'name', 'plain', 'marks',
+               'fog_sil', 'obs', 'fog_obj', 'group', 'gn')
     check('v1.59 ⑫ 执行级：真跑 `solver_order()` ⇒ 日志里**真落了** `plan_blocks` 汇总 +'
           ' **每步一行** `plan_block`（⚠ 真机实测"整条塞一条"会超 300 字符被截断 ⇒'
-          ' `json.loads` 直接失败 ✗），字段齐全（含 **`fog_sil`/`fog_object`** ✓）',
+          ' `json.loads` 直接失败 ✗），字段齐全（含 **`fog_sil`/`fog_obj`** ✓）'
+          '且**每步独立成行**（键名压短：`observed`→`obs`、`fog_object`→`fog_obj`、'
+          '`group_n`→`gn` ✓）',
           bool(_pl59) and bool(_pb59) and _pb59[0].get('n') == len(_pl59)
           and all(all(_k in _s for _k in _need59) for _s in _pl59)
           and [_s.get('i') for _s in _pl59] == list(range(len(_pl59))),
           'n=%s 明细=%d' % (_pb59[0].get('n') if _pb59 else None, len(_pl59)))
-    check('v1.59 ⑬ 执行级：每步的 `cell` 在**自己的同片成员**里'
-          '（`group` 是**同片成员格**、不是块 id ✗ —— 块 id 另留 `group_bi` ✓；'
-          '超 12 格的行按 `+N` 截断，完整性由 `group_n`/`group_head` 保底 ✓）',
-          bool(_pl59) and all((_s['cell'] in _s['group'])
-                              or (_s.get('group_n', 0) > 12 and _s['group']
-                                  and str(_s['group'][-1]).startswith('+'))
-                              for _s in _pl59),
-          '%s' % ([(_s['cell'], _s.get('group_n'), _s.get('group_head'))
-                   for _s in _pl59],))
+    _mx59 = max([len(str(_s)) for _s in _pl59] or [0])      # ⚠ 真机上限 300 字符
+    check('v1.59 ⑬ 执行级：每行**都塞得进 300 字符**（真机实测满盘那步 401 ⇒ 被截断 ✗；'
+          '现在丢 `group_bi`/`size` + `group` 只留前 6 格 + `+N` ⇒ ≤ 300 ✓），'
+          '且每步 `cell` 在**自己的同片成员**里（`group` 是**同片成员格**、不是块 id ✗）',
+          bool(_pl59) and _mx59 < 300
+          and all((_s['cell'] in _s['group'])
+                  or (_s.get('gn', 0) > 6 and _s['group']
+                      and str(_s['group'][-1]).startswith('+'))
+                  for _s in _pl59),
+          '最长 %d 字符 · %s' % (_mx59, [(_s['cell'], _s.get('gn'),
+                                          (_s['group'] or [None])[0])
+                                         for _s in _pl59]))
     # ⚠ 同片 / 不同片**必须能区分** —— 否则这条诊断等于没有（所以配对照盘 ✓）
     def _mk59d(_skip):
         _c = {}
