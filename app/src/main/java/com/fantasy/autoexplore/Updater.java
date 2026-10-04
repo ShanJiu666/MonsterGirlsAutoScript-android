@@ -175,12 +175,60 @@ public final class Updater {
         return s;
     }
 
+    /**
+     * 补丁 id 里编的**构建版本** —— id 形如 `hot-<vc>-<sha8>`（见 `tools/release.py` 的
+     * `hot_id()`）⇒ 解析出 `<vc>`；解析不出返回 **-1**（保守：判不了就不动它 ✓）。
+     */
+    private static int patchBuildVc(String id) {
+        try {
+            String s = String.valueOf(id == null ? "" : id).trim();
+            if (!s.startsWith("hot-")) {
+                return -1;
+            }
+            String rest = s.substring(4);
+            int dash = rest.indexOf('-');
+            String num = dash > 0 ? rest.substring(0, dash) : rest;
+            return Integer.parseInt(num.trim());
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     public static synchronized void bootRecover(Context ctx) {
         try {
             File hot = hotRoot(ctx);
             File active = hotActive(ctx);
             File pending = hotPending(ctx);
             JSONObject st = readState(ctx);
+            final int myVc = myVersionCode(ctx);
+
+            // ⭐⭐⭐ v1.49【比 APK **旧**的补丁 ⇒ 直接丢弃】—— 治「旧补丁静默遮蔽新 APK」
+            //   真机事故（2026-10-04，v1.48）：装完新 APK 后，手机上活跃的还是
+            //     `hot-147`（v1.47 时构建的）⇒ 而补丁层含 `explore_loop.py` 等**业务模块**
+            //     ⇒ 它**盖住**了 APK v1.48 的新代码 ⇒ 新功能**静默不生效** ✗✗
+            //     症状和上一次（桥层被遮蔽）**一模一样**：功能没用，而**看 APK 完全正常** ✗
+            //   根因：原来只判 `minShell ≤ appVersionCode` ⇒ 只知道"**能不能用**"，
+            //     不知道"**够不够新**" ⇒ 旧补丁永远算"可用" ✗
+            //   ⇒ 补丁 id 是 `hot-<vc>-<sha8>`，**构建版本就编在 id 里** ⇒ 解析出来比一下 ✓
+            //     判据：`id 版本 < app 版本` ⇒ **APK 的代码按构造一定更新** ⇒ 补丁必陈旧 ✓
+            //   ⚠ 解析不出（老格式/异常）⇒ **不动它**（保守 ✓，绝不误删好补丁）
+            if (active.isDirectory()) {
+                String aid = st.optString("active", "");
+                int avc = patchBuildVc(aid);
+                if (avc >= 0 && avc < myVc) {
+                    File bad = new File(hotBad(ctx), "stale-" + aid + "-" + stamp());
+                    if (move(active, bad)) {
+                        AppLog.i(TAG + " ⚠ 补丁 " + aid + " 是 **v" + avc
+                                + "** 时构建的，而当前 APK 是 **v" + myVc
+                                + "** ⇒ 补丁比 APK 旧 ⇒ **已丢弃**"
+                                + "（APK 内置代码按构造更新 ✓；取证留在 hot/bad/）");
+                        st.remove("active");
+                        st.remove("confirmed");
+                        st.put("staleDropped", aid);
+                        writeState(ctx, st);
+                    }
+                }
+            }
 
             // ① 回滚未确认的 active
             if (active.isDirectory()) {
@@ -200,6 +248,19 @@ public final class Updater {
             }
 
             // ② 激活 pending（下载已完成、只等一次冷启动）
+            //    ⭐ v1.49：先拦"比 APK 旧"的 pending（见上面 active 那段的长注释 ✓）
+            //      —— 否则一个陈旧 pending 会被激活 ⇒ 又遮蔽新 APK ✗
+            if (pending.isDirectory() && new File(pending, "meta.json").isFile()) {
+                String pid = readMeta(pending).optString("id", "?");
+                int pvc = patchBuildVc(pid);
+                if (pvc >= 0 && pvc < myVc) {
+                    File bad = new File(hotBad(ctx), "stale-pend-" + pid + "-" + stamp());
+                    if (move(pending, bad)) {
+                        AppLog.i(TAG + " ⚠ pending 补丁 " + pid + " 是 v" + pvc
+                                + " 时构建的（< APK v" + myVc + "）⇒ **不激活**，已归档");
+                    }
+                }
+            }
             if (pending.isDirectory() && new File(pending, "meta.json").isFile()) {
                 String pid = readMeta(pending).optString("id", "?");
                 if (active.isDirectory()) {

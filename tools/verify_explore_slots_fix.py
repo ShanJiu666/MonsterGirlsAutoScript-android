@@ -5040,6 +5040,72 @@ try:
 except Exception as _e48:       # noqa: BLE001
     check('v1.48 守门可运行（%r）' % (_e48,), False)
 
+# ─────────────────────────────────────────────────────────────────────────
+# ㊿ v1.49【比 APK **旧**的补丁 ⇒ 丢弃】—— 治「旧补丁静默遮蔽新 APK」
+#   **真机事故（2026-10-04，v1.48）**：装完新 APK 后，手机上活跃的还是 `hot-147`
+#     （v1.47 时构建的）⇒ 而补丁层含 `explore_loop.py` 等**业务模块**
+#     ⇒ 它**盖住**了 APK v1.48 的新代码 ⇒ 新功能**静默不生效** ✗✗
+#     症状与上一次（桥层被遮蔽）**一模一样**：功能没用，而**看 APK 完全正常** ✗
+#   根因：`bootRecover` 原来只判 `minShell ≤ appVersionCode` ⇒ 只知道"**能不能用**"，
+#     不知道"**够不够新**" ⇒ 旧补丁永远算"可用" ✗
+#   ⇒ 补丁 id 是 `hot-<vc>-<sha8>`（`release.py` 的 `hot_id()`），**构建版本就编在 id 里**
+#     ⇒ `id 版本 < app 版本` ⇒ **APK 的代码按构造一定更新** ⇒ 补丁必陈旧 ⇒ 丢 ✓
+#   ⚠ 判不出（老格式/异常）⇒ **不动它**（保守：绝不误删好补丁 ✓）
+#   ⚠ 两道闸都要有：**active**（已激活的）与 **pending**（刚下载还没激活的）——
+#     只拦 active 的话，一个陈旧 pending 会被激活 ⇒ 又遮蔽新 APK ✗
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊿ v1.49 陈旧补丁⇒丢弃（旧补丁不许遮蔽新 APK）')
+try:
+    _up49 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                              'autoexplore', 'Updater.java'),
+                 encoding='utf-8').read()
+    check('v1.49 ① `Updater` 有 `patchBuildVc()`（从 `hot-<vc>-<sha8>` 里解析版本 ✓）',
+          'private static int patchBuildVc(' in _up49)
+    check('v1.49 ② `bootRecover` 里**两道闸都在**（active + pending，只拦一个会漏 ✗）',
+          'stale-' in _up49 and 'stale-pend-' in _up49)
+    check('v1.49 ③ 判据是 `avc < myVc`（比 APK 旧才丢；**判不出⇒不动** ✓）',
+          'avc >= 0 && avc < myVc' in _up49 and 'pvc >= 0 && pvc < myVc' in _up49)
+    # ④ **执行级**：Java 侧判据实跑（tools/HotVcLogic.java，照 FbLogic 的先例）
+    #   ⚠ 为什么必须实跑：这套判据决定"**要不要丢掉一个补丁**"⇒ 判错方向就会
+    #     ①误删好补丁（白丢热更）②或让旧补丁留着遮蔽新 APK ✗
+    _jt49 = os.path.join(PROJ, 'tools', 'HotVcLogic.java')
+    _jc49 = _find_javac()
+    _jv49 = os.path.join(os.path.dirname(_jc49), 'java') if _jc49 else None
+    if _jv49 and not os.path.exists(_jv49 + '.exe') and not os.path.exists(_jv49):
+        _jv49 = None
+    if not os.path.exists(_jt49):
+        skip('v1.49 ④ Java 判据实跑（缺 tools/HotVcLogic.java）')
+    elif not _jc49 or not _jv49:
+        skip('v1.49 ④ Java 判据实跑（本机没找到 javac/java ⇒ 没真验证）')
+    else:
+        import subprocess as _sp49
+        import tempfile as _tf49
+        import shutil as _sh49
+        _od49 = _tf49.mkdtemp(prefix='mgas_java49_')
+        try:
+            # ⚠ 不用 text=True：javac/java 输出是本地代码页（GBK），配 text=True 会解码错 ✗
+            _cp49 = _sp49.run([_jc49, '-nowarn', '-encoding', 'UTF-8', '-d', _od49, _jt49],
+                              capture_output=True)
+            if _cp49.returncode != 0:
+                check('v1.49 ④ Java 自测**能编译**（%r）'
+                      % (_cp49.stderr.decode('utf-8', 'replace')[-200:],), False)
+            else:
+                _rp49 = _sp49.run([_jv49, '-cp', _od49, 'HotVcLogic'], capture_output=True)
+                _out49 = _rp49.stdout.decode('gbk', 'replace')
+                check('v1.49 ④ Java 侧「id→版本→是否陈旧」判据**实跑全绿**'
+                      '（真 id 3 个 + 边界 6 个 + 陈旧判据 5 个 ✓）',
+                      _rp49.returncode == 0 and 'ALL PASS' in _out49,
+                      (_out49.strip().splitlines() or [''])[-1])
+        finally:
+            _sh49.rmtree(_od49, ignore_errors=True)
+    # ⑤ 格式假设要和**产出方**对得上（`release.py` 是 id 的唯一来源 ✓）
+    _rel49 = open(os.path.join(PROJ, 'tools', 'release.py'), encoding='utf-8').read()
+    check('v1.49 ⑤ id 格式与**产出方**一致（`release.py` 的 `hot_id()` = `hot-%d-%s` ✓）',
+          "'hot-%d-%s'" in _rel49)
+except Exception as _e49:       # noqa: BLE001
+    check('v1.49 守门可运行（%r）' % (_e49,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
