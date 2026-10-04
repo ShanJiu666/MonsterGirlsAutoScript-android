@@ -1318,7 +1318,11 @@ def _plan_step_info(prob, rc, bi, w):
     PC 已知的**三种切法**（拿到日志对号入座）：
       ① 一格空地被并进**内容块**（单格识别是草地，但被邻格内容块的 anchor 吞了
          ⇒ 块 sid 是内容格 ⇒ `plain=False`）—— v1.58 D-2 `_rescue` 治的就是这条
-      ② 空地被判成**非空地**（剪影 `fog_object` / 战斗保护顺序）—— v1.58 D-6 治的就是这条
+      ② 空地被判成**非空地**（剪影 `fog_object` / 战斗保护顺序）—— v1.58 D-6 治的是
+         战斗那条；⚠ **剪影那条真机已坐实**：**相邻两格同 sid（`S30001_001` 岩地）
+         却一 `plain=true` 一 `plain=false`** ⇒ 已揭示的岩地有纹理 ⇒ `fog_object=True`
+         ⇒ 判非空地 ⇒ 连锁断裂 ⇒ 本该 2 步变 4 步 ⇒ v1.59 给
+         `Block.plain` 那条补了 `not observed` 闸门 ✓（下次看 `fog_sil`/`fog_object` 即可 ✓）
       ③ 同 anchor **混不同 sid** —— v1.51 已治
     ⛔ **删掉这条诊断的条件**：①②③ 全部在真机复现不了、且用户不再报"非要两个都点" ✓
 
@@ -1327,6 +1331,10 @@ def _plan_step_info(prob, rc, bi, w):
       原值 —— 免得后人再把块 id 当格用。
     ⚠ 非 plain 块：`plain_group` 返回 `{bi}` 自身 ⇒ `group` 只有自己的格
       —— 正好说明"它是独立一片，跟旁边那格空地**不同片**" ✓
+    ⚠⚠ **日志会被截断**：真机实测整条塞进一条日志时**超 300 字符 ⇒ `json.loads` 失败** ✗
+      ⇒ 调用方（`solver_order`）改成**每步一行**（`{'solver':'plan_block','i':…}`）；
+        同时这里把 `group` **只留前 12 格 + `+N`**、并给出 `group_head`（片内**最小格**
+        = 该连通片的**规范标识**）与 `group_n` ⇒ 「两格同片 ⟺ `group_head` 相同」✓
     """
     import mapsolve as _mv
     _b = prob.blocks.get(bi)
@@ -1348,7 +1356,18 @@ def _plan_step_info(prob, rc, bi, w):
         'size': getattr(_b, 'size', None),
         'marks': getattr(_b, 'mark', None),
         'observed': getattr(_b, 'observed', None),
+        # ⭐ v1.59：雾下剪影两个字段 —— 「相邻两格同 sid 却一 plain 一非 plain」那次
+        #   真机根因就是 `fog_object` 在**已揭示**格上也是 True（岩地本身有纹理）
+        #   ⇒ 下次一眼看出，不用再推理 ✓
+        'fog_sil': (getattr(_b, 'spot', {}) or {}).get('fog_sil'),
+        'fog_object': getattr(_b, 'fog_object', None),
+        # ⚠ `group` 这里给**完整**同片成员格（判据/门禁要用完整集合 ✓）；
+        #   截断只发生在**写日志那一步**（整片可能 30+ 格 ⇒ 单行超 300 字符会被截断 ✗）
+        #   并另给 `group_head`（片内**最小格** = 该连通片的**规范标识**）+ `group_n`：
+        #   两格同片 ⟺ `group_head` 相同 ✓（人看 group，判据看 head ✓）
         'group': sorted(set(_cells)),
+        'group_n': len(set(_cells)),
+        'group_head': (sorted(set(_cells)) or [None])[0],
         'group_bi': _grp,
     }
 
@@ -1463,15 +1482,27 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
                     _psteps.append(_plan_step_info(prob, _rc, _bi, _w))
                 except Exception:         # noqa: BLE001
                     pass
-        # ⭐⭐ v1.59【诊断】一条 `plan_blocks` 把"两格空地到底同不同片"一次打全 ✓
+        # ⭐⭐ v1.59【诊断】把"两格空地到底同不同片"一次打全 ✓
         #   用户口径：「目标和营地直接有两个空地，明明点一个空地就能直接打目标，结果
         #   手机端规划非要两个都点」⇒ 求解器不可能重复点**同一片**空地（`ns == st` 硬闸门）
         #   ⇒ 排两步 = 模型把它们切成两片 ⇒ 用 `plain` / `group` 直接坐实 ✓
+        #   ⚠⚠ **每步一行**（`plan_block`），不把每步塞进一条 `plan_blocks`：
+        #     真机实测整条 `plan_blocks` 会被**截断在 300 字符**（`json.loads` 直接失败 ✗）
+        #     ⇒ 一条汇总（`n`）+ N 条明细，4~11 步都能完整读出来 ✓
         #   ⚠ fail-open：诊断任何异常都不许影响点序 ✓
         try:
             if log is not None:
-                log.append({'solver': 'plan_blocks', 'n': len(_psteps),
-                            'steps': _psteps})
+                log.append({'solver': 'plan_blocks', 'n': len(_psteps)})
+                for _i59, _s59 in enumerate(_psteps):
+                    _rec59 = {'solver': 'plan_block', 'i': _i59}
+                    _rec59.update(_s59)
+                    # ⚠ 单行**截断保护**：`group`/`group_bi` 超 12 项 ⇒ 只留前 12 + `+N`
+                    #   （完整集合看 `group_n`/`group_head`；否则整行超 300 字符被系统截 ✗）
+                    for _k59 in ('group', 'group_bi'):
+                        _v59 = _rec59.get(_k59) or []
+                        if len(_v59) > 12:
+                            _rec59[_k59] = list(_v59[:12]) + ['+%d' % (len(_v59) - 12)]
+                    log.append(_rec59)
         except Exception:       # noqa: BLE001
             pass
         # ⛔ v1.59（2026-10-04）【**已删掉**「能点的首领优先」重排】——

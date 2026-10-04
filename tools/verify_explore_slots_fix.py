@@ -3200,19 +3200,27 @@ try:
     EL.solver_order(_st59, {'st': _cells59}, log=_lg59d, max_steps=10)
     _pb59 = [x for x in _lg59d if isinstance(x, dict)
              and x.get('solver') == 'plan_blocks']
-    _need59 = ('cell', 'cost', 'bi', 'sid', 'name', 'plain', 'size', 'marks',
-               'observed', 'group', 'group_bi')
-    _stp59 = (_pb59[0].get('steps') or []) if _pb59 else []
-    check('v1.59 ⑫ 执行级：真跑 `solver_order()` ⇒ 日志里**真落了** `plan_blocks`，'
-          '且每一步字段齐全（`cell`/`cost`/`bi`/`sid`/`name`/**`plain`**/`size`/'
-          '`marks`/`observed`/**`group`**/`group_bi` ✓）',
-          bool(_stp59) and _pb59[0].get('n') == len(_stp59)
-          and all(all(_k in _s for _k in _need59) for _s in _stp59),
-          'n=%s steps=%d' % (_pb59[0].get('n') if _pb59 else None, len(_stp59)))
-    check('v1.59 ⑬ 执行级：每一步的 `cell` **在它自己的 `group` 里**'
-          '（`group` 是**同片成员格**、不是块 id ✗ —— 块 id 另留 `group_bi` ✓）',
-          bool(_stp59) and all(_s['cell'] in _s['group'] for _s in _stp59),
-          '%s' % ([( _s['cell'], len(_s['group'])) for _s in _stp59],))
+    _pl59 = [x for x in _lg59d if isinstance(x, dict)
+             and x.get('solver') == 'plan_block']
+    _need59 = ('i', 'cell', 'cost', 'bi', 'sid', 'name', 'plain', 'size', 'marks',
+               'observed', 'fog_sil', 'fog_object', 'group', 'group_n',
+               'group_head', 'group_bi')
+    check('v1.59 ⑫ 执行级：真跑 `solver_order()` ⇒ 日志里**真落了** `plan_blocks` 汇总 +'
+          ' **每步一行** `plan_block`（⚠ 真机实测"整条塞一条"会超 300 字符被截断 ⇒'
+          ' `json.loads` 直接失败 ✗），字段齐全（含 **`fog_sil`/`fog_object`** ✓）',
+          bool(_pl59) and bool(_pb59) and _pb59[0].get('n') == len(_pl59)
+          and all(all(_k in _s for _k in _need59) for _s in _pl59)
+          and [_s.get('i') for _s in _pl59] == list(range(len(_pl59))),
+          'n=%s 明细=%d' % (_pb59[0].get('n') if _pb59 else None, len(_pl59)))
+    check('v1.59 ⑬ 执行级：每步的 `cell` 在**自己的同片成员**里'
+          '（`group` 是**同片成员格**、不是块 id ✗ —— 块 id 另留 `group_bi` ✓；'
+          '超 12 格的行按 `+N` 截断，完整性由 `group_n`/`group_head` 保底 ✓）',
+          bool(_pl59) and all((_s['cell'] in _s['group'])
+                              or (_s.get('group_n', 0) > 12 and _s['group']
+                                  and str(_s['group'][-1]).startswith('+'))
+                              for _s in _pl59),
+          '%s' % ([(_s['cell'], _s.get('group_n'), _s.get('group_head'))
+                   for _s in _pl59],))
     # ⚠ 同片 / 不同片**必须能区分** —— 否则这条诊断等于没有（所以配对照盘 ✓）
     def _mk59d(_skip):
         _c = {}
@@ -3245,9 +3253,60 @@ try:
           '（⇒ 真机"两格空地排两步"= 模型切成两片，一条日志坐实 ✓）',
           len(_same59) == 2 and len(_diff59) == 2
           and _same59[0]['group'] == _same59[1]['group']
-          and _diff59[0]['group'] != _diff59[1]['group'],
+          and _diff59[0]['group'] != _diff59[1]['group']
+          and all(_s['cell'] in _s['group'] for _s in _same59 + _diff59),
           'same=%s diff=%s' % ([_s['group'] for _s in _same59],
                                [_s['group'] for _s in _diff59]))
+
+    # ═══ ⑮~⑰ v1.59【真机根因：`Block.plain` 的**雾下剪影**那条缺 `not observed`】═══
+    #   真机日志（v1.59 诊断，Redmi 25053RT47C）：
+    #     step1 `{"cell":"3,4","sid":"S30001_001","name":"岩地","plain":true,"group":["3,4"]}`
+    #     step2 `{"cell":"3,3","sid":"S30001_001","name":"岩地","plain":false,…}`
+    #     `{"solver":"ok","cost":7,"steps":4,"order":["3,4","3,3","3,2","2,1"]}`
+    #   ⇒ **相邻两格、同一个 sid**，一 plain 一非 plain ⇒ 连锁断裂 ⇒ 2 步变 4 步 ✗✗
+    #   根因：`fog_object`（**雾下**剪影）那条**没有观测闸门**，而**已揭示**的岩地本身
+    #     有纹理 ⇒ 剪影高 ⇒ 被当"雾下有物体" ⇒ 判非空地 ✗
+    #   ⚠ 与 PC 等价：PC 那条实际只在雾格触发（否则它 `:202` 分支不必专门加闸门）✓
+    _ms59s = open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py'),
+                  encoding='utf-8').read()
+    _i59po = _ms59s.index("if getattr(self, 'fog_object', False)")
+    check('v1.59 ⑮ 源码：`Block.plain` 的**雾下剪影**那条带 `not observed` 闸门'
+          '（与**同函数相邻**的 `:225` 那条剪影分支一致 —— 一个有一个没有就是漏改 ✗）',
+          "and not getattr(self, 'observed', False)" in _ms59s[_i59po:_i59po + 120])
+
+    def _rock59(_rev, _sil=0.30):
+        """真机那把的形状：**相邻两格同 sid `S30001_001`（岩地）** + 一个营地 ✓"""
+        _c = {}
+        for _k in ((1, 1), (1, 2)):
+            _c[_k] = {'sid': 'S30001_001', 'name': '岩地', 'revealed': _rev,
+                      'ratio': 1.0 if _rev else 0.66, 'score': 0.99, 'marks': [],
+                      'anchor': _k, 'fog_sil': _sil}
+        _c[(2, 1)] = {'sid': 'S00003_000', 'name': '营地', 'revealed': True,
+                      'ratio': 1.0, 'score': 1.0, 'marks': [], 'anchor': (2, 1)}
+        _sm = _sim59.MapSim.from_observation(_c, _sp59.spot_rows())
+        _pp = _mv59.Problem(_sm)
+        _b1 = _sm.blocks[_pp.board[_sim59.cell_of(1, 1)]]
+        _b2 = _sm.blocks[_pp.board[_sim59.cell_of(1, 2)]]
+        return _sm, _pp, _b1, _b2
+
+    _sm59, _pp59, _b59a, _b59b = _rock59(True)
+    _grp59b = sorted(_pp59.plain_group(_b59a.idx))
+    check('v1.59 ⑯ 执行级【真机那把】：**已揭示**（observed=True）的相邻两格同 sid 岩地，'
+          '即使 `fog_object=True`（岩地纹理）⇒ **两格都 `plain=True`** 且 '
+          '`plain_group` **含两格**（连锁连上 ⇒ 不会"各点一次" ✓）',
+          _b59a.plain is True and _b59b.plain is True
+          and _b59a.fog_object is True and _b59a.observed is True
+          and len(_grp59b) >= 2,
+          'plain=%s/%s group=%s fog_sil=%s' % (_b59a.plain, _b59b.plain, _grp59b,
+                                               (_b59a.spot or {}).get('fog_sil')))
+    _sm59n, _pp59n, _b59c, _ = _rock59(False)
+    check('v1.59 ⑰ 【负样本】**真雾格**（observed=False）+ 剪影有物体 ⇒ **仍 '
+          '`plain=False`**（雾下物体照样挡连锁 —— 别把 M54 这条修成"剪影完全失效" ✗）',
+          _b59c.plain is False and _b59c.fog_object is True
+          and _b59c.observed is False
+          and len(sorted(_pp59n.plain_group(_b59c.idx))) == 1,
+          'plain=%s fog_object=%s observed=%s' % (_b59c.plain, _b59c.fog_object,
+                                                  _b59c.observed))
 except Exception as _e59b:      # noqa: BLE001
     check('v1.59 行为验收闸可运行（%r）' % (_e59b,), False)
 
