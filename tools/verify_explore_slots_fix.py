@@ -4411,6 +4411,36 @@ try:
           'settle_panel_hit(b)' in _el45_src and 'SETTLE_FORCE_SEC' in _el45_src
           and '_last_ocr_real' in _el45_src)
     check('v1.45 ⑩g 开关默认关（`settle_tpl`，待真机 A/B）', EL._settle_tpl_on() is False)
+
+    # ── ⑪ 施工单 ②③ 第二刀：选图界面定点模板（进图/退图的正向短路） ──
+    _menu_fr = os.path.join(PROJ, '_verify', 'phone_menu_20261004.png')
+    check('v1.45 ⑪ 选图界面两个按钮模板都在资源包里',
+          all(os.path.exists(os.path.join(PROJ, 'app', 'src', 'main', 'assets',
+                                          'mapbot_pack', 'templates', 'ui', n))
+              for n in EL.MENU_TPL))
+    _em50 = EL.MENU_TPL.get('enter_map_btn.png')
+    _ref_em50 = _ly50.REF.get('enter_map')
+    check('v1.45 ⑪b 「进入地图」模板锚点与 `layout.REF[\'enter_map\']` **同源**（±3px）',
+          _em50 is not None and _ref_em50 is not None
+          and abs(_em50[0] - _ref_em50[0]) <= 3 and abs(_em50[1] - _ref_em50[1]) <= 3,
+          '%s vs layout.REF %s' % (_em50, _ref_em50))
+    if not os.path.exists(_menu_fr):
+        skip('v1.45 ⑪c 选图界面模板判据（真机帧正/负样本）', '缺 fixture（phone_menu_20261004.png）')
+    else:
+        _im_m = _cv45.imdecode(np.fromfile(_menu_fr, np.uint8), _cv45.IMREAD_COLOR)
+        _mh = EL.menu_hit(_B50(_im_m))
+        check('v1.45 ⑪c 真机**选图界面**帧上判据 = True', _mh is True, 'menu_hit=%r' % (_mh,))
+    # 负样本：结算面板帧 / 地图帧上**不许**命中（否则会误判"已回到选图界面"⇒ 提前收工 ✗）
+    if os.path.exists(_st50) and os.path.exists(_mb50):
+        _n1 = EL.menu_hit(_B50(_cv45.imdecode(np.fromfile(_st50, np.uint8), _cv45.IMREAD_COLOR)))
+        _n2 = EL.menu_hit(_B50(_cv45.imdecode(np.fromfile(_mb50, np.uint8), _cv45.IMREAD_COLOR)))
+        check('v1.45 ⑪d 负样本：**结算面板帧 / 地图帧**上判据 ≠ True'
+              '（误判会让退图提前收工 ✗）',
+              _n1 is not True and _n2 is not True,
+              '结算帧=%r 地图帧=%r' % (_n1, _n2))
+    check('v1.45 ⑪e 短路都接了安全网（`MENU_SKIP_MAX` 内才允许跳 OCR）',
+          'MENU_SKIP_MAX' in _el45_src and '_last_ocr_enter' in _el45_src)
+    check('v1.45 ⑪f 开关默认关（`menu_tpl`）', EL._menu_tpl_on() is False)
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)

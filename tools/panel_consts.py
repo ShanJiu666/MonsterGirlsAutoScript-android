@@ -88,6 +88,11 @@ SCAN_SOURCES = {
         #   为什么不需要随分辨率动：匹配发生在**归一化参考帧**（恒 1080×1920）上，
         #   所以窗口尺寸天然是参考系量纲 ⇒ 与设备分辨率无关 ✓（与 `_BAG_TPL_SCALES` 同类）
         'SETTLE_TPL_HALF': ('tuple', 'scale'),
+        # ⭐ v1.45d：**选图界面**两个按钮（快速扫荡 / 进入地图）的定点模板锚点
+        #   坐标系 = `ref`；其中「进入地图」(904,1618) 与 `layout.REF['enter_map']` 吻合 ✓
+        #   用途：进图/退图路径上做"在不在选图界面"的**正向短路**（省掉整次全屏 OCR）
+        'MENU_TPL': ('dict', 'ref'),
+        'MENU_TPL_HALF': ('tuple', 'scale'),
     },
     'buypanels.py': {
         # 旅行商人：点击全走 tap_dlg ⇒ 已是 dlg_final（v1.20 核实）

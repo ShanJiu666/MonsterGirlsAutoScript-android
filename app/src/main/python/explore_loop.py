@@ -3500,6 +3500,68 @@ def settle_panel_hit(b, log=None):
     return None if missing else False
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐ v1.45d 选图界面「定点模板」判据（施工单 ②③ 第二刀）
+#
+# 用途：进图/退图路径上有 **8 次全屏 OCR/图**（`enter_map` 等待循环、`ensure_in_map`、
+#   `finish_map`），其中有些只是要回答"现在在不在**选图界面**"——而选图界面最下面那两个
+#   按钮（快速扫荡 / 进入地图）是**固定位置 + 固定长相**的 ⇒ 定点模板毫秒级就能答。
+#
+# 为什么安全：**只做正向短路**。模板命中 ⇒ 立刻返回/跳过（等价于原来 OCR 文本命中的分支）；
+#   模板**没命中** ⇒ 一个字都不改，照样走原来的全屏 OCR 全链路 ✓
+#   （对比被回退的那次"回合开头只看顶部 HUD"：那是**把全屏判定换成窄带判定**，漏了就瞎；
+#     这里是**先花毫秒级问一个确定的问题**，答不出来就原路走 ✗）
+#
+# 模板实测（真机帧 2026-10-04）：
+#   · 正样本：选图界面帧上自匹配 **1.000**，位置与 `layout.REF['enter_map']`(904,1618) 吻合；
+#   · 负样本：棋盘帧 / 结算面板帧 / 地图帧 → 不命中（`nav_start_adv` 那条常驻导航命中是对的，本判据不用它）
+# ⚠ 另外：`in_map()` 本身就把"看到快速扫荡/进入地图"当成**不在图里**的铁证 ⇒
+#   模板命中与它的语义**同向**，不会互相打架 ✓
+# ══════════════════════════════════════════════════════════════════════════
+MENU_TPL = {
+    'quick_sweep_btn.png': (684, 1617),      # 快速扫荡
+    'enter_map_btn.png': (904, 1618),        # 进入地图（== layout.REF['enter_map'] ✓）
+}
+MENU_TPL_HALF = (140, 60)
+MENU_TPL_THR = 0.80
+# ⚠ 安全网：靠模板短路时，**距上次真正 OCR 最多跳这么久**（超过就强制认一次字）
+#   用途：进图等待循环里万一连续命中模板，也不能让"面板/提示框"一直不被看见
+MENU_SKIP_MAX = 5.0
+
+
+def _menu_tpl_on():
+    return flag_on('menu_tpl')
+
+
+def menu_hit(b, need=1):
+    """"现在在**选图界面**"（定点模板）-> True / False / **None（判不了）**
+
+    `need` = 要命中几个按钮才算（默认 1；给 2 更严）。
+    None 表示"模板没到位/拿不到帧" ⇒ 调用方**必须**走原路（原全屏 OCR）✓
+    """
+    try:
+        import fixed_ref as _fxr
+    except Exception:       # noqa: BLE001
+        return None
+    img = b.img()
+    if img is None:
+        return None
+    hits = 0
+    missing = False
+    for nm, (cx, cy) in MENU_TPL.items():
+        hx, hy = MENU_TPL_HALF
+        got = _fxr.find(img, nm, region=(cx - hx, cy - hy, cx + hx, cy + hy),
+                        thr=MENU_TPL_THR)
+        if got is None:
+            if _fxr.load(nm) is None:
+                missing = True
+            continue
+        hits += 1
+    if hits >= max(1, int(need)):
+        return True
+    return None if missing else False
+
+
 def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None):
     """等战斗结算。⚠ 用户 09-25：战斗胜利不会超过 5s —— 超过很久还没结算就是没打起来，
     别死等（原来 180s，白耗时间）。
@@ -4961,6 +5023,9 @@ def enter_map(b, log, timeout=40):
             #   ⇒ 改成：先 `wait_stable` 等画面停（进图动画播完就停，最多 1.2s，≈免费），
             #     然后 snap + OCR 判定；**地图一认出来就立刻返回**（原本也不会更早）。
             #   ⚠ 不减少判定次数上限（仍 9 轮），只把"白等"换成"等它停"。
+            #   ⭐ v1.45d：`_last_ocr_enter` = 这一轮里**上次真正 OCR** 的时刻
+            #     （`menu_tpl` 短路的安全网用；一进来就允许跳 ⇒ 不必先白认一次字）
+            _last_ocr_enter = time.time()
             for _ in range(9):
                 try:
                     if b.fast_ok:
@@ -4970,7 +5035,18 @@ def enter_map(b, log, timeout=40):
                     time.sleep(0.4)
                 b.snap('enter_wait')
                 img2 = b.img()
+                # ⭐ v1.45d（flag `menu_tpl`）：**正向短路** —— 定点模板证明"还在选图界面"
+                #   ⇒ 这一轮必然没进图，**省掉这次全屏 OCR（~1.8s）**。
+                #   ⚠ 安全网 `MENU_SKIP_MAX`：距上次**真正 OCR** 超过它秒数就不再跳
+                #     （面板/提示框最多晚看这么久 ⇒ 不会因为模板一直命中而"再也不认字"）
+                if _menu_tpl_on() and (time.time() - _last_ocr_enter) < MENU_SKIP_MAX:
+                    _mh = menu_hit(b)
+                    if _mh is True:
+                        log.append({'enter': 'still_menu_tpl',
+                                    'secs': round(time.time() - _t0, 1)})
+                        continue
                 it2 = b.ocr(tag='round')
+                _last_ocr_enter = time.time()
                 if in_map(b, img2, it2):
                     log.append({'enter': 'in_map', 'stamina': stamina(it2)})
                     return True
@@ -5208,6 +5284,14 @@ def finish_map(b, log, timeout=90):
             timeout += 20.0
             continue
         b.snap('finish')
+        # ⭐ v1.45d（flag `menu_tpl`）：**正向短路** —— 定点模板看到选图界面那两个按钮
+        #   ⇒ 与下面 `fb(items, *L['menu'])` 是**同一个判据的更快版本**，直接收工，
+        #   **省掉这次全屏 OCR（~1.8s）**。模板没命中 ⇒ 一个字不改，照原路走 ✓
+        if _menu_tpl_on():
+            _mh = menu_hit(b)
+            if _mh is True:
+                log.append({'finish': 'back_to_menu_tpl'})
+                return True
         items = b.ocr(tag='round')
         if fb(items, *L['menu']):
             log.append({'finish': 'back_to_menu'})
