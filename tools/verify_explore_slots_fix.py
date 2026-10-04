@@ -4490,6 +4490,24 @@ try:
           _ea53_mod._try_toast('t') is False)
     check('v1.45 ⑬f 只报补丁 id（正则抠 `补丁=xxx`），不打印 token/URL 之类',
           '补丁=' in _ea53 and 're.search' in _ea53)
+
+    # ── ⑭ Java 侧**真弹窗**（用户 2026-10-04：「能不能弹窗口让用户更容易看出更新过」） ──
+    _up57 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                              'autoexplore', 'Updater.java'), encoding='utf-8').read()
+    _ma57 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                              'autoexplore', 'MainActivity.java'), encoding='utf-8').read()
+    check('v1.45 ⑭ 激活补丁时**记一笔待播报**（`pendingAnnounce` + 带更新说明 notes）',
+          'pendingAnnounce' in _up57 and 'takeAnnounce' in _up57
+          and 'optString("notes"' in _up57)
+    check('v1.45 ⑭b `MainActivity.onResume` 会调 `announceHotUpdate()` ⇒ 冷启动后**弹窗**告知',
+          'announceHotUpdate()' in _ma57 and 'AlertDialog.Builder(this)' in _ma57
+          and 'announceHotUpdate' in _ma57)
+    check('v1.45 ⑭c `takeAnnounce()` **取值即清** ⇒ 只弹一次（不会每次回前台都弹 ✗）',
+          'pendingAnnounce = null' in _up57)
+    check('v1.45 ⑭d 点「检查更新」的结果**弹出来**（以前只写日志 ⇒ 用户以为没反应 ✗）',
+          'showUpdateResult' in _ma57 and '更新' in _ma57)
+    check('v1.45 ⑭e 两处弹窗都包了 try/except（弹窗失败绝不能影响主流程）',
+          '播报弹窗失败' in _ma57 and '结果弹窗失败' in _ma57)
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)

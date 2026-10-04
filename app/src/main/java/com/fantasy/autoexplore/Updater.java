@@ -158,6 +158,23 @@ public final class Updater {
      *       等自检</li>
      * </ol>
      */
+    /**
+     * ⭐⭐ v1.45g：**刚激活、还没告诉用户的补丁**（`MainActivity` 起来后弹窗用）。
+     *
+     * <p>用户 2026-10-04 原话：「我点击检查更新后重启 app 了，这样是热更新好了吗？
+     * <b>太不明显了吧</b>，能不能弹窗口让用户更容易看出更新过」——
+     * 以前激活**只写日志**，用户根本不知道更没更上（因此白跑过一轮 A/B）。
+     * <p>格式 {@code "<补丁id>|<更新说明>"}；{@link #takeAnnounce()} 取走即清（只弹一次）。
+     */
+    private static volatile String pendingAnnounce = null;
+
+    /** 取走"刚更新的播报"（取一次就清空 ⇒ 不会每次进界面都弹） */
+    public static String takeAnnounce() {
+        String s = pendingAnnounce;
+        pendingAnnounce = null;
+        return s;
+    }
+
     public static synchronized void bootRecover(Context ctx) {
         try {
             File hot = hotRoot(ctx);
@@ -195,6 +212,16 @@ public final class Updater {
                     st.put("activatedAt", now());
                     writeState(ctx, st);
                     AppLog.i(TAG + " 补丁 " + pid + " 已激活（等自检确认）");
+                    // ⭐⭐ v1.45g：**记一笔，等界面起来弹窗告诉用户**
+                    //   用户 2026-10-04 原话：「我点击检查更新后重启app了，这样是热更新好了吗？
+                    //   **太不明显了吧**，能不能弹窗口让用户更容易看出更新过」
+                    //   ⇒ 以前激活**只写日志** ⇒ 用户根本不知道更没更上（因此白跑了一轮 A/B）
+                    String _notes = "";
+                    try {
+                        _notes = readMeta(active).optString("notes", "");
+                    } catch (Throwable ignored) {
+                    }
+                    pendingAnnounce = pid + "|" + _notes;
                 } else {
                     AppLog.i(TAG + " ⚠ 补丁 " + pid + " 激活失败（rename 不动？）");
                 }

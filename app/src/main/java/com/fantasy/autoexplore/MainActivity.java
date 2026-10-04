@@ -126,6 +126,36 @@ public class MainActivity extends Activity {
         refreshStatus();
         ui.removeCallbacks(tick);
         ui.postDelayed(tick, TICK_MS);        // 界面可见时才轮询（别在后台白烧电/白跑 Python）
+        announceHotUpdate();                  // ⭐ v1.45g：刚热更过就**弹窗**告诉用户
+    }
+
+    /**
+     * ⭐⭐ v1.45g：**热更要让用户一眼看见**（用户 2026-10-04：「太不明显了吧，
+     * 能不能弹窗口让用户更容易看出更新过」）。
+     *
+     * <p>补丁在冷启动时由 {@code Updater.bootRecover} 激活；那边只写日志 ⇒ 用户
+     * 无从判断"到底更没更上"。这里在界面可见时弹一次**真弹窗**（补丁 id + 更新说明）。
+     * <p>取值即清（{@code takeAnnounce}）⇒ 只弹一次，不会每次回前台都弹 ✗。
+     */
+    private void announceHotUpdate() {
+        try {
+            String s = Updater.takeAnnounce();
+            if (s == null || s.isEmpty()) {
+                return;
+            }
+            String[] p = s.split("\\|", 2);
+            String id = p[0];
+            String notes = (p.length > 1 ? p[1] : "");
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("✅ 已更新")
+                    .setMessage("补丁 " + id + " 已生效并通过自检。"
+                            + (notes.isEmpty() ? "" : "\n\n更新说明：" + notes))
+                    .setPositiveButton("知道了", null)
+                    .show();
+            AppLog.i("[更新] 已向用户播报补丁 " + id);
+        } catch (Throwable t) {
+            AppLog.i("[更新] ⚠ 播报弹窗失败：" + t);
+        }
     }
 
     @Override
@@ -771,14 +801,39 @@ public class MainActivity extends Activity {
      */
     private void doUpdate(String mode) {
         new Thread(() -> {
+            final String r;
             try {
-                String r = Updater.run(getApplicationContext(), mode);
-                AppLog.i("[更新] " + r);
+                r = Updater.run(getApplicationContext(), mode);
             } catch (Throwable t) {
                 AppLog.i("[更新] ⚠ " + t);
+                final String e = "更新异常：" + t;
+                ui.post(() -> showUpdateResult(e));
+                return;
             }
-            ui.post(this::refreshStatus);
+            AppLog.i("[更新] " + r);
+            ui.post(() -> {
+                refreshStatus();
+                showUpdateResult(r);
+            });
         }, "ui-update").start();
+    }
+
+    /**
+     * ⭐⭐ v1.45g：把更新结果**弹出来**（以前只写日志 ⇒ 用户以为"点了没反应" ✗）。
+     *
+     * <p>用户 2026-10-04 口径：点了「检查更新」要能立刻看出**发生了什么**
+     * （已是最新／补丁已下载待重启生效／需要更新整包／失败原因）。
+     */
+    private void showUpdateResult(String msg) {
+        try {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("更新")
+                    .setMessage(msg)
+                    .setPositiveButton("知道了", null)
+                    .show();
+        } catch (Throwable t) {
+            AppLog.i("[更新] ⚠ 结果弹窗失败：" + t);
+        }
     }
 
     /**
