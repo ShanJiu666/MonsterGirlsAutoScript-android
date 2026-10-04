@@ -4471,6 +4471,25 @@ try:
           'out.update(_diag_caps())' in open(
               os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_android.py'),
               encoding='utf-8').read())
+
+    # ── ⑬ 热更"看得见"：补丁一变就播报（用户 2026-10-04：「太不明显了吧」） ──
+    _ea53 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'explore_android.py'), encoding='utf-8').read()
+    _ea53_mod = __import__('explore_android')
+    check('v1.45 ⑬ 有 `announce_patch()` 且挂在 `_bootstrap()`（所有 Python 入口的必经路）',
+          'def announce_patch(' in _ea53 and '_bootstrap' in _ea53
+          and 'announce_patch()' in _ea53)
+    check('v1.45 ⑬b 三种喊法齐了：应用内日志横幅 + **悬浮条状态行** + 尽力 Toast',
+          '热更生效' in _ea53 and '_try_toast(' in _ea53 and 'status(' in _ea53)
+    check('v1.45 ⑬c **只播一次**（补丁 id 没变就不重复播 ⇒ 不刷屏 ✗）',
+          '.patch_announced' in _ea53 and 'old == pid' in _ea53)
+    _hit53 = _ea53_mod.announce_patch()
+    check('v1.45 ⑬d 拿不到 `hotInfo()` 时**安静返回空串**（绝不炸启动）',
+          _hit53 == '', '返回=%r' % (_hit53,))
+    check('v1.45 ⑬e `_try_toast()` 没 Context 时安静返回 False（弹不出也不影响功能）',
+          _ea53_mod._try_toast('t') is False)
+    check('v1.45 ⑬f 只报补丁 id（正则抠 `补丁=xxx`），不打印 token/URL 之类',
+          '补丁=' in _ea53 and 're.search' in _ea53)
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)

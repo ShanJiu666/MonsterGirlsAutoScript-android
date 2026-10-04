@@ -72,6 +72,14 @@ def _bootstrap():
         os.environ['MAPBOT_HOT'] = hot
     _BOOTED.update(env=True, root=root, runs=runs, hot=hot)
     _install_log_tee()
+    # ⭐ v1.45f：**热更要让用户一眼看见**（用户 2026-10-04：「太不明显了吧」）
+    #   挂在这里的理由：`_bootstrap()` 是所有 Python 入口的必经路（info/selftest/explore…）
+    #   而且此刻 `_install_log_tee()` 已装好 ⇒ 横幅进得了 AppLog（应用内日志区）✓
+    #   ⚠ 全包 try/except：播报**绝不允许**影响启动（它只是提示）
+    try:
+        announce_patch()
+    except Exception:       # noqa: BLE001
+        pass
 
 
 def _install_log_tee():
@@ -194,6 +202,100 @@ def _diag_caps():
     except Exception as _e:              # noqa: BLE001
         out['fxr_err'] = repr(_e)
     return out
+
+
+def _try_toast(msg):
+    """尽力弹一个 Android Toast（Chaquopy 直接调 Java API）-> True/False
+
+    ⚠ 三处都可能失败，全部咽掉（**只是少一个提示，绝不允许影响主流程**）：
+      ① 拿不到 Context：`DeviceApi.appCtx` 是 **private static**（Chaquopy 走 JNI
+         通常能读到 private 成员，但不保证 —— 所以这一步是"尽力"）
+      ② 主线程 Looper/Handler 不可用
+      ③ 动态代理 Runnable 不被支持
+    """
+    try:
+        from java import dynamic_proxy, jclass
+        _dev = jclass('com.fantasy.autoexplore.DeviceApi')
+        _ctx = _dev.appCtx
+        if _ctx is None:
+            return False
+        _Handler = jclass('android.os.Handler')
+        _Looper = jclass('android.os.Looper')
+        _Toast = jclass('android.widget.Toast')
+        _Runnable = jclass('java.lang.Runnable')
+
+        class _Show(dynamic_proxy(_Runnable)):
+            def run(self):
+                _Toast.makeText(_ctx, msg, _Toast.LENGTH_LONG).show()
+
+        _Handler(_Looper.getMainLooper()).post(_Show())
+        return True
+    except Exception:       # noqa: BLE001
+        return False
+
+
+# ⭐⭐⭐ v1.45f【热更必须让用户一眼看见】（用户 2026-10-04 原话：
+#   「我点击检查更新后重启app了，这样是热更新好了吗？**太不明显了吧**，能不能弹窗口
+#     让用户更容易看出更新过」）
+#
+# 以前的问题：补丁生效**只在 logcat/`update_status` 里能看到**，界面上毫无提示 ⇒
+#   用户根本不知道自己更没更上（这次 A/B 就是因此白跑了一轮）。
+# 现在：**补丁 id 一变**就在三个地方同时喊一声：
+#   ① 应用内日志区（`print` 经 `_Tee` ⇒ `AppLog`）—— 打开 App 就看得见，还带边框
+#   ② **悬浮条状态行**（`status()`）—— 跑图时它压在游戏上面，最显眼
+#   ③ **尽力弹 Toast**（`_try_toast`）—— 真"弹出来"的效果
+# ⚠ 只在 id 变了时播一次（记在 `runs/.patch_announced`），否则每次启动都刷屏 ✗
+# ⚠ 纯 Python ⇒ **走热更就能发**，不用重装 71MB（Java 侧的真弹窗留给下一版整包）
+def announce_patch(force=False):
+    """补丁 id 变了就喊一声；返回播报文案或 ''"""
+    try:
+        from java import jclass
+        _dev = jclass('com.fantasy.autoexplore.DeviceApi')
+        _info = str(_dev.hotInfo() or '')
+    except Exception:       # noqa: BLE001
+        return ''
+    # 从 `statusLine` 里抠 id：形如 `壳 v1.44(144) · 补丁=hot-144-b1b830a4(已确认) · dir=…`
+    import re as _re
+    m = _re.search(r'补丁=([A-Za-z0-9._\-]+)', _info)
+    pid = m.group(1) if m else ''
+    if not pid or pid in ('无', 'None'):
+        return ''
+    runs = _BOOTED.get('runs') or ''
+    mark = os.path.join(runs, '.patch_announced') if runs else ''
+    try:
+        old = (open(mark, encoding='utf-8').read().strip() if mark else '')
+    except Exception:       # noqa: BLE001
+        old = ''
+    if old == pid and not force:
+        return ''
+    msg = '已更新到 %s' % pid
+    bar = '=' * 46
+    banner = ('\n%s\n  ✅ 热更生效：%s\n     （看到这行说明补丁已经加载，不用再重启）\n%s'
+              % (bar, pid, bar))
+    try:
+        print(banner, flush=True)          # ① 应用内日志 + logcat
+    except Exception:       # noqa: BLE001
+        pass
+    try:
+        import explore_loop as _EL
+        _EL.status('✅ %s' % msg)           # ② 悬浮条状态行
+        _EL.say(banner)
+    except Exception:       # noqa: BLE001
+        pass
+    ok = _try_toast('MGAS %s' % msg)        # ③ 尽力弹 Toast
+    try:
+        print('[hot] 播报补丁 %s（Toast=%s）' % (pid, '成功' if ok else '不可用，已用悬浮条+日志代替'),
+              flush=True)
+    except Exception:       # noqa: BLE001
+        pass
+    try:
+        if mark:
+            os.makedirs(os.path.dirname(mark), exist_ok=True)
+            with open(mark, 'w', encoding='utf-8') as f:
+                f.write(pid)
+    except Exception:       # noqa: BLE001
+        pass
+    return msg
 
 
 def info():
