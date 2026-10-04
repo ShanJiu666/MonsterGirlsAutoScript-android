@@ -4508,6 +4508,41 @@ try:
           'showUpdateResult' in _ma57 and '更新' in _ma57)
     check('v1.45 ⑭e 两处弹窗都包了 try/except（弹窗失败绝不能影响主流程）',
           '播报弹窗失败' in _ma57 and '结果弹窗失败' in _ma57)
+
+    # ── ⑮ 系统「应用选择框」守卫（2026-10-04 真机事故：双开导致启动游戏弹框） ──
+    _ch15 = [{'text': '请选择要使用的应用', 'cx': 328, 'cy': 1320},
+             {'text': '幻想少女公会', 'cx': 258, 'cy': 1580},
+             {'text': '幻想少女公会', 'cx': 611, 'cy': 1580}]
+    _map15 = [{'text': '结束冒险', 'cx': 457, 'cy': 747},
+              {'text': '空闲', 'cx': 448, 'cy': 884}]
+    check('v1.45 ⑮ 真机选择框帧的 OCR ⇒ `is_app_chooser` 判 **True**'
+          '（事故帧：请选择要使用的应用 + 两个幻想少女公会）',
+          EL.is_app_chooser(_ch15) is True)
+    check('v1.45 ⑮b 地图帧 ⇒ 判 **False**（不能把游戏画面误判成选择框 ✗）',
+          EL.is_app_chooser(_map15) is False)
+    check('v1.45 ⑮c 空/None 不炸（`is_app_chooser([])` / `(None)` 都 False）',
+          EL.is_app_chooser([]) is False and EL.is_app_chooser(None) is False)
+    check('v1.45 ⑮d `ensure_in_map` 与 `enter_map` 都接了守卫（返回收掉 + 讲清原因）',
+          _el45_src.count('is_app_chooser(') >= 3 and 'app_chooser' in _el45_src)
+
+    # ── ⑯ 开跑先清零：上一轮的结束原因**不许串轮**（2026-10-04 真机踩到） ──
+    _s16 = EL.STATS
+    _bak16 = {k: (list(v) if isinstance(v, list) else v) for k, v in _s16.items()}
+    _s16['stopped'] = '游戏自动恢复失败'      # 伪造"上一轮失败"
+    _s16['maps'] = 7
+    _s16['map_secs'] = [1.0, 2.0]
+    _s16['boss_wins'] = 3
+    EL._reset_run_stats()
+    check('v1.45 ⑯ `_reset_run_stats()` 把上一轮的 `stopped` 清空'
+          '（不然成功的运行会显示"游戏自动恢复失败" ⇒ 用户以为坏了 ✗）',
+          EL.STATS['stopped'] == '', 'stopped=%r' % (EL.STATS['stopped'],))
+    check('v1.45 ⑯b 计数与耗时列表同时归零（图数/秒表/体力记录）',
+          EL.STATS['maps'] == 0 and EL.STATS['map_secs'] == []
+          and EL.STATS['stamina_entries'] == [] and EL.STATS['boss_wins'] == 0)
+    check('v1.45 ⑯c `run_maps` 开头**真的调了**它（不调就等于没修）',
+          'run_maps(a):' in _el45_src and '_reset_run_stats()' in _el45_src)
+    for _k16, _v16 in _bak16.items():         # 还原，别污染后面的用例
+        _s16[_k16] = _v16
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)

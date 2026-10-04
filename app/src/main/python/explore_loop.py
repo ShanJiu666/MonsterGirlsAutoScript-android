@@ -2816,6 +2816,34 @@ def self_ui_hits(items):
     return hits
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v1.45h【系统"应用选择框"要专门认出来】（2026-10-04 真机事故）
+#
+# 事故现场（用户手机，`marks_none_r0/r1/r3.png` 三张现场帧 OCR 实测）：
+#     请选择要使用的应用
+#     幻想少女公会      ← 两份！（应用双开）
+#     幻想少女公会
+# ⇒ 手机装了双开助手（`com.hcc.clone`）⇒「启动游戏」这个意图**有两个响应者**
+#   ⇒ 系统弹选择框；而 `self_ui_hits()` 只认 **MGAS 自己的界面标记**，认不出它 ✗
+# ⇒ 机器人就对着选择框一直干：`popup_none` → `universal_close (541,1890)` 盲点，
+#   悬浮条上写着「画面认不出 · 正在收起面板」，一轮空转 40+ 秒、图也刷不了。
+#
+# 判据用**选择框自己的字**（去掉空格再比，避免 OCR 把「请选择要使用的应用」拆开）：
+CHOOSER_KEYS = ('请选择要使用的应用', '选择要使用的应用', '选择打开方式', '打开方式')
+
+
+def is_app_chooser(items):
+    """系统"应用选择框"（应用双开时启动游戏会弹）-> True/False"""
+    for it in items or ():
+        t = (it.get('text') or '').replace(' ', '')
+        if not t:
+            continue
+        for k in CHOOSER_KEYS:
+            if k in t:
+                return True
+    return False
+
+
 def _login_page_hits(items):
     """当前帧里命中几个「**只在登录页出现**」的字（2026-10-01 v1.16 新增）。
 
@@ -5107,6 +5135,15 @@ def enter_map(b, log, timeout=40):
                         continue
                 it2 = b.ocr(tag='round')
                 _last_ocr_enter = time.time()
+                if is_app_chooser(it2):
+                    # ⭐ v1.45h：进图途中弹系统选择框（双开）⇒ 按返回收掉再等 ✓
+                    log.append({'enter': 'app_chooser'})
+                    say('   · 弹出系统「请选择要使用的应用」框 ⇒ 按返回收掉再等')
+                    try:
+                        b.back(wait=1.2)
+                    except Exception:                # noqa: BLE001
+                        pass
+                    continue
                 if in_map(b, img2, it2):
                     log.append({'enter': 'in_map', 'stamina': stamina(it2)})
                     return True
@@ -5212,6 +5249,18 @@ def ensure_in_map(b, log, tag=''):
         img = b.img()
         # ⭐⭐ 2026-09-29 真机：画面是 MGAS 自己的界面/应用双开选择框 ⇒ 别再乱点
         #   （点下去全是自己的按钮），直接把原因讲清楚让人处理 ✓
+        if is_app_chooser(items):
+            # ⭐ v1.45h：系统"应用选择框"（双开导致）⇒ 别对着它乱点，讲清原因并收掉
+            log.append({'pre': 'app_chooser', 'attempt': a})
+            say('⚠ 手机上弹了系统的「请选择要使用的应用」框（应用双开 ⇒ 启动游戏有两个响应者）')
+            say('   ⇒ 请在选择框里选**游戏本体**并勾「总是」，或把双开助手关掉/卸载')
+            try:
+                b.back(wait=1.2)                 # 先把框收掉，别继续挡着画面 ✓
+            except Exception:                    # noqa: BLE001
+                pass
+            status('⚠ 请先处理系统「应用选择框」')
+            flush(log)
+            return False
         if self_ui_hits(items) >= 2:
             log.append({'pre': 'self_ui', 'attempt': a})
             say('⚠ 画面是 MGAS 自己的界面/应用选择框（游戏没在前台）')
@@ -8467,8 +8516,34 @@ def game_recover(b, log, tag='recover', timeout=600):
     return False
 
 
+def _reset_run_stats():
+    """把**每一轮开跑都该清零**的统计字段复位（`STATS` 是模块级，不重置就会串轮）
+
+    ⚠ 只清"本轮"的字段；`STATS` 里没有跨轮累加项（设置类常量都在别处），
+      所以这里按"白名单重置"比整体重建更安全（不会把将来新增的字段漏掉语义）：
+      —— 将来若有人往 STATS 里加**跨轮**字段，务必加到下面的 `keep` 里并写清理由 ✓
+    """
+    keep = ()                      # 目前没有跨轮字段
+    for _k in ('maps', 'shots', 'boss_fights', 'boss_wins', 'recommend_fights',
+               'recommend_wins', 'dice_got', 'merchants', 'vaults', 'battles',
+               'battle_wins', 'clovers', 'current_map', 'current_secs',
+               'classify', 'classify_n', 'recover_n', 'stuck_maps'):
+        if _k not in keep:
+            STATS[_k] = 0
+    STATS['map_secs'] = []
+    STATS['stamina_entries'] = []
+    STATS['stopped'] = ''          # ⭐ 关键：上一轮的结束原因**不许**串到这一轮
+    STATS['running'] = True
+
+
 def run_maps(a):
     global WIN, LOG_PATH, SUMMARY_PATH, _BOT
+    # ⭐⭐⭐ v1.45h【每次开跑先把统计清零】—— 2026-10-04 真机实证的坑：
+    #   上一轮失败留下的 `STATS['stopped']='游戏自动恢复失败'` **串到了这一轮**，
+    #   于是"一张图正常打完、`result='done'`"的一轮，统计里却写着
+    #   「结束原因：游戏自动恢复失败」⇒ 用户当然以为坏了 ✗✗
+    #   （`run_maps` 原先**完全没重置** STATS，它只在模块 import 时初始化过一次）
+    _reset_run_stats()
     b = Bot(log_prefix='loop', serial=INSTANCE_DEV, tag=INSTANCE_TAG or None)
     # ⭐ 分辨率自适应：拿到真实屏幕尺寸后刷新坐标 ✓（1080×1920 下零变化 ✓）
     try:
