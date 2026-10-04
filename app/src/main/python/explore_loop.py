@@ -5130,8 +5130,12 @@ def enter_map(b, log, timeout=40):
                 if _menu_tpl_on() and (time.time() - _last_ocr_enter) < MENU_SKIP_MAX:
                     _mh = menu_hit(b)
                     if _mh is True:
+                        # ⚠ 2026-10-04：这里原来写的是 `_t0` —— 本函数里根本没有这个名字
+                        #   ⇒ **选图界面短路一命中就 NameError 崩整局**（真机实测：悬浮条变红
+                        #   `state: err`，日志 `NameError: name '_t0' is not defined`）✗
+                        #   本函数的时间基准是 `t0`（见上面的 `t0 = time.time()`）✓
                         log.append({'enter': 'still_menu_tpl',
-                                    'secs': round(time.time() - _t0, 1)})
+                                    'secs': round(time.time() - t0, 1)})
                         continue
                 it2 = b.ocr(tag='round')
                 _last_ocr_enter = time.time()

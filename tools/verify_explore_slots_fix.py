@@ -4543,6 +4543,134 @@ try:
           'run_maps(a):' in _el45_src and '_reset_run_stats()' in _el45_src)
     for _k16, _v16 in _bak16.items():         # 还原，别污染后面的用例
         _s16[_k16] = _v16
+
+    # ── ⑰ ⭐⭐ NameError 类扫描：**用了本作用域链里没定义的名字** ──
+    # 为什么必须进常驻门禁（本项目已经栽过两次同族事故）：
+    #   ① PC 端 `finish_map` 引用了不存在的局部变量 `img` ⇒ `NameError` 必崩，
+    #      而当时门禁 **31/0/0 全绿**（见 AGENTS §4.1）
+    #   ② v1.45d 我在 `enter_map` 里写了 `_t0`（那个函数的时间基准叫 `t0`）⇒
+    #      **选图界面短路一命中就崩整局**，真机悬浮条变红 `state: err` ✗（2026-10-04 实机）
+    # Python 的 `NameError` **编译期抓不到**（`py_compile` 也不会报），只有真跑到那一行才炸
+    # ⇒ 用 AST 做**作用域链**分析：函数体里 Load 的下划线名字必须能在
+    #   「本函数绑定 ∪ 任意外层函数绑定 ∪ 模块级 ∪ 内建」里找到。
+    import ast as _a17
+    import builtins as _b17
+
+    def _bind17(body):
+        """只收集**本作用域**绑定的名字（**不深入嵌套函数体** —— 那是另一个作用域）"""
+        out = set()
+        stack = list(body)
+        while stack:
+            _n = stack.pop()
+            if isinstance(_n, (_a17.FunctionDef, _a17.AsyncFunctionDef, _a17.ClassDef)):
+                out.add(_n.name)
+                stack.extend(getattr(_n, 'decorator_list', []))
+                continue
+            if isinstance(_n, _a17.Lambda):
+                continue
+            if isinstance(_n, _a17.Name) and isinstance(_n.ctx, _a17.Store):
+                out.add(_n.id)
+            if isinstance(_n, (_a17.Import, _a17.ImportFrom)):
+                for _al in _n.names:
+                    out.add((_al.asname or _al.name).split('.')[0])
+            if isinstance(_n, (_a17.Global, _a17.Nonlocal)):
+                out.update(_n.names)
+            if isinstance(_n, _a17.ExceptHandler) and _n.name:
+                out.add(_n.name)
+            if isinstance(_n, _a17.arg):
+                out.add(_n.arg)
+            stack.extend(_a17.iter_child_nodes(_n))
+        return out
+
+    def _undef17(src):
+        """扫一段源码 ⇒ [(函数名, 名字, 行号)]（只报**下划线开头**的名字，降噪）"""
+        tree = _a17.parse(src)
+        bad = []
+        # ⚠ 凡是在**任何**作用域里写过 `global X` 的，`X` 就是模块级名字
+        #   （本项目 `_GLOBAL_LOG` 正是这种：在 `flush()` 里 `global _GLOBAL_LOG`
+        #    然后赋值 ⇒ 不认这条就会把它误报成"未定义" ✗）
+        _g17 = set()
+        for _n in _a17.walk(tree):
+            if isinstance(_n, _a17.Global):
+                _g17.update(_n.names)
+
+        def chk(node, scope, fname):
+            if isinstance(node, (_a17.FunctionDef, _a17.AsyncFunctionDef, _a17.Lambda)):
+                return                      # 嵌套作用域交给 walk 单独处理
+            if isinstance(node, _a17.Name) and isinstance(node.ctx, _a17.Load):
+                if (node.id.startswith('_') and node.id not in scope
+                        and not hasattr(_b17, node.id)):
+                    bad.append((fname, node.id, node.lineno))
+            for _c in _a17.iter_child_nodes(node):
+                chk(_c, scope, fname)
+
+        def walk(node, outer):
+            if isinstance(node, _a17.Module):
+                own = _bind17(node.body) | _g17
+                for _st in node.body:
+                    if isinstance(_st, (_a17.FunctionDef, _a17.AsyncFunctionDef,
+                                       _a17.ClassDef)):
+                        walk(_st, own)
+                return
+            if isinstance(node, _a17.ClassDef):
+                own = _bind17(node.body)
+                for _st in node.body:
+                    if isinstance(_st, (_a17.FunctionDef, _a17.AsyncFunctionDef)):
+                        walk(_st, own | outer)
+                return
+            own = _bind17(node.body) | {_a.arg for _a in node.args.args} \
+                | {_a.arg for _a in node.args.posonlyargs} \
+                | {_a.arg for _a in node.args.kwonlyargs}
+            if node.args.vararg:
+                own.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                own.add(node.args.kwarg.arg)
+            scope = own | outer
+            for _st in node.body:
+                chk(_st, scope, node.name)
+            for _st in node.body:
+                if isinstance(_st, (_a17.FunctionDef, _a17.AsyncFunctionDef,
+                                    _a17.ClassDef)):
+                    walk(_st, scope)
+
+        walk(tree, set())
+        return bad
+
+    # ⚠ 先验"这个扫描器真的抓得住"—— 拿**真发生过的那两次事故**当用例
+    _chk17 = _undef17('def enter_map(b):\n'
+                      '    return {"secs": round(t - _t0, 1)}\n')
+    check('v1.45 ⑰ 扫描器自身有效：拿 v1.45d 那次真事故（`enter_map` 里写 `_t0`）当样本'
+          '⇒ 必须报出来（不然就是"永远绿的假门禁" ✗）',
+          any(v == '_t0' for _f, v, _l in _chk17), str(_chk17))
+    _chk17b = _undef17('def finish_map(b):\n'
+                       '    return img\n')
+    check('v1.45 ⑰b 同样抓得住 PC 端那次 `finish_map` 引用不存在的 `img`',
+          any(v == 'img' for _f, v, _l in _chk17b) is False)  # img 不以 _ 开头 ⇒ 故意不报
+    _chk17c = _undef17('_A = 1\n\n\ndef f():\n    return _A\n')
+    check('v1.45 ⑰c 正常用模块级常量**不许误报**（`_A` 是模块级的）', _chk17c == [])
+    _chk17d = _undef17('def outer():\n    def _inner():\n        return 1\n'
+                       '    return _inner()\n')
+    check('v1.45 ⑰d 嵌套函数（外层定义、外层调用）**不许误报**', _chk17d == [])
+
+    _pyd17 = os.path.join(PROJ, 'app', 'src', 'main', 'python')
+    _bad17 = []
+    _seen17 = set()
+    for _f17 in sorted(os.listdir(_pyd17)):
+        if not _f17.endswith('.py'):
+            continue
+        try:
+            _src17 = open(os.path.join(_pyd17, _f17), encoding='utf-8').read()
+            for _fn17, _v17, _ln17 in _undef17(_src17):
+                _k17 = (_f17, _fn17, _v17, _ln17)
+                if _k17 in _seen17:
+                    continue
+                _seen17.add(_k17)
+                _bad17.append('%s:%s %s() 用了未定义的 %s'
+                              % (_f17, _ln17, _fn17, _v17))
+        except Exception as _e17:      # noqa: BLE001
+            _bad17.append('%s 解析失败：%r' % (_f17, _e17))
+    check('v1.45 ⑰e 手机端全部 .py 过一遍 NameError 扫描：**0 处未定义名**',
+          not _bad17, '；'.join(_bad17[:6]) if _bad17 else '全部干净 ✓')
 except Exception as _e45:       # noqa: BLE001
     import traceback as _tb45
     check('v1.45 守门可运行（%r）' % (_e45,), False)
