@@ -896,8 +896,37 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
     _dropped = []
     for _a, _mem in _grp.items():
         if _seed_rc and any(m in _seed_rc for m in _mem):
-            _dropped.extend(_mem)       # 真点过 ⇒ 整块剔（真机口径：块里被点掉一个就没了）
-            continue
+            # ⭐⭐⭐ v1.55【营地所在的块**豁免剔除**】—— 抄 PC（这是"手机端没有规划"的**最后一块拼图**）
+            #
+            #   PC 原话（真机铁证，2026-10-02）：
+            #     「为什么必须在剔除之前算：循环侧为了避免点出生点，**把营地像素加进了 `done`**
+            #       ⇒ 下面"在 done 里的格整块剔掉"会把**营地连同它所在的多格块**
+            #       （真机是 4 格块 `巨大沙堡`）一起删出模型 ✗
+            #       ⇒ 我写在保留分支里的 `camp=True` 标记**根本没机会执行** ⇒
+            #         `Problem.camp=None` ⇒ 揭示链没有起点 ⇒ 求解器把雾格当可点 / 或 `exhausted`」
+            #
+            #   ⚠⚠ **手机端真机日志（v1.53/v1.54）就是这个形状**：
+            #       {"solver":"camp_tagged","cell":"3,3"}
+            #       {"solver":"done_cells_dropped","n":1,"cells":["3,3"]}   ← 营地被整块剔掉 ✗✗
+            #       {"solver":"no_plan","reason":"exhausted","expanded":1}  ← 候选 0 ⇒ 无解
+            #     ⇒ **我 v1.53/v1.54 两次修都没治到根**：都在纠结"打标顺序"，
+            #       而 PC 的正解是——**营地所在的块根本不该被剔** ✓
+            #       （我 v1.54 那条"命中格在 done 里就拒绝打标"更是**反的** ✗
+            #         —— PC 是**保留**它，不是放弃它）
+            #
+            #   ⚠ 为什么营地会在 `done` 里：循环为了避免点出生点，主动把营地像素
+            #     `done.add(camp_px)` ✓（玩家口径：营地不可点）⇒ 于是被当"已点过"剔掉 ✗
+            #   ⇒ 豁免：**营地所在的整块留在模型里**（这样它才会被建块、才有 `camp` 锚点）
+            #     —— 注意**不是** continue，而是**继续走下面的逐格处理**（要进 `_out` ✓）
+            if _camp_rc is not None and _camp_rc in _mem:
+                if log is not None:
+                    log.append({tag: 'camp_block_kept', 'camp': '%d,%d' % _camp_rc,
+                                'block': ['%d,%d' % m for m in _mem[:6]],
+                                'note': '营地所在块**豁免剔除**（否则模型没有揭示起点 ⇒ '
+                                        '`Problem.camp=None` ⇒ 开局候选集空 ⇒ `expanded:1` ✗）'})
+            else:
+                _dropped.extend(_mem)   # 真点过 ⇒ 整块剔（真机口径：块里被点掉一个就没了）
+                continue
         for _k in _mem:
             if _k in _infer_rc:         # 反推命中 ⇒ **只剔这一格**（绝不连带）✓
                 _dropped.append(_k)
@@ -952,13 +981,16 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
                     _best54 = (_sc54, _k54)
             if _best54 is not None:
                 _hit54, _how54 = _best54[1], '_000(score=%.2f)' % _best54[0]
-        # ③ 存活 + 未被消耗
-        if _hit54 is not None and cell_of(*_hit54) in done:
+        # ③ ⚠⚠ v1.55 **不能再"在 done 里就拒绝打标"** ✗ —— 那是我 v1.54 写反的
+        #   PC 的正解是「**营地所在的块豁免剔除**」（见上面 `camp_block_kept`），
+        #   而不是"放弃这个营地" —— 营地**本来就一直在 `done` 里**
+        #   （循环为不点出生点而 `done.add(camp_px)` ✓），所以"在 done 里"是**常态**
+        #   ⇒ 这里只校验"它确实进了模型（`_out`）"，不再看 `done` ✓
+        if _hit54 is not None and _hit54 not in _out:
             if log is not None:
-                log.append({tag: 'camp_skip_done', 'cell': '%d,%d' % _hit54,
+                log.append({tag: 'camp_not_in_model', 'cell': '%d,%d' % _hit54,
                             'how': _how54,
-                            'note': '命中格**已被消耗** ⇒ 不可能是营地 ⇒ 拒绝打标 ✓'
-                                    '（真机 v1.53 就在这踩过：标了 (1,7) 又被删 ✗）'})
+                            'note': '命中格**没进模型** ⇒ 打标也没用 ⇒ 检查它是不是被剔了 ✗'})
             _hit54 = None
         if _hit54 is not None:
             _out[_hit54]['camp'] = True

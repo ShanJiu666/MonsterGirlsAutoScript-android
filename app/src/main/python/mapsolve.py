@@ -443,17 +443,37 @@ def _build_cache(prob):
     #     没有该信息（单格营地的常规情形）才退回整块口径 ⇒ 对老盘行为不变 ✓
     camp_nb = 0
     _ccells = set(getattr(prob, 'camp_cells', None) or ())
-    if camp is not None and _ccells:
-        for _c0 in _ccells:
+    if camp is not None:
+        # ⭐⭐⭐ v1.55【营地邻接 = 营地块的邻居 ∪ 营地格的邻居，**再按观测滤雾**】
+        #   ⚠⚠ **真机 + 离线都抓到的 bug**（手机端"没有规划"的第二处根因）：
+        #     我 v1.51 抄 PC 时只用了 `camp_cells`（**营地那一格**）——
+        #     而营地格若在**多格块的角上**（4 邻全是自己那块），
+        #     它一个"别人的块"都邻接不到 ⇒ **`camp_nb = 0`** ✗✗
+        #     ⇒ `visible(空状态) = camp_nb | empty_adj = 0` ⇒ `expanded:1` / `exhausted`
+        #     而 `Problem.visible()` 用的是**整块**的邻居 ⇒ 两份**算出来不一样** ✗
+        #     （离线实测：`Problem.visible()` = 4 个候选，`camp_nb` = 0 ⇒ 求解器仍无解）
+        #   ⇒ 两边统一：**用整块的邻居**（保证"开局一定有点能点的格" ✓
+        #      —— 用户口径原话：「不可能出现开局没有一个地方能点的情况」✓）
+        #   但 PC 当初改成 `camp_cells` 是有理由的（它的注释）：
+        #     「用**整块**算邻接 ⇒ boss(1,2)、紫金格(2,4) 都进了 `camp_nb` ⇒
+        #       开局就被当成"已揭示/可点"（真机两格 ratio 0.665/0.717 **都是雾**）✗✗」
+        #   ⇒ 所以**加一道观测闸门**：只把 **`Block.observed`（建块时观测说已揭示）**
+        #     的邻块算进来 ✓ —— 两个目标同时满足：
+        #       · 块角营地也有候选（不再 0）✓
+        #       · 雾格不会被当成"开局可点" ✓
+        _camp_block_cells = set(prob.cells_of.get(camp, ()))
+        for _c0 in (_ccells | _camp_block_cells):
             _r0, _q0 = _c0 // COLS, _c0 % COLS
             for _dr, _dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 _rr, _qq = _r0 + _dr, _q0 + _dc
                 if 0 <= _rr < ROWS and 0 <= _qq < COLS:
                     _nb = prob.board[_rr * COLS + _qq]
-                    if _nb >= 0 and _nb != camp:
-                        camp_nb |= bit[_nb]
-    elif camp is not None:
-        camp_nb = NB_MASK[camp] & ~camp_mask
+                    if _nb < 0 or _nb == camp:
+                        continue
+                    # ⭐ 观测闸门：观测说它是雾 ⇒ 不算"开局可点" ✓
+                    if not bool(getattr(prob.blocks.get(_nb), 'observed', True)):
+                        continue
+                    camp_nb |= bit[_nb]
     # ⭐⭐ 2026-09-30：「观测里本来就是空的格」（已消耗）⇒ 它的邻居块**现在就已经揭示**。
     #   全知盘（新生成的盘）没有任何 -1 ⇒ EMPTY_ADJ = 0，行为一字不变 ✓
     #   观测盘（真机 / 在线推演）则有 -1 ⇒ 模型终于知道"已经走到哪了" ✓

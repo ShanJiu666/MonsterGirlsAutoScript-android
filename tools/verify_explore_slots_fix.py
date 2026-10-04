@@ -5294,14 +5294,15 @@ try:
     import mapsolve as _ms53
     _el53 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
                              'explore_loop.py'), encoding='utf-8').read()
-    check('v1.54 ① 营地打标在**删除之后**、只打**存活格**'
-          '（修我 v1.53 的 bug：标了立刻被删的格 ⇒ `Problem.camp` 指向不存在的块 ✗）',
+    check('v1.55 ① 营地所在块**豁免剔除**（`camp_block_kept`）—— 这是手机端"没有规划"的**最后一块拼图** ✓',
+          'camp_block_kept' in _el53 and '_seed_rc and any(' in _el53)
+    check('v1.55 ② 营地打标**只看"有没有进模型"**，不再看 `done`（v1.54 那条是**反的** ✗：营地本来就一直在 `done` 里）',
           "_out[_hit54]['camp'] = True" in _el53
-          and 'camp_skip_done' in _el53)
-    check('v1.54 ② `_000` 兜底**取分最高的**（低分误判也认营地 ⇒ v1.53 真机踩过 ✗）',
-          '_best54' in _el53 and '_sc54' in _el53)
-    check('v1.54 ③ 命中格**已被消耗就拒绝打标**（一格不可能既是营地又是已消耗 ✗）',
-          'camp_skip_done' in _el53 and 'cell_of(*_hit54) in done' in _el53)
+          and 'camp_not_in_model' in _el53
+          and 'camp_skip_done' not in _el53)
+    check('v1.55 ③ `camp_nb` 用**营地块 ∪ 营地格**的邻居，**再按 `observed` 滤雾**（块角营地也有候选 ✓ / 雾格仍不被当可点 ✓）',
+          '_camp_block_cells' in open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py'),
+                                          encoding='utf-8').read())
     check('v1.53 ② 打不上时会**记日志**（camp_not_found ⇒ 下次能一眼看出 ✗）',
           'camp_not_found' in _el53)
 
