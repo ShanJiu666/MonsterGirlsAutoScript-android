@@ -1228,7 +1228,22 @@ def solver_order(st, c, log=None, max_steps=6, out=None):
         #   原样只传 `c['st']`（**地块分类** ✓）⇒ 模型看不到**标记** ⇒ targets 为空
         #   ⇒ 求解器不知道"点这个空白格能解锁两个标记格" ⇒ 点序变成乱走 ✗✗
         #   2026-09-28：合并逻辑抽成 _cells_for_model（eff_order 共用 ✓）
-        _cells_merged = _cells_for_model(st, c, log=log, tag='solver')
+        # ⭐⭐⭐ v1.56【`mark_revealed=False`】—— 抄 PC（**与观测闸门配套**，缺一不可）
+        #
+        #   PC 的注释（原话，`explore_loop.py` 1275~1279 行）：
+        #     「⇒ 与 `eff_order` 统一口径（那边注释早写明："True 时推演盘一步把
+        #        雾中 boss 消耗掉 ⇒ targets 丢方向、真机执行全是 fogged noop ⇒ 空转 ✗✗"）：
+        #       **雾中的标记格 = "可见但不可点"** ⇒ 求解器会老实规划"先揭格子、再打目标" ✓
+        #      ⚠ 与 `mapsolve.block_revealed` 的**观测闸门**（同一天加的）**配套生效**：
+        #        **闸门挡住"推演出来的可点"，这个参数挡住"标记格被无条件当成已揭示"** ✓」
+        #
+        #   ⚠⚠ **手机端只抄了闸门（v1.51）、没抄这个参数** ⇒ 两半**不配套** ✗✗
+        #     ⇒ 求解器把**雾中的标记格**（如雾里的 boss）当成"已揭示/可点"
+        #     ⇒ 计划指向点不动的格 ⇒ 真机全是 `fogged_noop` 空转
+        #     ⇒ 表现就是用户说的「**规划还是有大问题啊。完全不行**」✗✗
+        #     （而且 `mark_revealed=True` 会让"雾中 boss 一步被消耗掉"⇒ targets 丢方向 ✓）
+        _cells_merged = _cells_for_model(st, c, log=log, tag='solver',
+                                         mark_revealed=False)
         # ⚠ 2026-09-27 试过"摘掉出生点不点它" ✗ —— 实测**模型直接无解**：
         #     含出生点 ⇒ cost=11 / 4 步 ✓ ；摘掉 ⇒ cost=None / 0 步 ✗
         #   原因：开局其它空地块多为雾格（点不动 ✓）⇒ 出生点是唯一能启动"连锁揭示"的格 ✓
