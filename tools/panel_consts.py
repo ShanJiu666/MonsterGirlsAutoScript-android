@@ -71,12 +71,6 @@ SCAN_SOURCES = {
         #     只要 `RefMapper` 归一化正确就成立 ✓）
         '_CLAIM_PICK_XY': ('xy', 'ref'),
         '_CLAIM_BACK_XY': ('xy', 'ref'),
-        # ⭐ v1.52「领取」按钮的 **OCR 搜索带**（参考系 y 区间 (1050,1200)）
-        #   ⚠ 它**不是点击坐标**、也不参与几何换算 —— 只是"在这一段里找字"；
-        #     越界只会被裁剪（`mapbot.BAND_CROP_MIN` 决定裁不裁），
-        #     绝不点空 ⇒ 按 `band` 口径登记 ✓
-        #   依据：PC 的按钮带 700~800（720p）⇒ 参考系 **×1.5** = 1050~1200 ✓
-        '_CLAIM_PICK_BAND': ('band', 'abs'),
         # ⚠ 这两个真机实测在**弹性带内**（归一化帧看不见）⇒ 必须走弹窗系，已加 *_DLG
         'CLOSE_TR_PT': ('xy', 'abs'),
         'ITEM_TAB': ('xy', 'abs'),

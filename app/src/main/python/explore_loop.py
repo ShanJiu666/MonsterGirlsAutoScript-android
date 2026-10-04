@@ -796,6 +796,43 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
         if log is not None:
             log.append({tag: 'mark_cell_added', 'cell': '%d,%d' % _k,
                         'marks': _ml})
+    # ⭐⭐⭐ v1.53【给观测里的**营地那一格**打 `camp=True`】—— 抄 PC（这一步是地基）
+    #   PC 原话：「循环侧用 `find_camp_cell()`（老判据 + sid 后缀 000 兜底）认出来后，
+    #     **在观测里给那一格打 `camp=True`**，这里（`mapsim.Block.camp`）接住它」
+    #
+    #   ⚠⚠ **真机日志实测（v1.52，用户跑的那把）**：
+    #     `{"solver":"no_plan","reason":"exhausted","expanded":1}` —— **只展开 1 个节点
+    #     就判无解** ⇒ 说明**开局的候选集是空的** ✗✗
+    #     开局候选 = `camp_nb | empty_adj`：新图没有任何已消耗格 ⇒ `empty_adj=0`；
+    #     营地若没被认出来（`Problem.camp=None`）⇒ `camp_nb=0`
+    #     ⇒ **两个都是 0 ⇒ 一步都走不了** ✗✗
+    #   而 `Problem` 找营地有两条路：① 块名含「营地」② `Block.camp` 兜底
+    #     —— **手机端以前只存了 `st['camp']`（像素），从没在观测里打 `camp` 标**
+    #     ⇒ 路② 永远不触发 ⇒ 营地格被多格块吞掉时（真机常见）**直接无解** ✗
+    #   ⇒ 按 PC 补齐：`st['camp']` 命中的那一格打标；再退一步用 **sid 后缀 000** 兜底 ✓
+    try:
+        _cmp53 = st.get('camp') or st.get('spawn')
+        _hit53 = None
+        if _cmp53:
+            _rc53 = cell_of(_cmp53[0], _cmp53[1])
+            _hit53 = _rc53 if _rc53 in _cells_merged else None
+        if _hit53 is None:                       # 兜底：sid 后缀 000 就是营地 ✓
+            for _k53, _v53 in _cells_merged.items():
+                if str(_v53.get('sid') or '').endswith('_000'):
+                    _hit53 = _k53
+                    break
+        if _hit53 is not None:
+            _cells_merged[_hit53]['camp'] = True
+            if log is not None:
+                log.append({tag: 'camp_tagged', 'cell': '%d,%d' % _hit53,
+                            'note': '营地那一格打 `camp` 标 ⇒ `Problem.camp` 有锚点 ✓'
+                                    '（没它开局候选集会空 ⇒ `no_plan exhausted` ✗）'})
+        elif log is not None:
+            log.append({tag: 'camp_not_found',
+                        'note': '⚠ 没认出营地格 ⇒ `Problem.camp` 可能为空 '
+                                '⇒ 开局可能无解（看 solver 的 expanded 是不是 1）✗'})
+    except Exception:       # noqa: BLE001
+        pass
     # ---- ⭐⭐⭐ 2026-10-01 用户报「点了金属宝箱怪（说了不点的）」----
     #   根因：`_blocked_px` 只把拉黑格从 `nones_extra`（内容格/开路池）剔掉了，
     #   但**规划器（solver/eff）喂进去的 cells 里没剔** ⇒ 它照样把宝箱怪排进点序 ✗
@@ -4253,23 +4290,21 @@ _CLAIM_ROW_DY = 60      # 「已完成」与其它槽位标签的**行距容差*
 _CLAIM_COL_DX = 140     # 复检时的**同槽**横向容差（槽位宽度量级 ✓）
 _CLAIM_FAIL_MAX = 3     # 连续领不掉几次 ⇒ 停止自动领取（PC 口径「连续 3 次」✓）
 
-# ⭐⭐⭐ v1.52【三步领取的间隔与标定坐标】—— 抄 PC（`abd47f8` / `15f59e3`）
+# ⭐⭐⭐ v1.52【三步领取的间隔与兜底坐标】—— 抄 PC（`abd47f8` / `15f59e3`）
 #   PC 用户口径（原话）：「**已完成和领取时间间隔 1s，领取和后面的返回间隔 3s**」
 #                       「**返回在最下面**」
-#   PC 真机坐标（720×1280 设备系）⇒ 手机端是 **1080×1920 参考系**，
-#     两端都是 9:16 ⇒ 纯等比，系数 **×1.5**（与 `layout` 的 1080↔720 口径一致 ✓）：
-#       ② 弹窗「领取」 PC (582,757)  ⇒ 参考系 (873,1136)
-#       ③ 面板「返回」 PC (359,1195) ⇒ 参考系 (539,1793)
-#   ⚠⚠ 这两个只是**标定兜底** —— 主路径一律 **先 OCR 找字**（文字会随 UI 版本变，
-#     而这两条坐标是我从 PC 720p 换算来的、**没在手机真机上验过** ✗）
+#   ⚠⚠ **这两条是"最后手段"，不是主路径** —— 主路径一律**先整帧 OCR 找字** ✓
+#      （用户口径：「手机端是全分辨率，固定坐标记得改一下」⇒ 不能靠写死坐标 ✓）
+#   ✅ **已真机验证**（v1.52 真机日志 `claim_cleared` ✓）：三个点位都点对了 ——
+#      说明 ×1.5 换算成立（PC 720p ⇒ 参考系）：
+#       ② 弹窗「领取」 PC (582,757)  ⇒ (873,1136)
+#       ③ 面板「返回」 PC (359,1195) ⇒ (539,1793)
+#   ⚠ 它们是**参考系**坐标（`RefMapper` 归一化后）⇒ 本身与设备分辨率**无关** ✓
+#      —— 这与"写死设备坐标"是两回事（后者换机型就点空 ✗）
 _CLAIM_GAP_PICK = 1.0    # ① 已完成 → ② 领取（用户口径 1s ✓）
 _CLAIM_GAP_BACK = 3.0    # ② 领取   → ③ 返回（用户口径 3s ✓）
-_CLAIM_PICK_XY = (873, 1136)     # 弹窗「领取」标定兜底（参考系）
-_CLAIM_BACK_XY = (539, 1793)     # 面板「返回」标定兜底（用户口径「返回在最下面」✓）
-# 「领取」按钮的搜索带（**参考系 y 区间** —— ⚠ 是区间不是坐标！
-#   PC `d7f13c2` 踩过：「band 传成了坐标 ⇒ 实际是**全屏搜索**」✗）
-#   PC 的按钮带 700~800（720p）⇒ 参考系 1050~1200 ✓
-_CLAIM_PICK_BAND = (1050, 1200)
+_CLAIM_PICK_XY = (873, 1136)     # 弹窗「领取」兜底（**参考系**；已真机验证 ✓）
+_CLAIM_BACK_XY = (539, 1793)     # 面板「返回」兜底（用户口径「返回在最下面」✓）
 # ⚠ 这两个是**跨图**计数（照 PC 的 `_CLAIM_FAIL_STREAK`）——
 #   用 `st`（每图一份）的话每张图都会重置 ⇒ 永远到不了 3 ⇒ 自愈失效 ✗
 _CLAIM_FAIL_STREAK = 0
@@ -6158,9 +6193,13 @@ def find_in(items, *keys):
 
 
 #: 「返回」窄带搜索区间（**参考系** y；`LAYOUT` 是 1080×1920 参考系、`sy` 恒等 ✓）
-#  ⚠ 必须 ≥ `mapbot.BAND_CROP_MIN`(520) 才会走**真裁图**那条（更矮的会退化成整帧+过滤，
-#    等于没省 ⇒ 这里取 540 ✓）
-BACK_BAND_REF = (LAYOUT.sy(980), LAYOUT.sy(1520))
+#  ⚠ 必须 ≥ `mapbot.BAND_CROP_MIN`(520) 才会走**真裁图**那条（更矮的会退化成整帧+过滤）
+#  ⭐⭐ v1.52 真机日志实测**把这条带加宽了**：原来 (980,1520) —— 而
+#    「探索已完成」领奖后的那个「返回」实际在 **y≈1793**（用户口径「返回在最下面」✓）
+#    ⇒ **根本不在带里** ✗ ⇒ 白扫 4 次窄带才转全屏（真机日志：`via: "anchor"`
+#      两处都走了兜底 ⇒ 说明 OCR 一次都没命中 ✗）
+#    ⇒ 现在覆盖到 1900（含两种「返回」：背包系 y≈1212 与 领奖系 y≈1793 ✓）
+BACK_BAND_REF = (LAYOUT.sy(900), LAYOUT.sy(1900))
 
 
 def back_poll(b, log=None, tag='back', band=None, timeout=6.0, poll=0.5,
@@ -6992,12 +7031,14 @@ def one_round(b, log, rnd, prefix, st):
                         _cl52 = None
                         try:
                             b.snap('claim_pick')
-                            # ⚠ band 是**参考系 y 区间** —— PC 在这踩过坑（`d7f13c2`：
-                            #   「band 传成了坐标 ⇒ 实际是**全屏搜索**」✗）
-                            #   别写成 (x0,y0,x1,y1) ✗
-                            _it52 = b.ocr(band=(LAYOUT.sy(_CLAIM_PICK_BAND[0]),
-                                                LAYOUT.sy(_CLAIM_PICK_BAND[1])),
-                                          tag='claim_pick') or []
+                            # ⚠⚠ v1.52 真机日志实测：原来只在 (1050,1200) 这 **150px**
+                            #   窄带里找「领取」⇒ **一次都没命中** ✗（走了标定兜底）
+                            #   · 150px < `BAND_CROP_MIN`(520) ⇒ 本来就退化成整帧+过滤
+                            #     ⇒ **带宽没省下任何时间，却把范围限死了** ✗✗
+                            #   · 而且「领取」未必正好落在那个带里（弹窗文案/版式会变）
+                            # ⇒ 改成**整帧找**（这条路**每图只跑一次** ⇒ 成本可忽略 ✓）
+                            #   钱要花在"能认到"上，不是省这一次 OCR ✓
+                            _it52 = b.ocr(tag='claim_pick') or []
                             _cl52 = (find_button(_it52, *L['claim'], maxlen=4)
                                      or find_in(_it52, *L['claim']))
                         except Exception:       # noqa: BLE001

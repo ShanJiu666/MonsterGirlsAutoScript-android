@@ -4942,9 +4942,11 @@ try:
           chr(61)+chr(108)+chr(111)+chr(103)+chr(44)+chr(32)+chr(116)+chr(97)+
           chr(103)+chr(61)+chr(39)+chr(99)+chr(108)+chr(97)+chr(105)+chr(109)+
           chr(95)+chr(114)+chr(101)+chr(116)+chr(39)+chr(41) in _el48s)
-    check('v1.52 ①d 「领取」的 band 是**区间**不是坐标（PC d7f13c2 踩过 ✗）',
-          '_CLAIM_PICK_BAND = (1050, 1200)' in _el48s
-          and 'band=(LAYOUT.sy(_CLAIM_PICK_BAND[0])' in _el48s)
+    check('v1.52 ①d 「领取」走**整帧找**（原来 150px 窄带 ⇒ 真机一次没命中 ✗）',
+          "b.ocr(tag='claim_pick')" in _el48s
+          and '_CLAIM_PICK_BAND' not in _el48s)
+    check('v1.52 ①e 「返回」窄带**覆盖到底部**（原 980~1520 装不下 y≈1793 的返回 ✗）',
+          'BACK_BAND_REF = (LAYOUT.sy(900), LAYOUT.sy(1900))' in _el48s)
     check('v1.48 ①b 有**自愈**（连续领不掉就停）+ 跨图计数（用 st 会每图重置 ✗）',
           hasattr(_el48, '_CLAIM_FAIL_STREAK')
           and hasattr(_el48, '_CLAIM_FAIL_MAX')
@@ -5281,6 +5283,59 @@ try:
           'self.obs_cells = None' in _sm51)
 except Exception as _e51:       # noqa: BLE001
     check('v1.51 守门可运行（%r）' % (_e51,), False)
+
+print()
+print('㊿⏤⏤ v1.53 观测里给**营地**打 camp 标（真机 no_plan/exhausted 的根因）')
+try:
+    import importlib as _il53
+    _il53.invalidate_caches()
+    import spots as _sp53
+    import mapsim as _sim53
+    import mapsolve as _ms53
+    _el53 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                             'explore_loop.py'), encoding='utf-8').read()
+    check('v1.53 ① _cells_for_model 给营地的格子打 camp 标'
+          '（PC 口径：st[\'camp\'] + **sid 后缀 000 兜底** ✓）',
+          "_cells_merged[_hit53]['camp'] = True" in _el53
+          and "endswith('_000')" in _el53)
+    check('v1.53 ② 打不上时会**记日志**（camp_not_found ⇒ 下次能一眼看出 ✗）',
+          'camp_not_found' in _el53)
+
+    def _c53(sid, name, anchor, **kw):
+        _d = {'sid': sid, 'name': name, 'revealed': True, 'ratio': 0.9,
+              'marks': [], 'anchor': anchor}
+        _d.update(kw)
+        return _d
+
+    _cells53 = {}
+    for _r in range(1, 6):
+        for _cc in range(1, 8):
+            _cells53[(_r, _cc)] = _c53('S00003_001', '草地', (_r, _cc))
+    _cells53[(1, 1)] = _c53('S00003_211', '巨大沙堡', (1, 1), camp=True)
+    _cells53[(2, 1)] = _c53('S00003_211', '巨大沙堡', (1, 1))
+    _cells53[(3, 3)] = _c53('S00003_002', '沙地', (3, 3), marks=['boss'],
+                            target=True)
+    _sim53v = _sim53.MapSim.from_observation(_cells53, _sp53.spot_rows())
+    _prob53 = _ms53.Problem(_sim53v)
+    _vis53 = _prob53.visible(frozenset())
+    _cost53, _acts53 = _ms53.solve(_prob53)
+    check('v1.53 ③ 实跑：营地被多格块吞掉 + 打了 camp 标 ⇒ Problem.camp 有锚点 ✓',
+          _prob53.camp is not None, 'camp=%s' % _prob53.camp)
+    check('v1.53 ④ 实跑：**开局候选集非空**（真机那次是 0 ⇒ expanded:1 exhausted ✗）',
+          len(_vis53) > 0, '%d 个' % len(_vis53))
+    check('v1.53 ⑤ 实跑：求解器**有解**（不再无解 ✓）', _acts53 is not None,
+          'cost=%s' % _cost53)
+    # 对照：不打标 ⇒ 复现真机症状
+    _cells53b = {k: dict(v) for k, v in _cells53.items()}
+    _cells53b[(1, 1)].pop('camp', None)
+    _prob53b = _ms53.Problem(_sim53.MapSim.from_observation(_cells53b,
+                                                            _sp53.spot_rows()))
+    check('v1.53 ⑥ 对照：**不打标就复现真机症状**（camp=None + 候选 0 ⇒ 无解 ✗）',
+          _prob53b.camp is None and len(_prob53b.visible(frozenset())) == 0,
+          'camp=%s vis=%d' % (_prob53b.camp,
+                              len(_prob53b.visible(frozenset()))))
+except Exception as _e53:       # noqa: BLE001
+    check('v1.53 守门可运行（%r）' % (_e53,), False)
 
 print()
 print('=' * 78)
