@@ -5103,6 +5103,17 @@ try:
     _rel49 = open(os.path.join(PROJ, 'tools', 'release.py'), encoding='utf-8').read()
     check('v1.49 ⑤ id 格式与**产出方**一致（`release.py` 的 `hot_id()` = `hot-%d-%s` ✓）',
           "'hot-%d-%s'" in _rel49)
+    # ⑥ v1.50：**上游那半** —— 清单里挂着的陈旧补丁 ⇒ 从源头就不下
+    #   ⚠ 为什么两半都要：只做"丢弃"的话，清单还挂着旧补丁 ⇒ 悬浮条一起来就
+    #     **再下一遍 0.3MB**、下次启动又丢一次 ⇒ 每启动一次白下一次 ✗
+    check('v1.50 ⑥ `hotVerdict` 也判陈旧（`patchBuildVc(id) < myVc` ⇒ 报"不可用"）',
+          'int bid = patchBuildVc(id);' in _up49 and 'bid >= 0 && bid < myVc' in _up49)
+    check('v1.50 ⑦ 两半**都在**（`bootRecover` 丢弃 + `hotVerdict` 不提供 ✓）',
+          'stale-' in _up49 and 'bid >= 0 && bid < myVc' in _up49)
+    # ⑧ 旧半的两道闸（active + pending）不能因为加了新半而被删掉
+    check('v1.50 ⑧ 回归：`bootRecover` 的 active/pending 两道闸仍在'
+          '（新半是**补充**，不是替换 ✗）',
+          'stale-' in _up49 and 'stale-pend-' in _up49)
 except Exception as _e49:       # noqa: BLE001
     check('v1.49 守门可运行（%r）' % (_e49,), False)
 
