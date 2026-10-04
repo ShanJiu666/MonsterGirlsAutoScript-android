@@ -629,8 +629,14 @@ print('⑬ 弹窗地块：勾选=主动处理 / 不勾=拉黑（用户 2026-10-0
 _tc = open(os.path.join(MAPBOT, 'targets_cfg.py'), encoding='utf-8').read()
 check('is_blocked 由**勾选配置推导**（不再硬编码黑名单 ✓）',
       "return not enabled(k, cfg)" in _tc and '_blocked = {' not in _tc)
-check('特殊地块名单含两种宝箱怪 + 预言石碑/石板',
-      all(k in _tc for k in ("'金属宝箱怪'", "'机巧宝箱怪'", "'预言石碑'", "'预言石板'")))
+check('特殊地块名单含两种宝箱怪 + 预言石碑（**且不含幽灵项** ✗）',
+      # ⭐ v1.46：名单已按数据表核实清理（学 PC 端 1e9afce / b5f08a6）：
+      #   · `献祭宝箱怪` —— `MaxNum = 0` ⇒ **游戏根本不会生成它** ✗ ⇒ 删
+      #   · `预言石板`   —— **数据表里没这个名字**（真名是 `预言石碑`）✗ ⇒ 删
+      #   ⇒ 这两条**不该**再出现（旧断言守的是"有它们"，方向反了 ✓）
+      all(k in _tc for k in ("'金属宝箱怪'", "'机巧宝箱怪'", "'预言石碑'"))
+      and "'献祭宝箱怪'" not in _tc
+      and "'预言石板'" not in _tc)
 check('拉黑格一律**不是目标**（is_target 先判 is_blocked ✓）',
       # ⚠ 2026-10-01：判据命中文本要跟着实现走 —— 实现已改成 `is_blocked(name, d)`
       #   （把显式 cfg 传下去，修了"静默丢配置"），旧断言只认 `is_blocked(name)`
@@ -4749,6 +4755,290 @@ try:
           and 'max_steps=4' not in _code45)
 except Exception as _e45:       # noqa: BLE001
     check('v1.45 守门可运行（%r）' % (_e45,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊼ v1.46【特殊方块勾选】—— 学 PC 端 `0e43db5` / `2ab3105` / `1e9afce` /
+#                       `b5f08a6` / `0578bb6`（用户点名的功能）
+#   用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中**商人和宝库默认勾选**，
+#     其他的默认不勾选（就是拉黑），**暂时也无法勾选**」✓
+#   手机端载体 = `MainActivity` 新增「特殊方块」卡片（Java）＋ 两个桥函数（Python）✓
+#   ① 清单清理：`献祭宝箱怪`（MaxNum=0，游戏不生成）+ `预言石板`（数据表无此名，
+#      真名是 `预言石碑`）**都该删**（PC `1e9afce` / `b5f08a6`）✗→✓
+#   ② 置信度门槛 `BLOCKED_SCORE_MIN=0.70` + `is_blocked_cell`（PC 真机事故：
+#      boss 格被误当"用户拉黑" ⇒ **14 点体力的首领不打了** ✗）
+#      根因：只判名字、不看认得准不准 ⇒ 0.30~0.32 的**乱猜**也中招 ✗
+#   ③ mtime 感知 `current()`（PC `0578bb6`）：改了勾选**不用重启**就生效 ✓
+#      坑②：取消勾选必须**显式写 False**，删键会被 `setdefault(k, True)` 补回 ✗
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊼ v1.46 特殊方块勾选（清单 + 置信度门槛 + mtime + UI 桥）')
+try:
+    import importlib as _il46
+    _il46.invalidate_caches()
+    import targets_cfg as _tc46
+    import explore_android as _ea46
+
+    # ① 幽灵项已删
+    _ghost46 = [g for g in ('献祭宝箱怪', '预言石板')
+                if g in (_tc46.SPECIAL_NAMES or set())]
+    check('v1.46 ① 清单里的**幽灵项已删**（献祭宝箱怪 MaxNum=0 不生成；'
+          '预言石板真名是预言石碑 ✗）',
+          not _ghost46, '残留=%s' % (_ghost46 or '无 ✓'))
+
+    # ② 置信度门槛（PC 那个 boss 被误拉黑的事故）
+    check('v1.46 ② 有 `BLOCKED_SCORE_MIN`（默认 0.70）+ `is_blocked_cell` ✓',
+          hasattr(_tc46, 'BLOCKED_SCORE_MIN')
+          and hasattr(_tc46, 'is_blocked_cell'),
+          'BLOCKED_SCORE_MIN=%s' % getattr(_tc46, 'BLOCKED_SCORE_MIN', None))
+    _c46 = [('金属宝箱怪', 0.994, True), ('金属宝箱怪', 0.397, False),
+            ('金属宝箱怪', 0.300, False), ('草地', 0.99, False)]
+    _bad46 = []
+    for _nm46, _sc46, _want46 in _c46:
+        if _tc46.is_blocked_cell({'name': _nm46, 'score': _sc46}) != _want46:
+            _bad46.append('%s@%.3f' % (_nm46, _sc46))
+    check('v1.46 ②b 实跑：**乱猜低分不拉黑、真识别高分才拉黑**'
+          '（PC 事故：boss 被 0.3 分乱猜误拉黑 ✗）',
+          not _bad46, 'bad=%s' % (_bad46,) if _bad46 else '4/4')
+
+    # ③ mtime 感知
+    check('v1.46 ③ `current()` 有 **mtime 感知**（改了勾选不用重启 ✓）',
+          'getmtime' in open(
+              os.path.join(PROJ, 'app', 'src', 'main', 'python', 'targets_cfg.py'),
+              encoding='utf-8').read())
+
+    # ④ UI 桥：两个函数都要在（Java 侧靠 PyBridge.call 找它们）
+    _b46 = []
+    for _fn46 in ('special_list', 'special_set'):
+        if not callable(getattr(_ea46, _fn46, None)):
+            _b46.append(_fn46)
+    check('v1.46 ④ UI 桥 `special_list` / `special_set` 都在（Java 靠它建勾选排 ✓）',
+          not _b46, '缺=%s' % (_b46 or '无 ✓'))
+    check('v1.46 ⑤ `SP_EDITABLE` = 商人 + 宝库（用户口径：**只有这两个可勾** ✓）',
+          tuple(getattr(_ea46, 'SP_EDITABLE', ())) == ('旅行商人', '黄金宝库'),
+          'SP_EDITABLE=%s' % (getattr(_ea46, 'SP_EDITABLE', None),))
+    # ⑥ special_list 真能返回可用 JSON
+    import json as _json46
+    _d46 = _json46.loads(_ea46.special_list() or '{}')
+    _items46 = _d46.get('items') or []
+    _locked46 = [i['name'] for i in _items46 if i.get('locked')]
+    _free46 = [i['name'] for i in _items46 if not i.get('locked')]
+    check('v1.46 ⑥ 实跑 `special_list()`：可勾 2 个、其余**锁定**'
+          '（用户口径「暂时也无法勾选」✓）',
+          len(_free46) == 2 and len(_locked46) >= 5,
+          '可勾=%s 锁定%d个' % (_free46, len(_locked46)))
+    check('v1.46 ⑦ 商人/宝库**默认勾选**（用户口径 ✓）',
+          all(i.get('on') for i in _items46 if i['name'] in ('旅行商人', '黄金宝库')),
+          '状态=%s' % ([(i['name'], i['on']) for i in _items46[:2]],))
+    # ⑧ Java 侧勾选排真的在
+    _j46 = open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                             'autoexplore', 'MainActivity.java'),
+                encoding='utf-8').read()
+    check('v1.46 ⑧ `MainActivity` 有勾选排（v1.47 起叫 `fillSpecialRows`，卡片在 ✓）',
+          ('fillSpecialRows' in _j46 or 'buildSpecialRows' in _j46)
+          and '特殊方块（不勾 = 拉黑）' in _j46
+          and 'special_set' in _j46)
+except Exception as _e46:       # noqa: BLE001
+    check('v1.46 守门可运行（%r）' % (_e46,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊽ v1.47【桥层永不进热更补丁】—— 学 PC 端 `hotupdate.BOOT_LAYER`
+#   **真机事故**（Redmi 25053RT47C，v1.47）：
+#     给 `MainActivity` 加了「特殊方块勾选」卡片，Java 调
+#     `PyBridge.call("special_list")` ⇒
+#       `AttributeError: module 'explore_android' has no attribute 'special_list'`
+#     而 **APK 里那份 `explore_android.pyc` 明明有**这个函数（验过 ✓）✗
+#   根因：`Updater.bootRecover` 把 `hot/active` 插到 **`sys.path[0]`**
+#     ⇒ 补丁里那份**旧的 `explore_android.py`**（hot-144 时发的）**覆盖**了 APK 新版 ✗✗
+#     而它是 **Java↔Python 的唯一入口** ⇒ Java 新增的任何桥函数都会被旧补丁吃
+#     ⇒ 症状是"界面空白/功能静默失效"，且**看 APK 内容完全正常**，极难排查 ✗
+#   修法：`release.py` 的 `BOOT_LAYER` 把 `explore_android.py` 排除出补丁 ✓
+#     · 端上永远用 APK 里那份；改它 ⇒ **必须重发整包**（与 PC 端同规矩 ✓）
+#     · 激活新补丁时旧 active 会被**整体移走**（`hot/bad/prev-*`）⇒ 发一次不含它的
+#       新补丁就能自动净化 ✓（已实测：hot-147 激活后 `special_list` 报错归零 ✓）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊽ v1.47 桥层不进热更补丁（explore_android.py）')
+try:
+    _rel47 = open(os.path.join(PROJ, 'tools', 'release.py'),
+                  encoding='utf-8').read()
+    check('v1.47 ① `release.py` 有 `BOOT_LAYER` 且含 `explore_android.py`',
+          'BOOT_LAYER' in _rel47 and 'explore_android.py' in _rel47)
+    check('v1.47 ② 打包时**真的跳过** BOOT_LAYER（不是只定义不用 ✗）',
+          'if fn in BOOT_LAYER:' in _rel47 and 'skipped.append(fn)' in _rel47)
+    # ③ 实跑：造一次补丁清单，确认桥层不在里面（**不看注释、看真结果** ✓）
+    try:
+        import importlib.util as _ilu47
+        _sp47 = _ilu47.spec_from_file_location(
+            'rel47', os.path.join(PROJ, 'tools', 'release.py'))
+        _r47 = _ilu47.module_from_spec(_sp47)
+        _sp47.loader.exec_module(_r47)
+        _z47, _n47 = _r47.build_hot_zip(1, False)
+        import zipfile as _zf47
+        with _zf47.ZipFile(_z47) as _z:
+            _got47 = _z.namelist()
+        try:
+            os.remove(_z47)
+        except Exception:       # noqa: BLE001
+            pass
+        check('v1.47 ③ 实跑 `build_hot_zip()`：桥层**不在**补丁里 ✓',
+              'explore_android.py' not in _got47,
+              '补丁 %d 个文件；含桥层=%s' % (len(_got47),
+                                            '是 ✗' if 'explore_android.py' in _got47 else '否 ✓'))
+        check('v1.47 ④ 其余业务模块**照旧进补丁**（别把该热更的也排除了 ✗）',
+              'explore_loop.py' in _got47 and 'buypanels.py' in _got47
+              and 'targets_cfg.py' in _got47,
+              'loop/buypanels/targets_cfg 都在=%s'
+              % all(k in _got47 for k in ('explore_loop.py', 'buypanels.py',
+                                          'targets_cfg.py')))
+    except Exception as _e47:       # noqa: BLE001
+        check('v1.47 实跑 build_hot_zip（%r）' % (_e47,), False)
+except Exception as _e47b:      # noqa: BLE001
+    check('v1.47 守门可运行（%r）' % (_e47b,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊾ v1.48【PC 剩余五条落地】—— 逐条对照，⑤ 说明"为什么不用做"
+#   ① 探索小队「已完成」自动领取（PC `4ac67cf`/`dda68b8`/`677d5d9`）
+#      手机端**原来完全没有** ⇒ 槽位「已完成」就永远占着 ⇒ 少派一支小队 ✗
+#      口径全照 PC：**每图只跑一次** ✓ + **自愈**（连续 3 次领不掉就停）✓
+#      ⭐ 手机端**零额外 OCR**（直接用轮首那一次 `b.ocr(tag='round')` 的 items ✓）
+#      ⭐⭐ **一个槽位坐标都不写死**（全分辨率）—— 用同帧其它槽位标签的 y 当锚，
+#         要求「已完成」落在同一行 ✓（这条锚是**安全关键**：没它可能点到棋盘格 ✗）
+#   ③ 「返回」两级轮询（PC `d2832a7`）—— `back_poll()`：0.5s 窄带 → 连 4 次没中
+#      全屏找 → 6s 仍没有标定兜底 ✓（原来只有"一次 OCR + 写死坐标" ✗）
+#   ④ 战斗型地块**永不当空地**（PC `74a5e72`）—— `Block.plain` 里加 `is_fight_spot` 闸
+#      根因：`PLAIN_SEEN`（运行时学到）会把战斗格学成空地 ⇒ 该类型**全部**格子变 1 体 ✗
+#      ⇒ 与 v1.43 的类型定价**互相矛盾** ⇒ "打架不要钱" ⇒ 宁可打架不绕路 ✗
+#   ⑤ `BIG_BLOCK_MIN`（PC `aeac273`）—— ⚠ **手机端本来就没这个机制** ⇒ **不用做** ✓
+#      （PC 那条是**关掉**它：用户口径「别随意降门槛，揭示的战斗地块分数都很低」）
+#   ⑥ 结算面板模板快查进 `start_fight`（PC `dd03218`/`d6c0b53`）
+#      手机端**已有** `settle_panel_hit()`（v1.45e）+ 三个结算按钮模板 ⇒ 这一步是**接线** ✓
+#      ⚠ 但 `start_fight` 里误判 True 的代价是「**跳过一场战斗、丢奖励**」✗✗
+#        ⇒ 新增**严格版** `settle_panel_strong()`（要 ≥2 个按钮同时命中）✓
+#      ⚠ 安全设计照搬 PC：模板只做"加分"，`False/None` 一律**回落原 OCR 路**（一行没动）✓
+#      ⚠ `b.img()` **不重新取帧** ⇒ 快查前必须 `b.snap()`（PC 血泪史 #3 ✓）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊾ v1.48 PC 剩余五条（①③④⑥ 已做；⑤ 无需做）')
+try:
+    import importlib as _il48
+    _il48.invalidate_caches()
+    import explore_loop as _el48
+    import mapsim as _sim48
+    import spots as _sp48
+
+    # ① 领取已完成
+    check('v1.48 ① 有「已完成」自动领取（`claim_done` + 每图一次 `claim_checked`）',
+          "'explore': 'claim_done'" in open(
+              os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                           'explore_loop.py'), encoding='utf-8').read()
+          and 'claim_checked' in open(
+              os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                           'explore_loop.py'), encoding='utf-8').read())
+    check('v1.48 ①b 有**自愈**（连续领不掉就停）+ 跨图计数（用 st 会每图重置 ✗）',
+          hasattr(_el48, '_CLAIM_FAIL_STREAK')
+          and hasattr(_el48, '_CLAIM_FAIL_MAX')
+          and hasattr(_el48, '_CLAIM_FAIL_LOGGED'))
+    check('v1.48 ①c 有**行锚**（不许写死槽位坐标 —— 全分辨率 ✗）',
+          hasattr(_el48, '_CLAIM_ROW_DY') and hasattr(_el48, '_CLAIM_COL_DX'))
+
+    # ③ back_poll
+    check('v1.48 ③ `back_poll()` 在 + 窄带 ≥ BAND_CROP_MIN（否则裁图白设 ✗）',
+          callable(getattr(_el48, 'back_poll', None))
+          and hasattr(_el48, 'BACK_BAND_REF'))
+    import mapbot as _mb48
+    _bh48 = _el48.BACK_BAND_REF[1] - _el48.BACK_BAND_REF[0]
+    check('v1.48 ③b 窄带高度 %d ≥ BAND_CROP_MIN %d ⇒ 真裁图 ✓'
+          % (_bh48, _mb48.BAND_CROP_MIN), _bh48 >= _mb48.BAND_CROP_MIN,
+          'band 高 %d' % _bh48)
+
+    class _FB48(object):
+        def __init__(self, band_at=None, full=False):
+            self.n, self.band_at, self.full = 0, band_at, full
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, band=None, tag='', **k):
+            if band:
+                self.n += 1
+                if self.band_at and self.n >= self.band_at:
+                    return [{'text': '返回', 'cx': 539, 'cy': 1212}]
+                return []
+            return [{'text': '返回', 'cx': 700, 'cy': 1600}] if self.full else []
+
+    _r1 = _el48.back_poll(_FB48(band_at=2), timeout=6.0, poll=0.0)
+    check('v1.48 ③c 实跑：窄带第 2 次命中 ⇒ via=band（不白扫全屏 ✓）',
+          _r1 is not None and _r1[2] == 'band', 'got=%s' % (_r1,))
+    _r2 = _el48.back_poll(_FB48(full=True), timeout=6.0, poll=0.0)
+    check('v1.48 ③d 实跑：窄带永不中 ⇒ **全屏**找到（PC 那个"只在底部扫"的坑 ✓）',
+          _r2 is not None and _r2[2] == 'full', 'got=%s' % (_r2,))
+    _r3 = _el48.back_poll(_FB48(), timeout=0.2, poll=0.0)
+    check('v1.48 ③e 实跑：都找不到 ⇒ None（调用方走标定兜底，不卡死 ✓）',
+          _r3 is None, 'got=%s' % (_r3,))
+
+    # ④ 战斗型不许当空地
+    _fs48 = None
+    for _sid, _row in (_sp48.spot_rows() or {}).items():
+        _ev = str(_row.get('EventNum') or '').strip()
+        if _ev and _ev.split('-')[0].isdigit() and int(_ev.split('-')[0]) > 1 \
+                and int(_row.get('SpotSize') or 1) > 1:
+            _fs48 = _sid
+            break
+    _suf48 = _fs48.split('_')[-1]
+    _cells48 = {
+        (1, 1): {'sid': 'S00003_000', 'name': '营地', 'revealed': True,
+                 'ratio': 1.0, 'marks': [], 'anchor': (1, 1)},
+        (2, 1): {'sid': _fs48, 'name': (_sp48.spot_rows() or {})[_fs48].get('Name'),
+                 'revealed': True, 'ratio': 0.9, 'marks': [], 'anchor': (2, 1)},
+    }
+    _sim48.PLAIN_SEEN[_suf48] = True        # ⭐ 故意误学成空地
+    _sim48v = _sim48.MapSim.from_observation(_cells48, _sp48.spot_rows())
+    _bad48 = [b for b in _sim48v.blocks.values() if b.plain
+              and _sp48.is_fight_spot(b.sid)]
+    _sim48.PLAIN_SEEN.pop(_suf48, None)
+    check('v1.48 ④ 实跑：战斗型地块**即使被 PLAIN_SEEN 误学**也仍是空地=False'
+          '（PC 那个"打架不要钱"的坑 ✓）',
+          not _bad48, '漏=%s' % ([b.sid for b in _bad48] or '无 ✓'))
+
+    # ⑥ 严格结算判据
+    check('v1.48 ⑥ 有 `settle_panel_strong`（≥2 个按钮才算 —— start_fight 专用 ✓）',
+          callable(getattr(_el48, 'settle_panel_strong', None)))
+    import cv2 as _cv48
+    import numpy as _np48
+    _tpl48 = os.path.join(PROJ, 'app', 'src', 'main', 'assets', 'mapbot_pack',
+                          'templates', 'ui')
+
+    def _mk48(names):
+        _cv = _np48.full((1920, 1080, 3), 40, _np48.uint8)
+        for _n in names:
+            _cx, _cy = _el48.SETTLE_TPL[_n]
+            _t = _cv48.imdecode(_np48.fromfile(os.path.join(_tpl48, _n),
+                                               dtype=_np48.uint8),
+                                _cv48.IMREAD_COLOR)
+            _h, _w = _t.shape[:2]
+            _cv[_cy - _h // 2:_cy + _h // 2, _cx - _w // 2:_cx + _w // 2] = _t
+        return _cv
+
+    class _FB6(object):
+        def __init__(self, im):
+            self._im = im
+
+        def snap(self, *a, **k):
+            pass
+
+        def img(self):
+            return self._im
+
+    _names48 = list(_el48.SETTLE_TPL)
+    _got3 = _el48.settle_panel_strong(_FB6(_mk48(_names48)))
+    _got1 = _el48.settle_panel_strong(_FB6(_mk48(_names48[:1])))
+    _gotN = _el48.settle_panel_strong(_FB6(None))
+    check('v1.48 ⑥b 实跑：3 个按钮 ⇒ True；**只有 1 个 ⇒ False**（严格性 ✓）',
+          _got3 is True and _got1 is False, '3个=%s 1个=%s' % (_got3, _got1))
+    check('v1.48 ⑥c 实跑：拿不到帧 ⇒ **None**（调用方必须回落 OCR ✓）',
+          _gotN is None, 'got=%r' % (_gotN,))
+except Exception as _e48:       # noqa: BLE001
+    check('v1.48 守门可运行（%r）' % (_e48,), False)
 
 print()
 print('=' * 78)
