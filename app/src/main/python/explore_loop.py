@@ -8569,6 +8569,9 @@ def one_round(b, log, rnd, prefix, st):
     _coin_now = st.get('coin_now')
     if not coin_allows_buy(_coin_now):
         _nb, _nh = len(buy), len(buy_hidden)
+        # ⭐⭐⭐⭐ v1.67【清空前留底】—— 下面"模型层收口"要用它当**最高置信来源** ✓
+        #   （`buy`/`buy_hidden` 是分类器已经判成"要买"的格 ⇒ 最可信 ✓）
+        _dropped_buy67 = list(buy) + list(buy_hidden)
         buy = []
         buy_hidden = []
         # ⭐⭐⭐⭐ v1.66【**模型层收口**】—— 光清 `buy`/`buy_hidden` 不够 ✗
@@ -8579,16 +8582,74 @@ def one_round(b, log, rnd, prefix, st):
         #     `{"coin_gate":"block_buy","coin":165531,"allow_buy":false,"dropped_hidden":1}`
         #     ⇒ `{"plan":"exhausted","targets_left":1}` ⇒ `{"eff":"ok","steps":16}`
         #     ⇒ `{"tap":"vault_panel_by_dlg","at":[972,1650]}`  ← **宝库被买了** ✗✗
-        #   ⇒ 把"按名字命中的商人/宝库格"塞进 `st['nogo_rc']`（本图不碰格 ✓）
+        #   ⇒ 把"**真正的商人/宝库格**"塞进 `st['nogo_rc']`（本图不碰格 ✓）
         #     `_cells_for_model()` 末尾统一收口：blocked + 非目标 + 清标记 ✓
+        #
+        # ⛔⛔⛔ v1.67【修 v1.66 本条自己的 bug —— 判据用错了函数】
+        #   v1.66 原文写的是 `tcfg_mod.is_blocked(_v66.get('name'))` ✗
+        #   而 `is_blocked(name)` 的语义是「**这个特殊方块没被用户勾选**」
+        #     （`targets_cfg.py:84-97`：`return not enabled(k, cfg)`）
+        #   ⇒ 商人/宝库在 `DEFAULT_ON`（`targets_cfg.py:49`）里**默认勾选**
+        #     ⇒ `enabled=True` ⇒ `is_blocked=False` ⇒ **恒不命中** ✗✗
+        #   实测（`_tmpman/_v166_coingate_probe.py`，走生产路径 cfg=None）：
+        #     `is_blocked('旅行商人')=False`、`is_blocked('黄金宝库')=False` ✓
+        #     喂真机同款 obs（宝库/商人/祭坛/宝箱怪）⇒ 进 `nogo_rc` 的却是
+        #     **祭坛 + 宝箱怪**（那两个 `DEFAULT_ON` 没勾 ⇒ `is_blocked=True`），
+        #     而**该拉的商人/宝库一格没进** ✗
+        #   真机日志印证（`_tmpman/devlog4/mgas_log.txt`）：map 3 明明
+        #     `{"coin_gate":"block_buy","dropped_buy":1}`（确实有商人/宝库）
+        #     可**一条 `coin_gate: nogo_tagged` 都没落** ✗；map 0/1 落的
+        #     `3,3` / `5,4` 恰恰是**别的**特殊方块（v1.44 早就拉黑过 ⇒ 纯重复）
+        #   ⇒ 后果：商人/宝库在模型层仍是 `target=True`
+        #     （`_tmpman/_v166_target_probe.py`：`is_target('黄金宝库')=True`）
+        #     ⇒ 求解器照样能把它们排进点序 ⇒ 点了就弹面板 ⇒ `buypanels.vault_flow`
+        #       照样跑（那条链**只看面板文字**，不看 `buy`）⇒ **宝库仍会被买** ✗✗
+        #     ⚠ 本轮真机没复发，只是因为求解器进图只规划一次、之后没重算 ⇒
+        #       **潜在，不是不存在** ✓
+        #
+        #   ## 正确判据（两条来源，取并集 —— 都是"商人/宝库"的真语义 ✓）
+        #     ① **`buy` / `buy_hidden` 的格**（分类器判定的最高置信来源，
+        #        进闸门前先留底到 `_dropped_buy67` ✓）
+        #        ⚠ 这一条覆盖"**未揭示**的商人/宝库"（`buy_hidden`）——
+        #          按名字扫 `obs` 是扫不到它们的（暗格没有名字）✗
+        #     ② `obs` 里**名字命中 `spots.BUY_OUT_NAMES`** 且 `score >= BUY_SCORE_MIN`
+        #        （与 `spots.py:1492` 分类器自己的买入口径**同源同门槛** ✓）
+        #        ⚠ 为什么必须带分数门槛（v1.46 教训）：低分乱猜**没资格**代表
+        #          "这是商人/宝库" ⇒ 宁可多看一眼，也别把某格静默拉黑 ✗
         try:
             _nogo = st.setdefault('nogo_rc', set())
             _base66 = st.get('obs') or (c.get('st') or {})
             _nv66 = []
+            # ① 分类器判定的商人/宝库（含未揭示的 `buy_hidden` ✓）
+            for _p67 in _dropped_buy67:
+                try:
+                    _rc67 = cell_of(*_p67)
+                except Exception:       # noqa: BLE001
+                    continue
+                if tuple(_rc67) not in _nogo:
+                    _nogo.add(tuple(_rc67))
+                    _nv66.append(tuple(_rc67))
+            # ② 名字命中 + 分数够（补"分类器这帧没给出、但名字明显是"的格 ✓）
+            try:
+                _bun67 = tuple(getattr(spots_mod, 'BUY_OUT_NAMES', ()) or ())
+                _bmin67 = float(getattr(spots_mod, 'BUY_SCORE_MIN', 0.85))
+            except Exception:           # noqa: BLE001
+                _bun67, _bmin67 = (), 0.85
             for _k66, _v66 in _base66.items():
                 if not isinstance(_v66, dict):
                     continue
-                if tcfg_mod.is_blocked(_v66.get('name')):
+                _nm66 = str(_v66.get('name') or '')
+                if not _nm66:
+                    continue
+                if not any(_b in _nm66 for _b in _bun67):
+                    continue
+                try:
+                    _sc66 = float(_v66.get('score') or 0.0)
+                except (TypeError, ValueError):
+                    _sc66 = 0.0
+                if _sc66 < _bmin67:
+                    continue
+                if tuple(_k66) not in _nogo:
                     _nogo.add(tuple(_k66))
                     _nv66.append(tuple(_k66))
             if _nv66 and log is not None:

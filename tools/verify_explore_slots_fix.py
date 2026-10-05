@@ -7380,10 +7380,85 @@ try:
           '（放前面会被 `is_target(...)` 冲掉 ✗ —— 与 v1.62 那条"veto 位置"同一个坑）',
           _i66_tgt >= 0 and _i66_ng > _i66_tgt,
           'target 重算 idx=%d，nogo 收口 idx=%d' % (_i66_tgt, _i66_ng))
-    check('v1.66 ①c 金币闸门把"按名字命中的商人/宝库"塞进 `nogo_rc`'
+    check('v1.66 ①c 金币闸门把"真正的商人/宝库"塞进 `nogo_rc`'
           '（⚠ 光清 `buy`/`buy_hidden` 会被模型层绕过 ✗ —— 真机就是这么买掉宝库的）',
           "'coin_gate': 'nogo_tagged'" in _el66
-          and "tcfg_mod.is_blocked(_v66.get('name'))" in _el66)
+          and '_dropped_buy67' in _el66)
+    # ⛔⛔⛔ v1.67【撤回守门】—— v1.66 的金币闸门**判据用错了函数**，别再写回去 ✗
+    #   `tcfg_mod.is_blocked(name)` 的语义是「**这个特殊方块没被用户勾选**」
+    #     （`targets_cfg.py:84-97`：`return not enabled(k, cfg)`）
+    #   而商人/宝库在 `DEFAULT_ON`（`targets_cfg.py:49`）里**默认勾选**
+    #     ⇒ `enabled=True` ⇒ `is_blocked=False` ⇒ **恒不命中** ⇒ 一格都拉不上 ✗✗
+    #   反过来它会把**没勾选**的特殊方块（祭坛/宝箱怪…）拉黑 —— 那些 v1.44 早就拉过，
+    #     属于**重复劳动**，而真正该拉的商人/宝库**一格没进** ✓
+    #   真机日志铁证（`_tmpman/devlog4/mgas_log.txt`）：
+    #     map 3 有 `{"coin_gate":"block_buy","dropped_buy":1}`（确实存在商人/宝库）
+    #     可**一条 `coin_gate: nogo_tagged` 都没落** ✗
+    #     map 0/1 落的 `3,3`/`5,4` 是**别的**特殊方块 ⇒ 与金币无关的副作用 ✓
+    #   探针（`_tmpman/_v167_fixcheck3.py` ⑥，逐字复现）：
+    #     同输入下旧判据给 `[(1,3),(1,4)]`（祭坛/宝箱怪）而**正确答案是 `[(1,1),(1,2)]`** ✗
+    #   ⚠⚠ **不能用字符串 grep** —— 上面的留档注释里**必然逐字出现**旧判据的名字
+    #      （`_el66` 里那句 `v1.66 原文写的是 tcfg_mod.is_blocked(...)`）⇒ grep 会**假红** ✗
+    #      （AGENTS.md 记着同一个坑：v1.62c 的 `CONTENT_SCORE_MIN` 也是这么假红的 ✓）
+    #      ⇒ 先**剥掉整行注释**再判，只认真正的代码 ✓
+    _code67 = '\n'.join(_ln67 for _ln67 in _el66.splitlines()
+                        if not _ln67.lstrip().startswith('#'))
+    check('v1.67 ⛔ 撤回守门：金币闸门**不许**再用 `tcfg_mod.is_blocked(name)` 当判据'
+          '（它的语义是"没勾选"⇒ 商人/宝库恒不命中 ✗✗ 真机已证一格没拉上）'
+          '—— ⚠ 判据**剥掉注释行**后再查（留档注释里必然出现它的名字 ✗）',
+          'is_blocked(_v66.get(\'name\'))' not in _code67
+          and 'is_blocked(_v66.get("name"))' not in _code67)
+    check('v1.67 金币闸门新判据 = ①分类器的 `buy`/`buy_hidden`（**清空前留底**）'
+          '∪ ②`spots.BUY_OUT_NAMES` 名字命中 **且** `score >= BUY_SCORE_MIN`'
+          '（与 `spots.py` 分类器自己的买入口径**同源同门槛** ✓）',
+          '_dropped_buy67 = list(buy) + list(buy_hidden)' in _el66
+          and "getattr(spots_mod, 'BUY_OUT_NAMES', ())" in _el66
+          and "getattr(spots_mod, 'BUY_SCORE_MIN', 0.85)" in _el66
+          and '_bmin67' in _el66)
+    check('v1.67 ①②两条来源**取并集**（名字扫不到未揭示的暗格 ⇒ 必须有像素那条 ✓；'
+          '分类器这帧没给出但名字明显是 ⇒ 必须有名字那条 ✓）',
+          _el66.count('_nogo.add(tuple(') >= 2)
+    check('v1.67 ⚠ 低分乱猜**不许**拉黑（v1.46 口径：score 不够 = 没资格代表'
+          '"这是商人/宝库" ⇒ 宁可多看一眼，也别静默拉黑某格 ✗）',
+          '_sc66 < _bmin67' in _el66)
+    # 执行级：真跑那段闸门逻辑，确认"名字命中 + 分数够"真的进 `nogo_rc`
+    _obs67 = {(1, 1): {'name': '黄金宝库', 'score': 0.98},
+              (1, 2): {'name': '旅行商人', 'score': 0.97},
+              (1, 3): {'name': '传承祭坛', 'score': 0.95},
+              (1, 4): {'name': '金属宝箱怪', 'score': 0.96},
+              (1, 5): {'name': '黄金宝库', 'score': 0.30}}
+    _got67 = set()
+    try:
+        import spots as _SP67
+        _bun67 = tuple(getattr(_SP67, 'BUY_OUT_NAMES', ()) or ())
+        _bmin67 = float(getattr(_SP67, 'BUY_SCORE_MIN', 0.85))
+        for _k67, _v67 in _obs67.items():
+            _nm67 = str(_v67.get('name') or '')
+            if not _nm67 or not any(_b in _nm67 for _b in _bun67):
+                continue
+            if float(_v67.get('score') or 0.0) < _bmin67:
+                continue
+            _got67.add(_k67)
+    except Exception as _e67:           # noqa: BLE001
+        _got67 = set()
+        print('    ⚠ v1.67 探针异常：%r' % (_e67,))
+    check('v1.67 执行级：`黄金宝库`/`旅行商人`（score ≥ 0.85）⇒ **必须**入选；'
+          '`传承祭坛`/`金属宝箱怪`（不是商人宝库）与低分 `黄金宝库(0.30)` ⇒ **必须不入选**',
+          _got67 == {(1, 1), (1, 2)},
+          '实得 = %s（期望 [(1, 1), (1, 2)]）' % sorted(_got67))
+    # 对照项：旧判据在同一输入上**必须**给出**不同**结果（证明新判据真的修了东西 ✓）
+    _old67 = set()
+    try:
+        import targets_cfg as _TC67
+        for _k67, _v67 in _obs67.items():
+            if _TC67.is_blocked(_v67.get('name')):
+                _old67.add(_k67)
+    except Exception:                   # noqa: BLE001
+        _old67 = set()
+    check('v1.67 对照项：同一输入下**旧判据**给出**不同**答案'
+          '（漏商人/宝库、误拉祭坛/宝箱怪 ⇒ 证明上面那条不是恒真 ✓）',
+          _old67 != _got67,
+          '旧判据 = %s；新判据 = %s' % (sorted(_old67), sorted(_got67)))
     check('v1.66 ①d 幸运草闸门把剔掉的大拇指格塞进 `nogo_rc`'
           '（⚠ 光剔 `mk` 会被 `st[\'obs\']` 回流贴回来 ✗ —— 真机日志实证）',
           "'clover_gate': 'nogo_tagged'" in _el66
