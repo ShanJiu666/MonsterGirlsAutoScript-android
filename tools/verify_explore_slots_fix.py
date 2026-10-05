@@ -6722,7 +6722,146 @@ try:
           'REVEAL_RATIO_MIN=%.2f MODEL_REVEAL_RATIO_MIN=%.2f'
           % (float(EL.REVEAL_RATIO_MIN), float(EL.MODEL_REVEAL_RATIO_MIN)))
 except Exception as _e62a:      # noqa: BLE001
-    check('v1.62 ①~⑩ 守门可运行（%r）' % (_e62a,), False)
+    check('v1.62 ①~⑫ 守门可运行（%r）' % (_e62a,), False)
+
+# -------------------------------------------------------------------------------------
+# ㊿⭐⭐⭐ v1.62b【`fog_object` 按**本帧众数**判】—— 照抄 PC `f3b0f4e`
+#   用户原话：「**不是最优步数**」／「**有两下无意义点击**」
+#   根因：`fog_sil >= 0.04` 是**绝对阈值**，标定在**铁血高地的草地**上；
+#     而**矿洞地面是「岩地」，自带雾底岩石纹理占 0.11~0.13** ⇒ 旧阈值把每格岩地
+#     都判成"雾下有东西" ⇒ `plain=False` ⇒ **连锁全断** ⇒ 被迫一格一格点 ✗✗
+#   ⚠ 手机端实测（`tools/probe_fog_sil_calib.py`）：矿洞众数 0.114 ⇒ 误判 **20 格**；
+#     海滩众数 0.000 ⇒ 阈值仍 0.04（**老行为一字不变** ✓ 无回归）
+# -------------------------------------------------------------------------------------
+print()
+print('㊿⭐⭐⭐ v1.62b fog_object 按本帧众数（治矿洞岩地纹理误判致连锁全断）')
+try:
+    _SM62 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsim.py')
+    _sm62 = open(_SM62, encoding='utf-8').read()
+    check('v1.62b ① `spots` 有本帧众数系数 `FOG_SIL_MODE_K`（照 PC 取 1.6）'
+          '＋第二趟按 `max(FOG_SIL_MIN, 众数×K)` 重判 `fog_object`/`fog_flat`',
+          'FOG_SIL_MODE_K' in _sp62 and '_fog_sil_thr' in _sp62
+          and "max(float(FOG_SIL_MIN), float(_mode2) * FOG_SIL_MODE_K)" in _sp62)
+    check('v1.62b ② ⚠ `_fog_sil_thr` **不塞进 `out`**（与 `_floor_thr` 同因：'
+          '`cells_of` 的 `sorted(st.items())` 会被字符串键搞崩 ✗✗）',
+          "out['_fog_sil_thr']" not in _sp62 and 'self._fog_sil_thr =' in _sp62)
+    check('v1.62b ③ ⚠⚠ **`mapsim._from_anchors` 必须优先用观测里判好的 `fog_object`**'
+          '（PC 原文：「别再拿模块常量重算一遍，**否则第 1 条白做** ✗」）',
+          "_fobj_obs = [bool((cells.get(m) or {}).get('fog_object')) for m in members" in _sm62
+          and 'row[\'fog_object\'] = any(_fobj_obs)' in _sm62,
+          '⚠ 这条是"前面改了却没用"的经典坑 —— PC 专门写进提交正文')
+    # 执行级：矿洞帧的误判格数必须**大幅下降**，且海滩帧**不受影响**
+    if not all(os.path.exists(os.path.join(_FLOOR_DIR, f))
+               for f in ('r_133809_0.png', 'r_152223_0.png')):
+        skip('v1.62b ④ 实跑（缺矿洞/海滩标定帧 ⇒ 没真验证）')
+    else:
+        import cv2 as _cv62b
+        import numpy as _np62b
+        import spots as _sp62b
+        _im_mine = _cv62b.imdecode(_np62b.fromfile(
+            os.path.join(_FLOOR_DIR, 'r_133809_0.png'), dtype=_np62b.uint8),
+            _cv62b.IMREAD_COLOR)
+        _bd_mine = _sp62b.Board('S30001')
+        _st_mine = _bd_mine.state(_im_mine)
+        _n_obj_mine = sum(1 for v in _st_mine.values()
+                          if isinstance(v, dict) and v.get('fog_object'))
+        check('v1.62b ④ 执行级（矿洞 13:38）：`fog_object` 从旧口径的 **20 格**'
+              '降到 **%.0f 格**（阈值 = max(0.04, 众数 %.3f × 1.6) = %.3f ✓）'
+              '—— 岩地自带纹理不再被当成"雾下有东西" ✓'
+              % (_n_obj_mine, _bd_mine._fog_sil_mode, _bd_mine._fog_sil_thr),
+              _bd_mine._fog_sil_thr > 0.10 and _n_obj_mine <= 3,
+              '阈值=%.3f 判有东西=%d 格' % (_bd_mine._fog_sil_thr, _n_obj_mine))
+        _im_beach = _cv62b.imdecode(_np62b.fromfile(
+            os.path.join(_FLOOR_DIR, 'r_152223_0.png'), dtype=_np62b.uint8),
+            _cv62b.IMREAD_COLOR)
+        _bd_beach = _sp62b.Board('S30001')
+        _st_beach = _bd_beach.state(_im_beach)
+        _n_obj_beach = sum(1 for v in _st_beach.values()
+                           if isinstance(v, dict) and v.get('fog_object'))
+        check('v1.62b ⑤ ⚠ **反向断言（防改出回归）**：海滩帧（众数 0.000）'
+              '阈值必须**仍是 0.04**（老行为一字不变 ✓）⇒ 判"有东西"格数 = **%d**'
+              % _n_obj_beach,
+              abs(_bd_beach._fog_sil_thr - 0.04) < 1e-9 and _n_obj_beach >= 5,
+              '阈值=%.3f（应 0.04）判有东西=%d 格'
+              % (_bd_beach._fog_sil_thr, _n_obj_beach))
+        # 执行级：规划步数/体力必须下降（真机原状 13:38 = 18 体 / 8 步）
+        _c62c = EL.cells_of(_im_mine, mapname=None, code='S30001')
+        _st62c = _c62c['st']
+        for _k62c, _ml62c in {(1, 6): ['recommend'], (4, 2): ['boss']}.items():
+            if _k62c in _st62c:
+                _st62c[_k62c]['marks'] = list(_ml62c)
+        _cp62c = EL.cell_center(2, 2)
+        _cells62c = EL._cells_for_model(
+            {'obs': _st62c, 'spawn': _cp62c, 'camp': _cp62c, 'done': [],
+             'marks': {(1, 6): {'marks': ['recommend']},
+                       (4, 2): {'marks': ['boss']}}},
+            {'st': _st62c}, log=None, tag='v62c', mark_revealed=False,
+            drop_done=False)
+        _sim62c = _sim58.MapSim.from_observation(_cells62c, _sp58.spot_rows())
+        _prob62c = _mv58.Problem(_sim62c)
+        _rep62c = {}
+        _cost62c, _plan62c = _mv58.solve(_prob62c, max_states=60000, max_secs=8,
+                                         report=_rep62c)
+        _ord62c = ['%d,%d' % rc for rc, bi, w in _prob62c.cells_for_plan(_plan62c or [])]
+        check('v1.62b ⑥ 执行级：矿洞 13:38（真机原状 **cost=18 / 8 步 / 其中 7 步是雾**）'
+              '⇒ 现在 **cost=%s / %d 步 / 顺序 %s**'
+              '（步数必须 ≤ 5，且**明显**少于真机那 8 步 ✓）'
+              % (_cost62c, len(_ord62c), _ord62c),
+              bool(_ord62c) and len(_ord62c) <= 5,
+              '真机日志原状：cost=18 steps=8 雾格=7')
+except Exception as _e62b:      # noqa: BLE001
+    check('v1.62b 守门可运行（%r）' % (_e62b,), False)
+
+# -------------------------------------------------------------------------------------
+# ㊿⭐⭐⭐ v1.62c【**撤回守门**：内容地块拦连锁（PC `9129a78`）不许加回来】
+#   用户连报「规划还是有问题」，但**这条在手机端无收益**（两轮实测，见下）
+#   ⇒ 记成"撤回守门"，谁再加回来本项当场红 ✓
+#
+#   证据①（`tools/probe_e_effect.py`）：**直接照抄 PC（只看 `score ≥ 0.85`）会拦错
+#     8/10 个** —— 矿洞 13:38 帧上被命中的 `5,4`/`5,7` 宝箱、`1,4` 蘑菇丛、
+#     `3,5`/`4,2` 矿箱堆、`4,7` 露天矿，`floor` 全是 **65~74（纯雾）**、真机点不动
+#     ⇒ 拦了它们 = **连锁全断**（比原问题更糟 ✗）
+#   证据②（`tools/probe_e_decide.py`）：加**地板闸门**后判据对了，但**对 6 张真机帧
+#     零影响** —— 逐块比 `plain` ⇒ **0 个块改变**、规划逐字相同（纯冗余 ✓）
+#   ⭐ 决定性反证：模型给 `(4,2)` 判 `矿箱堆 score=0.933`，可真机点下去是
+#     **`开打 · 首领格`** ⇒ **雾格上的高分名字不可信** ✗✗
+#     （PC 量纲不同 —— PC 的 `state()` 只对已揭示格给高分 ⇒ **不可跨端移植**）
+# -------------------------------------------------------------------------------------
+print()
+print('㊿⭐⭐⭐ v1.62c 撤回守门：内容地块拦连锁（PC 9129a78）不许加回来')
+try:
+    # ⚠ 断言**只查真代码**：留档注释里必然提到 `CONTENT_SCORE_MIN`（那是它的名字）
+    #   ⇒ 用 AST 拿模块级赋值名，比字符串 grep 准 ✓
+    _sm62_names62 = set()
+    try:
+        import ast as _ast62
+        _tree62 = _ast62.parse(_sm62)
+        for _n62 in _tree62.body:
+            if isinstance(_n62, _ast62.Assign):
+                for _t62 in _n62.targets:
+                    if isinstance(_t62, _ast62.Name):
+                        _sm62_names62.add(_t62.id)
+    except Exception:               # noqa: BLE001
+        pass
+    check('v1.62c ① `mapsim` **没有** `CONTENT_SCORE_MIN` 这个**模块级常量**'
+          '（撤回干净，不留死常量 ✓；⚠ 注释里提到它不算 —— 那是留档）',
+          'CONTENT_SCORE_MIN' not in _sm62_names62,
+          '⚠ 若它回来了：说明有人又想搬 PC 那条 ⇒ 先读 `Block.plain` 里的证据')
+    check('v1.62c ② `Block` **没有** `score`/`weight`/`floor_lit` 三个死字段'
+          '（撤回时一并删干净，不留孤儿 ✓）',
+          'self.score = float(' not in _sm62
+          and 'self.floor_lit = bool(' not in _sm62)
+    check('v1.62c ③ `Block.plain` 里**留着"撤回+为什么"的注释**'
+          '（防下一个人再试一遍；含"雾格上的高分名字不可信"这条决定性反证 ✓）',
+          '撤回' in _sm62 and '9129a78' in _sm62
+          and '首领格' in _sm62,
+          '⚠ 没有留档 ⇒ 下一个人会把同一个坑再踩一次 ✗')
+    check('v1.62c ④ ⚠⚠ **原有那条「雾下物体挡连锁」判据必须还在、且只有一条**'
+          '（撤回 E 时历史上踩过一次"重复插入"⇒ 会重复 import/编译通过但语义可疑 ✗）',
+          _sm62.count("return False          # **雾下**有物体 ⇒ 非空地（挡连锁 ✓）") == 1,
+          'count=%d' % _sm62.count("return False          # **雾下**有物体 ⇒ 非空地（挡连锁 ✓）"))
+except Exception as _e62c:      # noqa: BLE001
+    check('v1.62c 守门可运行（%r）' % (_e62c,), False)
 
 print()
 print('=' * 78)

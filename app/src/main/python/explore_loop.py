@@ -3141,6 +3141,42 @@ BUY_PROBE_MAX = 3           # 「强匹配但被判未揭示」的宝库/商人�
 _COLOR_TILES = ('宝库', '商人')
 
 
+def _is_purple_cell(tapped_sid, ev_tiles=None, tapped=None):
+    """这一格是不是**紫/橙探索格**（后缀 221/321/331 ✓ 小助手官方分类）
+
+    ⭐⭐⭐⭐ v1.62 新增（**照抄 PC** `46d5b7a`）——
+      用户原话：「**为什么漏了一个紫探索的战斗**」（第 5 张图）
+      ⇒ PC 把判据抽成**可离线测的纯函数**（原先是内联在分支里的三元表达式 ✗）
+
+    两条判据（**或**关系）：
+      ① 顶层 sid 的后缀 ∈ `EXPLORE_SUFFIX` ✓（常规情形）
+      ② **bot 本轮自己已经判定成紫/橙格的**（`st['ev_tiles']`）也算 ✓
+
+    为什么必须有 ②（PC 真机铁证 `runs/acc1/r_160935_0.png` 的 `(3,1)`）：
+      · "发现紫/橙探索地块"那条检测用的是 **top-N 候选的后缀** ⇒ 它判对了 ✓
+      · 而这一格**顶层 sid 是垃圾**：`S30001_104 废弃矿车`、**score 只有 0.192**、
+        ratio **1.709** —— 那是**雾里那团紫光**（紫/橙格在雾里正是靠这团光被认出来的 ✓）
+      · ⇒ 只看顶层 sid ⇒ 后缀 `104 ∉ {221,321,331}` ⇒ `_is_purple=False`
+        ⇒ **探索/派遣分支被整个跳过** ✗ ⇒ 点开了面板却当普通面板处理、退图前
+          又被当 `collect_panel` 强制关掉 ⇒ **那一格探索战斗漏了**（用户看到的现象）✗✗
+
+    ⚠ 不许"只要开了面板就算紫格" —— 必须**本轮 `ev_tiles` 里确有这一格**，
+      否则会把预言石碑/宝箱那些内容格也误当探索格 ✗
+      （PC 原文：「⚠ 不允许"开了面板就算紫格"」）
+    """
+    try:
+        suf = set(getattr(spots_mod, 'EXPLORE_SUFFIX', ('221', '321', '331')))
+        if ('_' in str(tapped_sid or '')) and (str(tapped_sid).split('_')[-1] in suf):
+            return True
+        if ev_tiles and tapped:
+            rc = cell_of(tapped[0], tapped[1])
+            if ('%d,%d' % rc) in set(ev_tiles):
+                return True
+    except Exception:       # noqa: BLE001
+        pass
+    return False
+
+
 def vault_px_now(c, revealed_only=True, strong_only=True, any_color=False):
     """当前帧分类结果里的商人/宝库格（像素）—— `any_color=True` 时连"点开详情才认出的"也算
 
@@ -5129,8 +5165,11 @@ def popups(b, items, log, ctx=None):
     #   紫橙探索格被当成普通格打了战斗 ✗ —— 用户 2026-09-26 报）
     _ev_tiles = ctx.get('ev_tiles') or []
     _tapped_sid = ''
+    # ⚠ v1.62：这两个也**必须在 try 之前初始化** —— 下面的 `_is_purple` 日志要用
+    #   （只在 try 里赋值 ⇒ 异常路径下 `NameError` ✗ 这是本项目"局部变量没初始化"的老坑）
+    _tapped = ctx.get('tapped')
+    _tc = None
     try:
-        _tapped = ctx.get('tapped')      # ⭐ 改名 _tapped：原局部 `_tap` 遮蔽模块级
         _cst = ctx.get('st') or {}       #   点击函数 _tap ⇒ X 关闭分支 TypeError 崩溃
         if _tapped and _cst:
             _tc = cell_of(_tapped[0], _tapped[1])
@@ -5138,7 +5177,22 @@ def popups(b, items, log, ctx=None):
     except Exception:       # noqa: BLE001
         _tapped_sid = ''
     _purple_suffix = set(getattr(spots_mod, 'EXPLORE_SUFFIX', ('221', '321', '331')))
-    _is_purple = ('_' in _tapped_sid) and (_tapped_sid.split('_')[-1] in _purple_suffix)
+    # ⭐⭐⭐⭐ v1.62【改用纯函数 `_is_purple_cell`】—— 照抄 PC `46d5b7a`
+    #   旧写法**只看顶层 sid 后缀** ⇒ 顶层是垃圾 sid 时（雾里的紫光被猜成"废弃矿车"
+    #   score 0.192）`_is_purple=False` ⇒ **探索分支被整个跳过** ⇒ 漏掉那一格探索战斗 ✗✗
+    #   （用户原话：「**为什么漏了一个紫探索的战斗**」）
+    #   ⚠ 第二条判据（本轮 `ev_tiles` 里有它）**必须有**，但仍不许"开了面板就算紫格" ✓
+    _is_purple = _is_purple_cell(_tapped_sid, _ev_tiles, _tapped)
+    if _is_purple and _tapped_sid and _tc is not None \
+            and (_tapped_sid.split('_')[-1] not in _purple_suffix):
+        # 命中②（靠 `ev_tiles` 兜住）⇒ 记一笔，便于日后对账 ✓（PC 同款日志）
+        try:
+            log.append({'explore': 'purple_by_ev_tiles', 'cell': '%d,%d' % _tc,
+                        'sid': _tapped_sid,
+                        'note': '顶层 sid 是垃圾 ⇒ 靠"本轮已判定成紫/橙格"兜住 ✓'
+                                '（PC `46d5b7a`）'})
+        except Exception:   # noqa: BLE001
+            pass
     # ⭐ 槽位满了 ⇒ 不走探索 ✓（落到下面的战斗分支 ⇒ 打掉它 ✓ 用户 2026-09-26）
     _free_now = int(ctx.get('slots_free', 1) or 0)
     if (EXPLORE_DISPATCH and _is_purple and _free_now > 0

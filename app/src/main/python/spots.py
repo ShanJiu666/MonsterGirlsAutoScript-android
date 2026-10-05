@@ -129,6 +129,16 @@ REVEAL_REL_FLOOR = float(os.environ.get('MAPBOT_REVEAL_FLOOR', '0.80') or 0.80)
 FLOOR_LIT_K = float(os.environ.get('MAPBOT_FLOOR_LIT_K', '1.35') or 1.35)
 FLOOR_LIT_ADD = float(os.environ.get('MAPBOT_FLOOR_LIT_ADD', '12') or 12.0)
 
+# ⭐⭐⭐⭐ v1.62【`fog_object` 的**本帧众数**系数】—— 照抄 PC `f3b0f4e`
+#   判据：`fog_object ⟺ fog_sil >= max(FOG_SIL_MIN, 本帧众数 × 1.6)`
+#   为什么必须改（PC 用户原话「**不是最优步数**」/「**有两下无意义点击**」）：
+#     `fog_sil` 的绝对阈值 0.04 标定在**铁血高地的草地**上（平坦 0.014~0.016）；
+#     而**矿洞地面是「岩地」，自带雾底岩石纹理占 0.11~0.13** ⇒ 旧阈值把每格岩地
+#     都判成"雾下有东西" ⇒ `plain=False` ⇒ **连锁全断** ⇒ 被迫一格一格点 ✗✗
+#   ⚠ 手机端实测（`tools/probe_fog_sil_calib.py`）：矿洞众数 0.114~0.115 ⇒
+#     旧口径误判 **20~23 格**；海滩众数 0.000 ⇒ 阈值仍 0.04（**老行为不变** ✓）
+FOG_SIL_MODE_K = float(os.environ.get('MAPBOT_FOG_SIL_MODE_K', '1.6') or 1.6)
+
 # ⭐⭐ v1.36【「已揭示」阈值 + 双证据兜底】—— 0.75 踩线，0.80 才站得稳
 #   ⚠ **v1.60 起它的角色变了**：不再是"逐格主判据"，而是
 #     ① **两趟相对法的地板**（`REVEAL_REL_FLOOR` 的默认值就是它这个 0.80）；
@@ -838,11 +848,59 @@ class Board:
             if _sil is not None:
                 sil = _sil
                 out[k]['fog_sil'] = sil
+                # ⚠⚠ v1.62【**先按旧绝对阈值记**，判定挪到第二趟按本帧众数做】——
+                #   照抄 PC `f3b0f4e`（用户原话「**不是最优步数**」/「**有两下无意义点击**」）
+                #   原因见第二趟 `_sils` 那段长注释（矿洞岩地自带纹理 0.114 ⇒ 旧阈值全判"有东西"）✗
                 out[k]['fog_object'] = bool(sil >= FOG_SIL_MIN)
                 # ⭐ v1.05：**平坦**（剪影很小）= 雾下是空地 ⇒ 交给模型当 plain 用
                 #   （雾格上的模板名字很不可信：真机这盘中位分只有 0.276，平坦格还被
                 #    猜成「岩石/巨大木桩」✗ ⇒ 雾格的"是不是空地"以**剪影实测**为准 ✓）
                 out[k]['fog_flat'] = bool(sil < FOG_SIL_MIN)
+        # ── ⭐⭐⭐⭐ v1.62【雾下"有没有东西"也要**按本帧基准**判】—— 照抄 PC `f3b0f4e` ──
+        #   ## 治什么（PC 用户原话）
+        #     「**不是最优步数**」／「**有两下无意义点击**」
+        #   ## 根因
+        #     `fog_object = fog_sil >= FOG_SIL_MIN(0.04)` 是**绝对阈值**，
+        #     而它标定在**铁血高地的「草地」**上（平坦 0.014~0.016 / 有物体 0.064~0.292）✓
+        #     可**废弃矿洞的地面是「岩地」，它自带的雾底岩石纹理就占 0.11~0.13**：
+        #     ⇒ 旧阈值把**每一格岩地**都判成"雾下有东西" ⇒ `plain=False` ⇒ **连锁全断** ✗✗
+        #     ⇒ 计划被迫**一格一格点**（PC 真机：9 步 / 28 体力）
+        #
+        #   ## ⚠ 手机端**同样中招**（v1.62 实测，`tools/probe_fog_sil_calib.py`）
+        #     | 帧 | fog_sil 众数 | 旧口径判"有东西" | 新口径 | 差 |
+        #     |---|---|---|---|---|
+        #     | 矿洞 13:38 | **0.114**（岩地纹理） | **20 格** ✗ | 1 格 ✓ | 19 |
+        #     | 矿洞 18:03 | **0.115** | **23 格** ✗ | 1 格 ✓ | 22 |
+        #     | 海滩 15:22 | 0.000 | 9 格 | 9 格 | 0（**不受影响** ✓） |
+        #     ⇒ 与 PC 完全同型：**矿洞中招、海滩不受影响**（这正是用户说的
+        #       「**为什么在废弃矿洞的规划错得离谱，在夏日海滩的就是对的**」）✓
+        #
+        #   ## 修法（照 PC）
+        #     阈值 = `max(FOG_SIL_MIN, 本帧众数 × 1.6)`
+        #       · 矿洞：众数 0.114 ⇒ 0.183 ⇒ 岩地(0.114) 判"**平坦=空地**" ✓
+        #       · 海滩：众数 0.000 ⇒ 阈值仍 **0.04**（老行为**一字不变** ✓ 无回归）
+        #     ⚠ 倍数 1.6 沿用 PC（PC 在矿洞/高地/海滩三种盘上标定过 ✓）
+        try:
+            _sils = {_k: float(_v['fog_sil']) for _k, _v in out.items()
+                     if isinstance(_k, tuple) and isinstance(_v, dict)
+                     and _v.get('fog_sil') is not None}
+            if _sils:
+                _h2 = {}
+                for _s in _sils.values():
+                    _h2[round(_s, 3)] = _h2.get(round(_s, 3), 0) + 1
+                _mode2 = max(sorted(_h2), key=lambda x: (_h2[x], -x))
+                _sbase = max(float(FOG_SIL_MIN), float(_mode2) * FOG_SIL_MODE_K)
+                for _k2, _v2 in out.items():
+                    if isinstance(_k2, tuple) and isinstance(_v2, dict) \
+                            and _v2.get('fog_sil') is not None:
+                        _v2['fog_object'] = bool(float(_v2['fog_sil']) >= _sbase)
+                        _v2['fog_flat'] = bool(float(_v2['fog_sil']) < _sbase)
+                # ⚠ 同 `_floor_thr`：**不塞进 `out`**（`cells_of` 的 `sorted(st.items())`
+                #   会被字符串键搞崩 ✗✗）⇒ 挂 Board 实例 ✓
+                self._fog_sil_thr = round(_sbase, 4)
+                self._fog_sil_mode = float(_mode2)
+        except Exception:               # noqa: BLE001
+            pass
         # ── ⭐⭐⭐ v1.60「已揭示」= **两趟相对法**（照抄 PC `mapbot_pc/spots.py:722-736`）──
         #   第二趟：先收齐全盘 ratio ⇒ 用**本帧自己的雾格基准**判每一格
         #     `_base` = 本帧 ratio 的 **10 分位**（照抄 PC；雾格恒在基准附近）

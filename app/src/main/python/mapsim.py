@@ -79,6 +79,13 @@ PLAIN_SUFFIX = {'000', '001'}
 #   0.064~0.292 / 平坦 0.014~0.016，4 倍空档 ⇒ 0.04 稳 ✓）。这里**故意复制常量**而不是
 #   import spots（`spots` 会在 import 时读数据表，而 mapsim 要保持"纯逻辑模块"可在无表环境跑 ✓）
 FOG_SIL_MIN = 0.04
+# ⚠⚠ v1.62【**已撤回**的 PC 改动，记录在此防重试】：PC `9129a78` 加过
+#   `CONTENT_SCORE_MIN = 0.85`（"高置信内容地块 ⇒ 拦连锁"）。手机端**实测不能搬**，
+#   已完整撤回（理由见 `Block.plain` 里那段长注释 + `tools/probe_e_effect.py`）：
+#     · 只看 score ⇒ 在矿洞帧上**拦错 8/10 个**（雾格的宝箱/矿箱也能到 0.93~0.97）
+#     · 加地板闸门 ⇒ 判据对了但**对 6 张真机帧零影响**（纯冗余）
+#     · 决定性反证：真机 `(4,2)` 模型说 `矿箱堆 score=0.933`，实点却是**首领格** ✗
+#   ⇒ 别再加回来 ✗
 
 # ⭐ 运行时学习（跨图共享 ✓）：点下去**连锁**的 = 空地 ✓；**弹面板**的 = 内容格 ✓
 PLAIN_SEEN = {}     # suffix -> True
@@ -106,6 +113,10 @@ class Block:
         self.sid = spot.get('sid') if isinstance(spot, dict) else str(spot)
         self.name = spot.get('name') if isinstance(spot, dict) else str(spot)
         self.special = int(spot.get('SpecialSpot') or 0) if isinstance(spot, dict) else 0
+        # ⚠⚠ v1.62：**曾**在这里加过 `score`/`weight`/`floor_lit` 三个字段，供
+        #   PC `9129a78` 那条「高置信内容地块拦连锁」用 —— 该条**已完整撤回**
+        #   （理由见 `Block.plain` 的长注释），故这三个字段**也一并撤回**，
+        #   不留死字段 ✓（`tools/probe_e_decide.py` 证明它对规划零影响）
         self.size = int(spot.get('SpotSize') or 1) if isinstance(spot, dict) else 1
         # ⭐⭐⭐ v1.51【尺寸受**实际占几格**约束】—— 抄 PC 端 `1d6b687`
         #   PC 用户口径（原话）：「**16 为什么是 18 体？两块不应该是 4 体吗**」✓
@@ -233,6 +244,33 @@ class Block:
         #     ⚠ 真雾格（observed=False）**照旧挡连锁**（机制 M54 不许失效，见下 ✓）
         if getattr(self, 'fog_object', False) and not getattr(self, 'observed', False):
             return False          # **雾下**有物体 ⇒ 非空地（挡连锁 ✓）
+        # ─────────────────────────────────────────────────────────────────────────
+        # ⚠⚠⚠ v1.62【**撤回** PC `9129a78` 的「高置信内容地块拦连锁」—— 留档，别再试】
+        #   PC 那条：`score ≥ 0.85` 且非本图地面 ⇒ 非空地（拦连锁）。
+        #   PC 依据（`runs/acc2/r_153038_0.png`）：`(4,1)` 宝箱 **score=1.0** 但
+        #     `fog_sil` 只有 0.04（**宝箱美术亮 ⇒ 剪影法漏掉**）⇒ 误判"平坦空地" ✗
+        #
+        #   ## 手机端为什么**不能照抄**（v1.62 实测，两轮证据都留了探针）
+        #     ① 直接搬（只看 score）⇒ **拦错 8/10 个**（`tools/probe_e_effect.py`）：
+        #        `5,4`/`5,7` 宝箱、`1,4` 蘑菇丛、`3,5`/`4,2` 矿箱堆、`4,7` 露天矿
+        #        全是 **floor=65~74（纯雾）** 却被 score 0.93~0.97 命中
+        #     ② 加**地板闸门**（只拦"地板判亮"的）⇒ 判据对了，但
+        #        **对 6 张真机帧零影响**（`tools/probe_e_decide.py`：逐块比 `plain`
+        #        ⇒ **0 个块改变**、规划逐字相同）—— 因为手机端"真亮的内容格"
+        #        **早就被更早的分支拦掉了**（`2,1` 矿箱三个条件全满足，
+        #        可它 `plain` 早已是 False ✓）⇒ 纯冗余
+        #
+        #   ## ⭐ 决定性反证：**雾格上的高分名字不可信**（真机日志铁证）
+        #     本轮那把（13:38）模型给 `(4,2)` 的判读是
+        #       `{"cell":"4,2","name":"矿箱堆","sid":"S30001_101","score":0.933}`
+        #     可真机点下去是 **`开打 · 首领格`（标记 ['boss']）** —— **名字是错的** ✗✗
+        #     ⇒ `score ≥ 0.9` **不代表雾格上的名字对** ⇒ 不带地板闸门就拦，
+        #       会把真能连锁穿过的格子拦住 ⇒ **连锁全断（比原问题更糟）** ✗
+        #     ⚠ PC 那边量纲不同（PC 的 `state()` 只对已揭示格给高分）
+        #   ⇒ 结论：**手机端不搬这条** ✓ 真要有用得先有"雾格名字可信度"的独立判据
+        #     —— 那是另一个课题（本轮回合已记录在 `PC修复移植单.md`）
+        #   ⚠ 下面那条 `fog_object` 挡连锁的判据**是原有的**（v1.58 加的 `not observed`
+        #     闸门）—— 撤回 E 时**不要连它一起删** ✓（本行历史上踩过一次重复插入）
         # ⭐⭐⭐ v1.06【雾格平坦 ⇒ 当空地】：对**雾格**来说"名字"很不可信（真机这盘整套模板
         #   中位分只有 0.276，平坦格被猜成「岩石/巨大木桩」✗）⇒ 雾格的 plain 只认剪影实测：
         #     有物体（fog_object）⇒ 非空地 ｜ 平坦（fog_flat）⇒ 空地
@@ -511,8 +549,22 @@ class MapSim:
                      if cells[m].get('fog_sil') is not None]
             if _sils:
                 row['fog_sil'] = max(_sils)
-                row['fog_object'] = bool(row['fog_sil'] >= FOG_SIL_MIN)
+                # ⭐⭐⭐⭐ v1.62【**优先用观测里已经判好的 `fog_object`**】—— 照抄 PC `f3b0f4e`
+                #   PC 原文：「别再拿模块常量重算一遍，**否则第 1 条白做** ✗」
+                #   为什么：`spots.state()` 现在按**本帧众数**判 `fog_object`
+                #     （矿洞岩地纹理 0.114 ⇒ 阈值 0.183 ⇒ 判"平坦=空地" ✓）
+                #     而这里若还用**模块常量** `FOG_SIL_MIN(0.04)` 重算 ⇒ 又把它判回
+                #     "有东西" ⇒ **前面那一改等于没做** ✗✗
+                #   ⇒ 用观测值；观测没给（老调用/合成盘）才退回模块常量 ✓（向后兼容）
+                _fobj_obs = [bool((cells.get(m) or {}).get('fog_object')) for m in members
+                             if (cells.get(m) or {}).get('fog_object') is not None]
+                if _fobj_obs:
+                    row['fog_object'] = any(_fobj_obs)   # 任一成员有东西 ⇒ 整块非空地 ✓
+                else:
+                    row['fog_object'] = bool(row['fog_sil'] >= FOG_SIL_MIN)
                 row['fog_flat'] = not row['fog_object']
+            # ⚠⚠ v1.62：**曾**在这里搬过 `score`/`Weight`/`floor_lit` 三个字段
+            #   （PC `9129a78` 那条要用）—— 该条**已完整撤回**，字段一并撤回 ✓
             row['sid'] = sid
             row['name'] = head.get('name') or sid
             if 'target' in head:                       # ⭐ 目标白名单（targets_cfg）✓
