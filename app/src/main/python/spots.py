@@ -104,6 +104,31 @@ REVEAL_REL_K = float(os.environ.get('MAPBOT_REVEAL_REL_K', '1.06') or 1.06)     
 # ⚠ 唯一的分叉：地板。PC = 0.66；手机端 = 0.80（实测见上表，可用 MAPBOT_REVEAL_FLOOR 覆盖）
 REVEAL_REL_FLOOR = float(os.environ.get('MAPBOT_REVEAL_FLOOR', '0.80') or 0.80)
 
+# ⭐⭐⭐⭐ v1.62【「地板」判揭示的两个常数】—— **照抄 PC** `mapbot_pc/spots.py:822`
+#   判据：`floor_lit ⟺ floor > max(众数 × 1.35, 众数 + 12)`
+#     · `floor` = 该格**四角**亮度的中位数（见 `Board._floor_luma`）
+#     · **众数** = 本帧全盘 floor 的众数 = 本图**纯雾**亮度（雾格占多数）
+#   为什么是 1.35（PC 原文）：雾是**乘性压暗**（`ratio` 口径雾 ≈0.65 ⇒
+#     已揭示 ≈ 雾 ÷ 0.65 = 雾 × **1.54**）⇒ 取 1.35 给两边都留余量 ✓
+#   `+12` 是**小亮度图的保险**（矿洞众数才 65 ⇒ ×1.35=88，而 +12=77 起不到作用；
+#     浅色图众数 153 ⇒ ×1.35=207 已够）⇒ 两个取 max ✓
+#
+#   ⚠ **手机端标定**（`_tmpman/cal_floor.py`，6 张真机帧 1080×1920，逐格与肉眼核对）：
+#     | 帧 | 众数 | 阈值 | 判亮 | 肉眼 |
+#     |---|---|---|---|---|
+#     | 矿洞 13:36 | 65 | 88 | 7 | ✓ |
+#     | 矿洞 13:38 | 65 | 88 | 5 | ✓（含营地） |
+#     | 矿洞 18:03 | 65 | 88 | 4 | ✓ |
+#     | 海滩 14:55 | 153 | 207 | 5 | ✓ |
+#     | 海滩 15:02 | 153 | 207 | 3 | ✓ |
+#     | 海滩 13:53 | 36 | 49 | 8 | ✓ |
+#   ⇒ 雾簇 / 已揭示簇是**干净双峰**（矿洞 65 vs 96~123；海滩 147~153 vs 222~234）✓
+#   ⇒ ×1.20~1.40 结果**完全一致**（在平台区）⇒ 沿用 PC 的 1.35 ✓
+#   ⚠ `floor` 是**绝对亮度** ⇒ 与 `ratio` 的分母（手机端"本图模板中位"）无关 ⇒
+#     这条判据**可跨端移植** ✓（这是它比 ratio 可靠的根本原因 ✓）
+FLOOR_LIT_K = float(os.environ.get('MAPBOT_FLOOR_LIT_K', '1.35') or 1.35)
+FLOOR_LIT_ADD = float(os.environ.get('MAPBOT_FLOOR_LIT_ADD', '12') or 12.0)
+
 # ⭐⭐ v1.36【「已揭示」阈值 + 双证据兜底】—— 0.75 踩线，0.80 才站得稳
 #   ⚠ **v1.60 起它的角色变了**：不再是"逐格主判据"，而是
 #     ① **两趟相对法的地板**（`REVEAL_REL_FLOOR` 的默认值就是它这个 0.80）；
@@ -457,6 +482,50 @@ class Board:
             return None
         return img[yi:yi + h, xi:xi + w]
 
+    def _floor_luma(self, img, r, c):
+        """该格**四角**区域亮度的**中位数** = "地板"亮度（图标/美术无关）
+
+        ⭐⭐⭐⭐ v1.62 新增（**照抄 PC** `mapbot_pc/spots.py:_floor_luma`，
+        依据见 PC `6bedadb` / `2394b0e` 两个提交的正文）。用途见 `state()` 里
+        第二趟 `floor_lit` 那段长注释：
+
+          `ratio` 的分子是**中心均值** ⇒ 游戏**会在雾格上叠标记图标**
+          （boss / 幸运草 / 大拇指…）⇒ 中心被抬起来（真机 `(1,6)` 魔晶矿带 recommend
+          图标 ⇒ `ratio = 0.84` 被判"已揭示"、可它 `floor = 65` **明明是雾** ✗）；
+          分母是**地形模板亮度** ⇒ 判据不可跨图。
+        ⇒ 用**四角**（图标/美术最多压住一角，总有一角是纯地板）取**中位数**
+          ⇒ 雾格恒贴本帧雾基准、已揭示格明显更高 ✓
+
+        ⚠ 为什么取**中位数**不取最小值（PC `2394b0e` 的二次修正）：
+          大件美术会盖住一两格的角 ⇒ "最暗角"量到的是**美术本身**、不是地板
+          （PC 真机：沙滩椰树雾格四角 `[196,153,147,153]` ⇒ `min`=147 落进雾簇
+           ⇒ 把基准拉低 ⇒ **纯雾草地 153 也被判"已揭示"** ✗✗）
+          ⇒ 取中位数：椰树 ⇒ **153**（贴雾簇 ✓）；矿洞 `(2,1)` boss 图标压在雾格上
+            `[176,65,65,65]` ⇒ 中位数仍是 **65** ✓（一格被污染不影响中位数 ✓）
+
+        ⚠ 尺寸全部按 `self.px`（本帧格距）算，**不写死像素** ⇒ 换分辨率/缩放都成立 ✓
+        ⚠ 取不到（越界）就返回 None ⇒ 调用方按"没有这个信息"处理（不猜 ✓）
+        """
+        try:
+            px = int(self.px)
+            inset = max(3, px // 12)          # 离格边内缩（避开格线与贴图边缘）
+            w = max(6, px // 6)               # 角块边长
+            x0 = int(self.grid['x0'] + (c - 1) * px)
+            y0 = int(self.grid['y0'] + (r - 1) * px)
+            if (x0 < 0 or y0 < 0 or x0 + px > img.shape[1] or y0 + px > img.shape[0]):
+                return None
+            sub = img[y0:y0 + px, x0:x0 + px]
+            g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            vals = []
+            for (yy, xx) in ((inset, inset), (inset, px - inset - w),
+                             (px - inset - w, inset), (px - inset - w, px - inset - w)):
+                blk = g[yy:yy + w, xx:xx + w]
+                if blk.size:
+                    vals.append(float(np.median(blk)))
+            return float(np.median(vals)) if vals else None
+        except Exception:               # noqa: BLE001
+            return None
+
     def _vec(self, sub):
         # 与模板一致：灰度 ✓（彩色方案实测代价过高已取消 ✓）
         g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -744,8 +813,16 @@ class Board:
             #   ⚠ 这里**只是占位**（`revealed=False`）：真实判定在下面**第二趟**里统一做
             #     （逐格算时拿不到全盘分布 ⇒ PC 原文「**必须两趟**」✓）
             #   ⚠ `rev_evidence`：'rel'（相对法）/'fallback'（异常兜底）/'dual'（剪影双证据）
+            #   ⭐ v1.62：多一个 `floor`（**地板亮度**，见 `_floor_luma` 与下面第二趟）
+            #     ⚠ 这里**只记录**，判定留给第二趟的 `floor_lit` ✓（照 PC 口径）
+            floor = None
+            try:
+                floor = self._floor_luma(img, r, c)
+            except Exception:           # noqa: BLE001
+                floor = None
             out[k] = {'sid': eff, 'name': (rows.get(eff) or {}).get('Name'),
                       'score': round(float(v), 3), 'ratio': round(ratio, 3),
+                      'floor': (round(float(floor), 1) if floor is not None else None),
                       'revealed': False, 'rev_evidence': None,
                       'anchor': anc, 'cells': cells, 'size': size,
                       'block_score': (round(blk['score'], 3) if blk else None),
@@ -794,6 +871,46 @@ class Board:
                 _v2['revealed'] = (float(_v2.get('ratio') or 0)
                                    >= REVEAL_RATIO_MIN)
                 _v2['rev_evidence'] = 'fallback'
+        # ── ⭐⭐⭐⭐ v1.62【「地板」判揭示 —— **照抄 PC** `mapbot_pc/spots.py:802-826`】──
+        #   治「**雾格被标记图标抬起 ⇒ 判成已揭示 ⇒ 规划去点它 ⇒ 真机点不动**」✗✗
+        #   （PC 真机铁证：矿洞 `(2,1)` 带 boss 图标 ⇒ `ratio=1.019` ⇒ 判亮 ⇒
+        #     求解器拿它当第一步 ⇒ `give_up_step` ⇒ **4 次点击全废、18.4 秒白跑**）
+        #
+        #   手机端真机实测（`_tmpman/cal_floor.py` 标定，6 张真机帧 1080×1920）：
+        #     | 帧 | floor 众数 | 阈值(×1.35) | 判亮格数 |
+        #     |---|---|---|---|
+        #     | 矿洞 13:36 | 65 | 88 | 7 |
+        #     | 矿洞 13:38 | 65 | 88 | 5 |
+        #     | 矿洞 18:03 | 65 | 88 | 4 |
+        #     | 海滩 14:55 | 153 | 207 | 5 |
+        #     | 海滩 15:02 | 153 | 207 | 3 |
+        #   ⇒ **雾簇/已揭示簇是干净双峰**（矿洞 65 vs 96~123；海滩 147~153 vs 222~234）✓
+        #   ⇒ **倍数沿用 PC 的 1.35**（手机端实测 ×1.20~1.40 结果稳定 ⇒ 1.35 在平台区 ✓）
+        #   ⚠ 手机端与 PC 的分母不同（手机端 ratio 用"本图模板中位"），但 **`floor` 是
+        #     绝对亮度、与 ratio 分母无关** ⇒ 这条判据可移植 ✓
+        #   ⚠ `floor_lit` **只作记录**；真正"谁来否决谁"在 `explore_loop._cells_for_model`
+        #     （那里才拿得到 marks —— PC 口径：**只让带标记的格由地板说了算**）✓
+        try:
+            _fl = sorted(float(v['floor']) for v in out.values()
+                         if isinstance(v, dict) and v.get('floor') is not None)
+            if _fl:
+                _hist = {}
+                for _s in _fl:
+                    _hist[round(_s)] = _hist.get(round(_s), 0) + 1
+                # ⚠ 众数并列时取**更小**的那个（`-x` 排序键）—— 雾是大多数 ⇒ 取小更安全 ✓
+                _fmode = max(sorted(_hist), key=lambda x: (_hist[x], -x))
+                _fbase = max(float(_fmode) * FLOOR_LIT_K, float(_fmode) + FLOOR_LIT_ADD)
+                for _v2 in out.values():
+                    if isinstance(_v2, dict) and _v2.get('floor') is not None:
+                        _v2['floor_lit'] = bool(float(_v2['floor']) > _fbase)
+                # ⚠⚠ **不要把 `_floor_thr` 塞进 `out`**（PC 是塞的，但 PC 的消费方都带
+                #   `isinstance(k, tuple)` 过滤；手机端 `explore_loop.cells_of` 里是
+                #   `sorted(st.items())` ⇒ 混进字符串键会 **TypeError 直接崩** ✗✗
+                #   —— v1.62 实跑当场抓到，故改挂到 Board 实例上（零污染 ✓）
+                self._floor_thr = round(_fbase, 1)
+                self._floor_mode = float(_fmode)
+        except Exception:               # noqa: BLE001
+            pass
         # ⭐⭐ v1.36 的**双证据**（`MAPBOT_REVEAL_EVIDENCE=dual`，默认 `single` 不开）：
         #   只对"相对法判未揭示、但亮度落在低置信带"的格**改用剪影裁决** ——
         #   剪影小 = 雾下平坦空地 ⇒ 空地本来没东西，不该被雾压住 ⇒ 算已揭示 ✓
@@ -801,6 +918,8 @@ class Board:
         #   ⚠ 剪影只作**否决/补救**，不能单独判已揭示（已揭示格剪影与雾格重叠，见顶部）✓
         if REVEAL_EVIDENCE == 'dual':
             for _v2 in out.values():
+                if not isinstance(_v2, dict):
+                    continue                    # ⚠ v1.62：`out` 里有非格键（`_floor_thr`）⇒ 跳过 ✓
                 _rn = float(_v2.get('ratio') or 0)
                 _sn = _v2.get('fog_sil')
                 if (not _v2.get('revealed')) and _sn is not None \

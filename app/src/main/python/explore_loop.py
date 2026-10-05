@@ -658,6 +658,42 @@ _PLAIN_NAMES = set(getattr(tcfg_mod, 'PLAIN_NAMES', ()) or
 INFER_CONSUMED = True   # ⭐ 连锁消耗反推开关（见 `_infer_chain_consumed`）
 
 
+def _floor_thr_now(c):
+    """本帧的「地板」阈值 = `max(众数 × K, 众数 + ADD)`（照抄 PC `spots.py:822`）
+
+    ⭐⭐⭐⭐ v1.62 新增，治「**带标记的雾格被 ratio 判成已揭示 ⇒ 规划去点它**」。
+
+    ## 阈值从哪来
+    `spots.Board.state()` 第二趟已经算好、并挂在**实例**上
+    （`bd._floor_thr` —— ⚠ v1.62 实跑发现：**不能塞进 `st` 字典**，
+      `explore_loop.cells_of` 里是 `sorted(st.items())` ⇒ 混进字符串键会
+      `TypeError` 直接崩 ✗✗）。
+    但 `_cells_for_model` 拿到的是 `c['st']`（**普通 dict**，Board 实例已经不在了）
+    ⇒ 这里**用同一份 cells 自己重算一次**（口径与 `spots` 完全一致）✓
+
+    ## 为什么要"重算"而不是"传下来"
+    `_cells_for_model` 的调用方有 `solver_order` / `eff_order` 两处，
+    且 `c` 是 `cells_of()` 的产物（只有 dict）⇒ 传实例要改两处签名 ✗
+    重算的代价：几十个数排序 ⇒ **微秒级**，可忽略 ✓
+
+    ⚠ 返回 None 表示"数据不足"（一格的 floor 都没有）⇒ 调用方**不 veto**（fail-open ✓）
+    """
+    try:
+        import spots as _sp
+        _vals = [float(v['floor']) for v in (c or {}).get('st', {}).values()
+                 if isinstance(v, dict) and v.get('floor') is not None]
+        if not _vals:
+            return None
+        _hist = {}
+        for _s in _vals:
+            _hist[round(_s)] = _hist.get(round(_s), 0) + 1
+        _mode = max(sorted(_hist), key=lambda x: (_hist[x], -x))
+        return max(float(_mode) * float(getattr(_sp, 'FLOOR_LIT_K', 1.35)),
+                   float(_mode) + float(getattr(_sp, 'FLOOR_LIT_ADD', 12.0)))
+    except Exception:               # noqa: BLE001
+        return None
+
+
 def _is_plain_cell(v):
     """这一格看起来是「可连锁的裸地」吗（营地除外；与 `mapsim.Block.plain` 同口径）"""
     nm = str(v.get('name') or '')
@@ -1088,6 +1124,50 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
                 if _rr is not None:
                     _vv['revealed'] = bool(
                         float(_rr) >= float(MODEL_REVEAL_RATIO_MIN))
+            except Exception:           # noqa: BLE001
+                pass
+            # ─────────────────────────────────────────────────────────────────
+            # ⭐⭐⭐⭐ v1.62【带标记的格子 ⇒ **由「地板」说了算**（ratio 不算数）】——
+            #   **照抄 PC** `mapbot_pc/explore_loop.py`（`6bedadb` 提交那一段）
+            #
+            #   ## 治什么（PC 用户原话）
+            #     「**为什么在废弃矿洞的规划错得离谱，在夏日海滩的就是对的**」
+            #     「**可能不是求解器的问题？是识别的问题？**」⇒ **就是识别** ✓
+            #     PC 真机铁证（`runs/acc2/r_145056_0.png` 矿洞）：`(2,1)` 画着 **boss 图标**
+            #     ⇒ `ratio = **1.019**` ⇒ 判"已揭示" ⇒ 求解器拿它当**第一步**去点
+            #     ⇒ 真机 `give_up_step`（点不动）⇒ 计划全建立在假前提上
+            #     ⇒ **4 次点击全废、18.4 秒白跑** ✗✗
+            #     **手机端同一个病**（v1.62 真机帧 `r_133809_0.png` 实测）：
+            #       `(1,6)` 魔晶矿**带 recommend 图标** ⇒ `ratio 0.84` 判"亮"
+            #       而它 `floor = 65` = **本帧纯雾值** ⇒ 真机点不动 ✗
+            #
+            #   ## 为什么 `ratio` 判不了
+            #     分子 = 该格**中心均值** ⇒ 图标压在雾格上 ⇒ 中心被抬起 ✗
+            #     分母 = 地形模板亮度 ⇒ 判据**不可跨图** ✗
+            #     ⇒ 用**四角**（`spots._floor_luma`）取中位数 ⇒ 图标压不住四角 ✓
+            #
+            #   ## ⚠⚠ 位置是**关键**（PC 提交原文的警告）
+            #     「**两处都要过**：最后那道 `ratio >= REVEAL_RATIO_MIN` 覆写会把前面的 veto
+            #       冲掉（**我第一次就栽在这**：veto 日志有了、模型里还是 true ✗）」
+            #     ⇒ 本段**必须放在上面那道 ratio 覆写之后** ✓（v1.62 实跑已验证：
+            #       放在之前 ⇒ `(1,6)` 进模型时仍是 `revealed=True` ⇒ 首步仍点它 ✗）
+            #
+            #   ## ⚠ 只动**带标记**的格
+            #     没标记的格仍走 ratio 口径（v1.60 那套 1068 格标定）✓
+            #     理由：地板法是为"图标抬起 ratio"设计的；没图标时 ratio 更稳（有历史标定）
+            try:
+                if _vv.get('marks') and _vv.get('floor') is not None:
+                    _fbase = _floor_thr_now(c)
+                    if _fbase is not None:
+                        _vv['revealed'] = bool(float(_vv['floor']) > _fbase)
+                        if log is not None:
+                            log.append({tag: 'floor_veto', 'cell': '%d,%d' % tuple(_k),
+                                        'floor': _vv['floor'],
+                                        'thr': round(_fbase, 1),
+                                        'ratio': _vv.get('ratio'),
+                                        'marks': _vv.get('marks'),
+                                        'note': '带标记的格**由地板说了算**'
+                                                '（ratio 不算数；PC 口径 ✓）'})
             except Exception:           # noqa: BLE001
                 pass
             # ---- ⭐⭐⭐ v1.58【拆掉"误并的多格块"（`_rescue`）】----

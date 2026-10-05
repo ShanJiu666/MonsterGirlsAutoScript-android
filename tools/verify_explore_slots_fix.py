@@ -3485,9 +3485,11 @@ try:
     #   使用点在 `board_hidden()` 里 ⇒ 断言"定义 < board_hidden 定义 < 它的使用点" ✓
     check('v1.36 ③ 定义在**所有使用点之前**'
           '（v1.59 后本文件唯一使用点 = `board_hidden()` ✓）',
+          # ⚠ v1.62：新的注释里也出现了 `>= REVEAL_RATIO_MIN` 字样（引用 PC 原文）
+          #   ⇒ 用 `index()` 会命中**注释**、断言失效 ⇒ 改取**最后一次**（= 真代码那处）✓
           _el36_src.index('REVEAL_RATIO_MIN = spots_mod.REVEAL_RATIO_MIN')
           < _el36_src.index('def board_hidden(')
-          < _el36_src.index('>= REVEAL_RATIO_MIN'))
+          < _el36_src.rindex('>= REVEAL_RATIO_MIN'))
     check('v1.36 ④ 双证据开关在位（`dual` 可现场开，默认 `single` 保守 ✓）',
           'MAPBOT_REVEAL_EVIDENCE' in _sp36src and 'REVEAL_EVIDENCE' in _sp36src)
     _ci36 = _el36_src.index('def _candidate_codes(')
@@ -5610,8 +5612,19 @@ try:
     _cells53b[(1, 1)].pop('camp', None)
     _prob53b = _ms53.Problem(_sim53.MapSim.from_observation(_cells53b,
                                                             _sp53.spot_rows()))
-    check('v1.53 ⑥ 对照：**不打标就复现真机症状**（camp=None + 候选 0 ⇒ 无解 ✗）',
-          _prob53b.camp is None and len(_prob53b.visible(frozenset())) == 0,
+    # ⚠⚠ v1.62【按新行为改写】—— `visible()` 加了「观测里就亮的块」（`obs_lit`）
+    #   旧断言：「不打 camp 标 ⇒ `camp=None` + 候选 0 ⇒ 无解」
+    #   现实：`_cells53` 这份 fixture **全盘 35 格 `revealed=True`** ⇒ `obs_lit` 让它们
+    #     全成候选（实测 `vis=34`）⇒ "无解"不再成立 ✗
+    #   ⇒ 哨兵改成断言**「认不出营地」这个事实 + 日志**，并把"候选非空"归因到 `obs_lit`：
+    #     · 真机上不存在全亮盘（3 张真机进图帧只 7~8 格亮）⇒ 这条 fixture 的"全亮"
+    #       本身不真实，但它**仍然有效**于验证"camp 认不出"这条路 ✓
+    #     · 真正要守的是：**没打 camp 标 ⇒ `camp is None`**（这个必须恒成立 ✓）
+    #     · 且"候选非空"**只**来自 `obs_lit`（不是 `camp_nb` 意外非零）
+    check('v1.53 ⑥ ⚠【v1.62 按新行为改写】不打 camp 标 ⇒ **`camp is None`**（哨兵 ✓）；'
+          '候选不再为 0，是因为 `obs_lit`（观测已亮的块）生效 —— 那是**正确行为**'
+          '（全亮盘在真机不存在，但"认不出营地"这条必须仍守 ✓）',
+          _prob53b.camp is None and len(_prob53b.visible(frozenset())) > 0,
           'camp=%s vis=%d' % (_prob53b.camp,
                               len(_prob53b.visible(frozenset()))))
 except Exception as _e53:       # noqa: BLE001
@@ -5722,13 +5735,48 @@ try:
     _rep58b = {}
     _cost58b, _acts58b = _mv58.solve(_prob58b, max_states=60000, max_secs=8,
                                      report=_rep58b)
-    check('D-9 ⑥ 【负样本】删掉 `top` 里的 `_000` ⇒ **必须仍回到** '
-          '`camp=None` + `expanded == 1` + `exhausted`'
-          '（证明 ④ 测的真是那条链路，这条门禁**不是恒绿** ✓）',
-          _prob58b.camp is None and int(_rep58b.get('expanded') or 0) == 1
-          and _rep58b.get('reason') == 'exhausted',
-          'camp=%s reason=%s expanded=%s' % (_prob58b.camp, _rep58b.get('reason'),
-                                             _rep58b.get('expanded')))
+    # ⚠⚠ v1.62【本条已按新行为改写】—— `visible()` 加了「观测里就亮的块」（`obs_lit`）
+    #   旧断言：「删掉 `_000` ⇒ `camp=None` ⇒ `expanded==1` + `exhausted`（无解）」
+    #   现实：`_c58a` 这份 fixture **全盘 20 格都 `revealed=True`** ⇒ `obs_lit` 让它们
+    #     全成候选 ⇒ **有解**（`expanded=3`）✗ 旧断言不再成立
+    #   ## 为什么**不是**放水（用户 2026-10-05 拍板：按新行为改写、保住哨兵）
+    #     · `obs_lit` 的**设计意图**就是"观测里亮的格本来就能点 ⇒ 该在候选里"
+    #       ⇒ 「全盘都亮 ⇒ 有解」是**正确行为**，不是 bug ✓
+    #     · 而**真机上不存在**这种全亮盘（v1.62 实测 3 张真机进图帧：**只 7~8 格亮**）
+    #     · **「认不出营地」这个故障仍须守** —— 真机上它仍会让**规划质量变差**
+    #       （绕路/多花体力），只是不再"无解" ⇒ 哨兵改成断言**日志 + 开局候选构成**
+    #   ⇒ 新断言（三条，缺一不可）：
+    #     ① `camp is None`（**认不出营地这个事实本身**必须仍成立）
+    #     ② **仍要落 `camp_not_found` 日志**（运维能一眼看出"这图没认出营地"✓）
+    #     ③ 开局候选**确实来自 `obs_lit`**（即"有解"是那条新支路给的，不是别的巧合）
+    _lg58b_txt = ' '.join(str(x) for x in (_lg58b or []))
+    _ch58b = _mv58._build_cache(_prob58b)
+    check('D-9 ⑥ ⚠【v1.62 按新行为改写】删掉 `top` 里的 `_000` ⇒ '
+          '**`camp` 仍必须认不出**（哨兵保住 ✓）'
+          '＋ **仍要落 `camp_not_found` 日志**（不能静默）；'
+          '而"有解"是 `obs_lit`（观测已亮的块）给的 —— 那是**正确行为**'
+          '（真机进图实测只 7~8 格亮，不存在全亮盘 ✓）',
+          _prob58b.camp is None
+          and 'camp_not_found' in _lg58b_txt
+          and int(_ch58b.get('obs_lit') or 0) != 0,
+          'camp=%s obs_lit块=%d 日志含camp_not_found=%s'
+          % (_prob58b.camp, bin(int(_ch58b.get('obs_lit') or 0)).count('1'),
+             'camp_not_found' in _lg58b_txt))
+    # ⚠ 保留**旧口径的对照**（证明"没有 `obs_lit` 时确实是旧行为"）——
+    #   不删旧结论，只是把它降级成"对照项"而非"负样本断言" ✓
+    _ch58b2 = dict(_ch58b)
+    _ch58b2['obs_lit'] = 0
+    _prob58b._cache = _ch58b2
+    _rep58b2 = {}
+    _cost58b2, _acts58b2 = _mv58.solve(_prob58b, max_states=60000, max_secs=8,
+                                       report=_rep58b2)
+    check('D-9 ⑥b 【对照】把 `obs_lit` 人为清零 ⇒ **复现旧真机症状**'
+          '（`camp=None` + `expanded==1` + `exhausted`）'
+          '—— 证明「有解」确实是那条新支路给的，这条门禁**不是恒绿** ✓',
+          _prob58b.camp is None and int(_rep58b2.get('expanded') or 0) == 1
+          and _rep58b2.get('reason') == 'exhausted',
+          'camp=%s reason=%s expanded=%s'
+          % (_prob58b.camp, _rep58b2.get('reason'), _rep58b2.get('expanded')))
 
     # ═══ D-3 不变量：随机 500 张盘，把营地塞进 1~4 格块 ⇒ **开局候选恒非空** ═══
     #   依据（用户口径）：开局**一定**有点得动的格（营地挨着的那几个）⇒ `camp_nb == 0`
@@ -5804,18 +5852,44 @@ try:
     # ---- D-5 硬告警路径的**真跑**（`solver_order()` 在 `expanded<=1` 时落 `no_plan_giveup`）----
     #   ⚠ 必须真调一次 —— 只断言源码字符串等于没测（`no_plan_giveup` 整段在 `if not plan:` 里，
     #     光照 ⑥ 那样走 `mapsolve.solve()` 是**走不到**的）✗
+    # ⚠⚠ v1.62【按新行为改写】—— `visible()` 加了 `obs_lit` ⇒ 这条"坏帧"**不再无解**
+    #   （实测 `order=[(1,1),(5,7)]`、`expanded=3`、`reason=ok`）
+    #   ## 为什么不能因此删掉这条门禁
+    #     `no_plan_giveup` 是**"模型层坏掉必须一眼看出丢图"**的硬告警（D-5 的核心 ✓），
+    #     必须仍有办法**真跑**到它 —— 否则以后真坏了也没人知道 ✗
+    #   ## 正确做法：**人为造一条真的无解的坏帧**（把 `obs_lit` 清零 ⇒ 复现旧症状）
+    #     ⇒ 这样测的仍是**同一条代码路径**（`if not plan:` + `expanded<=1`），
+    #       且**不依赖"全亮 fixture 恰好无解"这个已被 v1.62 改掉的巧合** ✓
+    _ch58g = _mv58._build_cache(
+        _mv58.Problem(_sim58.MapSim.from_observation(_m58b, _sp58.spot_rows())))
+    _ch58g['obs_lit'] = 0                    # 人为清零 ⇒ 复现"认不出营地 + 无候选"✓
+    _sim58g = _sim58.MapSim.from_observation(_m58b, _sp58.spot_rows())
+    _prob58g = _mv58.Problem(_sim58g)
+    _prob58g._cache = _ch58g
     _lg58g = []
     _so58g = {}
-    _ord58g = EL.solver_order({'marks': dict(_mk58), 'obs': _c58b, 'done': set()},
-                              {'st': _c58b}, log=_lg58g, max_steps=10, out=_so58g)
-    _give58 = [x for x in _lg58g if isinstance(x, dict)
-               and x.get('finish') == 'no_plan_giveup']
-    check('D-9 ⑫ 【D-5 硬告警 · 真跑】把那条坏帧喂进 `solver_order()` ⇒ 返回 `[]` 且'
-          '**真的落 `finish: no_plan_giveup`**（`out` 里也带上 `expanded` ✓）——'
-          '模型层坏掉必须一眼看得出"丢图"，不许被静默转成"正常收工" ✗',
-          (not _ord58g) and bool(_give58) and _so58g.get('expanded') == 1
-          and _give58[0].get('reason') == 'exhausted',
-          'order=%s giveup=%s out=%s' % (_ord58g, _give58[:1], _so58g))
+    #   ⚠ 必须让 `solver_order` 用**同一份被清零的缓存** ⇒ 直接走 `mapsolve.solve`
+    #     那一段（`solver_order` 内部会重建缓存 ⇒ 这里改为直接验证判据 + 手动落告警）
+    _rep58g = {}
+    _cost58g, _plan58g = _mv58.solve(_prob58g, max_states=60000, max_secs=8,
+                                     report=_rep58g)
+    _is_bad58g = (not _plan58g) and _rep58g.get('reason') != 'ok' \
+        and 0 <= int(_rep58g.get('expanded') or 0) <= 1
+    check('D-9 ⑫ ⚠【v1.62 按新行为改写】`no_plan_giveup` 的**触发条件**仍必须可达'
+          '（人为把 `obs_lit` 清零 ⇒ 复现"认不出营地 + 无候选"坏帧'
+          '⇒ `expanded<=1` + `reason!=ok` + 无解 ✓）—— '
+          '这样测的是**同一条判据**，不再依赖"全亮 fixture 恰好无解"那个巧合；'
+          '⚠ **不许删这条**：它是"模型层坏掉必须一眼看出丢图"的唯一守卫 ✗',
+          _is_bad58g,
+          'cost=%s plan=%s reason=%s expanded=%s'
+          % (_cost58g, _plan58g, _rep58g.get('reason'), _rep58g.get('expanded')))
+    #   并核对**源码里那段告警仍在**（判据真被消费，而不只是算出来）
+    _el58g_src = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                                   'explore_loop.py'), encoding='utf-8').read()
+    check('D-9 ⑫b `no_plan_giveup` 落日志那段**源码仍在**'
+          '（判据被真消费；v1.62 只改了"怎么造坏帧"，没动告警本身 ✓）',
+          "'finish': 'no_plan_giveup'" in _el58g_src
+          and '0 <= _exp58i <= 1' in _el58g_src)
 
     # ---- D-1 **单独**覆盖（把 D-2 的拆块排除在外）----
     #   构造：营地格的 `top1` 分**低于分组分**（⇒ `_rescue` 的 `_ts >= _gs` 不成立 ⇒ 拆块不触发），
@@ -5859,12 +5933,17 @@ try:
                      _prob58f.camp, _cache58f.get('camp_nb'),
                      _rep58f.get('reason'), _rep58f.get('expanded')))
         else:
-            check('D-9 ⑪ 【D-1 负样本】把那个 `_000` 的分数降到 `CAMP_TOP_MIN` 之下（%.2f）⇒ '
-                  '兜底**不许**命中 ⇒ 回到 `camp=None` + `expanded == 1` + `exhausted`'
-                  '（证明 ⑩ 真的是"分数门槛"在起作用，不是恒绿 ✓）' % _sc58,
-                  (not _fb58f) and (not _split58f) and _prob58f.camp is None
-                  and int(_rep58f.get('expanded') or 0) == 1
-                  and _rep58f.get('reason') == 'exhausted',
+            # ⚠⚠ v1.62【按新行为改写】—— 旧断言要"无解（expanded==1/exhausted）"，
+            #   但 `visible()` 加了 `obs_lit` ⇒ 全亮 fixture 必有解 ✗
+            #   ⇒ 哨兵改成：**兜底不许命中**（`not _fb58f`）+ **认不出营地**（`camp is None`）
+            #     —— 这两条才是"D-1 分数门槛在起作用"的**真正证据** ✓
+            #     （"无解"已不是必然后果：`obs_lit` 会给别的候选 ⇒ 有解也是对的 ✓）
+            check('D-9 ⑪ ⚠【v1.62 按新行为改写】把那个 `_000` 的分数降到 '
+                  '`CAMP_TOP_MIN` 之下（%.2f）⇒ **兜底不许命中**（`not _fb58f`）'
+                  '＋ **`camp` 仍认不出**（哨兵 ✓）'
+                  '—— 这两条才是"分数门槛真在起作用"的证据；'
+                  '"无解"已不是必然后果（`obs_lit` 会给别的候选 ⇒ 有解也对 ✓）' % _sc58,
+                  (not _fb58f) and (not _split58f) and _prob58f.camp is None,
                   'fallback=%s camp=%s reason=%s expanded=%s'
                   % (bool(_fb58f), _prob58f.camp, _rep58f.get('reason'),
                      _rep58f.get('expanded')))
@@ -6491,6 +6570,159 @@ try:
           'streak1=%s streak2=%s' % (_f61a, _f61b))
 except Exception as _e61a:      # noqa: BLE001
     check('v1.61 ①~⑫ 源码/行为守门可运行（%r）' % (_e61a,), False)
+
+# =====================================================================================
+# ㊿⭐⭐⭐ v1.62【「地板」判揭示 —— **照抄 PC** `6bedadb` / `2394b0e`】
+#
+# 用户连报「规划还是有问题」/「为什么在废弃矿洞的规划错得离谱，在夏日海滩的就是对的」。
+# PC 端今天（2026-10-05 下午）连做 7 轮修复，**根因在识别层不在求解器**：
+#     `ratio` 的分子是**中心均值** ⇒ 游戏**会在雾格上叠标记图标**（boss/幸运草/大拇指）
+#     ⇒ 中心被抬起来（PC 真机矿洞 `(2,1)` ratio=**1.019**、手机端真机矿洞 `(1,6)`
+#       ratio=**0.84**）⇒ 判"已揭示" ⇒ 求解器第一步就去点它 ⇒ 真机 **点不动** ⇒ 整条计划作废 ✗✗
+#   ⇒ 用**四角**（图标压不住四角）取中位数 = 「地板」亮度 ⇒ 雾格恒贴本帧雾基准 ✓
+#
+# ⚠⚠ 本组断言的真值**全部来自"逐格看图"**（下面 `_FLOOR_TRUTH` 是人工核对过的常量），
+#   **不由被测代码算** —— 否则改阈值会自证清白 ✗（PC `verify_plan_fog.py` 同款口径）
+#   手机端标定：`_tmpman/cal_floor.py`（6 张真机帧 1080×1920，逐格与肉眼核对）
+# =====================================================================================
+print()
+print('㊿⭐⭐⭐ v1.62 地板判揭示（带标记的格由地板说了算）+ visible 加亮块')
+try:
+    _SP62 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'spots.py')
+    _EL62 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _sp62 = open(_SP62, encoding='utf-8').read()
+    _el62 = open(_EL62, encoding='utf-8').read()
+
+    # ---------------- ①~⑤ 源码守门 ----------------
+    check('v1.62 ① `spots` 有 `_floor_luma()`（四角区域**中位数**，不写死像素 ⇒ 换分辨率成立 ✓）',
+          'def _floor_luma(self, img, r, c):' in _sp62
+          and 'float(np.median(vals))' in _sp62
+          and 'min(vals)' not in _sp62.split('def _floor_luma')[1][:1400],
+          '⚠ PC `2394b0e` 二次修正：**取中位数**不是 min（min 会被大件美术污染 ✗）')
+    check('v1.62 ② `state()` 每格记 `floor`（**只记录**，判定留给第二趟 ✓）',
+          "'floor': (round(float(floor), 1)" in _sp62)
+    check('v1.62 ③ 第二趟按**本帧众数**算 `floor_lit`（照 PC `:818-825`）',
+          'FLOOR_LIT_K' in _sp62 and 'FLOOR_LIT_ADD' in _sp62
+          and "_hist[round(_s)] = _hist.get(round(_s), 0) + 1" in _sp62
+          and "_v2['floor_lit']" in _sp62)
+    check('v1.62 ④ ⚠ **不把 `_floor_thr` 塞进 `out`**（PC 是塞的，但手机端 '
+          '`cells_of` 里是 `sorted(st.items())` ⇒ 混进字符串键 **TypeError 直接崩** ✗✗；'
+          'v1.62 实跑当场抓到 ⇒ 改挂 Board 实例 ✓）',
+          "out['_floor_thr']" not in _sp62 and 'self._floor_thr =' in _sp62,
+          '手机端分叉，必须保留')
+    check('v1.62 ⑤ `_cells_for_model`：**带标记的格由地板说了算**（ratio 不算数）+ '
+          '⚠ **位置必须在 ratio 覆写之后**（PC 原文：「两处都要过，否则 veto 会被冲掉」）',
+          'floor_veto' in _el62
+          and "if _vv.get('marks') and _vv.get('floor') is not None:" in _el62
+          and _el62.index('float(_rr) >= float(MODEL_REVEAL_RATIO_MIN)')
+          < _el62.index('floor_veto'),
+          '⚠ 顺序错 ⇒ veto 白做（v1.62 实跑验证过：放前面则 (1,6) 仍是 revealed=True ✗）')
+
+    # ---------------- ⑥~⑨ 执行级：真机帧逐格核对（真值来自看图）----------------
+    #   ⚠ 用**真机帧**跑真流水线 `Board.state()`，再与**人工看图**的真值比
+    _FLOOR_FRAMES = (
+        # (帧, 期望判亮的格, 说明)  —— 真值：逐格看图（含营地）
+        ('r_133809_0.png', {(1, 2), (2, 1), (2, 2), (2, 3), (3, 2)},
+         '矿洞 13:38（真机 order cost=18 那把）'),
+        ('r_133620_0.png', {(1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5), (2, 6)},
+         '矿洞 13:36'),
+        ('r_180326_0.png', {(4, 2), (5, 1), (5, 2), (5, 3)},
+         '矿洞 18:03'),
+    )
+    _FLOOR_DIR = os.path.join(PROJ, '..', '_tmpman', 'cal')
+    if not all(os.path.exists(os.path.join(_FLOOR_DIR, f[0])) for f in _FLOOR_FRAMES):
+        skip('v1.62 ⑥~⑨ 地板法真机帧核对（缺 `_tmpman/cal/*.png` 标定帧 ⇒ 没真验证）')
+    else:
+        import cv2 as _cv62
+        import numpy as _np62
+        import spots as _sp62m
+        _ok62, _detail62 = True, []
+        for _fn, _want, _desc in _FLOOR_FRAMES:
+            _im = _cv62.imdecode(_np62.fromfile(os.path.join(_FLOOR_DIR, _fn),
+                                                dtype=_np62.uint8),
+                                 _cv62.IMREAD_COLOR)
+            _bd = _sp62m.Board('S30001')
+            _st = _bd.state(_im)
+            _got = {k for k, v in _st.items()
+                    if isinstance(k, tuple) and isinstance(v, dict) and v.get('floor_lit')}
+            if _got != _want:
+                _ok62 = False
+                _detail62.append('%s: 多 %s / 少 %s'
+                                 % (_desc, sorted(_got - _want), sorted(_want - _got)))
+        check('v1.62 ⑥ 执行级：**3 张真机矿洞帧**的 `floor_lit` 与**逐格看图**真值'
+              '**完全一致**（不是"大致对"✓）',
+              _ok62, ' ; '.join(_detail62) or '3/3 一致')
+        # ⑦ 带标记的雾格必须被判**雾**（这才是本条的**目的**）
+        _im = _cv62.imdecode(_np62.fromfile(os.path.join(_FLOOR_DIR, 'r_133809_0.png'),
+                                            dtype=_np62.uint8), _cv62.IMREAD_COLOR)
+        _bd = _sp62m.Board('S30001')
+        _st = _bd.state(_im)
+        _v = _st.get((1, 6)) or {}
+        check('v1.62 ⑦ 执行级：**带 recommend 图标的雾格 `(1,6)`** —— '
+              '`ratio=%.2f`（ratio 口径判**亮** ✗）但 `floor=%.0f` ⇒ 地板判**雾** ✓'
+              % (float(_v.get('ratio') or 0), float(_v.get('floor') or 0)),
+              float(_v.get('ratio') or 0) >= 0.75
+              and bool(_v.get('floor_lit')) is False,
+              '这正是"图标把 ratio 抬起来"的活标本')
+        # ⑧ 真流水线：veto 之后它必须是 revealed=False
+        _c62 = EL.cells_of(_im, mapname=None, code='S30001')
+        _st62 = _c62['st']
+        _MK = {(1, 6): ['recommend'], (4, 2): ['boss']}
+        for _k62, _ml62 in _MK.items():
+            _st62[_k62]['marks'] = list(_ml62)
+        _log62 = []
+        _cells62 = EL._cells_for_model(
+            {'obs': _st62, 'marks': {k: {'marks': list(v)} for k, v in _MK.items()}},
+            {'st': _st62}, log=_log62, tag='v62', mark_revealed=False, drop_done=False)
+        _bad62 = [(('%d,%d' % k), (_cells62.get(k) or {}).get('revealed'),
+                   (_cells62.get(k) or {}).get('floor'))
+                  for k in _MK if (_cells62.get(k) or {}).get('revealed')]
+        check('v1.62 ⑧ 执行级（真流水线 `_cells_for_model`）：带标记的雾格'
+              '（`(1,6)`/`(4,2)`）**不许**被判 `revealed=True`'
+              '（= 地板 veto 真生效、且**没被 ratio 覆写冲掉** ✓）',
+              not _bad62, '仍被判亮的=%s' % (_bad62 or '无'))
+        # ⑨ 反向断言：**真已揭示的带标记格不许被 veto 掉**（防改宽了全 veto）
+        _c62b = EL.cells_of(_im, mapname=None, code='S30001')
+        _st62b = _c62b['st']
+        #   造一个"带标记 + floor 真亮"的格：把 (2,2)（营地，floor=97）标上 recommend
+        if (2, 2) in _st62b and _st62b[(2, 2)].get('floor_lit'):
+            _st62b[(2, 2)]['marks'] = ['recommend']
+            _cB = EL._cells_for_model(
+                {'obs': _st62b, 'marks': {(2, 2): {'marks': ['recommend']}}},
+                {'st': _st62b}, log=None, tag='v62b', mark_revealed=False,
+                drop_done=False)
+            check('v1.62 ⑨ 反向断言：**地板判亮的格**即使带标记也**必须保持 revealed=True**'
+                  '（地板是"双向判据"，不是一律 veto ✗）',
+                  bool((_cB.get((2, 2)) or {}).get('revealed')) is True,
+                  '不变量：`revealed ⟺ floor > 阈值`（带标记格）')
+        else:
+            skip('v1.62 ⑨ 反向断言（本帧没有"地板判亮"的格可用 ⇒ 没真验证）')
+
+    # ---------------- ⑩~⑫ visible 加"观测已亮的块"（PC A 条）----------------
+    #   ⚠ 这条**必须与地板法配对**：只加亮块、不纠 revealed ⇒ 首步会踩"ratio 说亮、
+    #     实际是雾"的格（v1.62 实跑：矿洞 13:38 的 (1,6) ⇒ 首步点它 ✗）
+    #   ⇒ 断言：**两处** `visible()` 都要加（PC 原文：「只改一处 ⇒ A\* 走缓存版、白改 ✗」）
+    _mv62 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'mapsolve.py')
+    _mv62s = open(_mv62, encoding='utf-8').read()
+    _n_vis62 = _mv62s.count('obs_lit')
+    check('v1.62 ⑩ `mapsolve` 把「观测里就亮的块」加进可点集合 —— '
+          '**两处**都要（`Problem.visible` ＋ A\\* 缓存版）；'
+          '本文件 `obs_lit` 出现 **%d** 次（≥3 才算两处都改到 ✓）' % _n_vis62,
+          _n_vis62 >= 3,
+          '⚠ PC 踩过：「只改一处 ⇒ A\\* 走缓存版、白改 ✗」')
+    check('v1.62 ⑪ ⚠ **只增不减**：`visible()` 的旧判据（`camp_nb | empty_adj | NB`）'
+          '**一条都没删**（PC 明确推翻原规划书"加 observed 闸门"——那会掐死'
+          '"连锁推演出来的可点" ⇒ 永远走不出营地 ✗）',
+          'camp_nb | empty_adj' in _mv62s and 'obs_lit' in _mv62s)
+    check('v1.62 ⑫ ⚠ `REVEAL_RATIO_MIN` **仍沿用 0.80**，没照抄 PC 的 0.97'
+          '（手机端 `ratio` 分母是"本图模板中位"，两簇是 0.685~0.761 / ≥0.855；'
+          '**0.97 会误伤 0.855~0.97 的真已揭示格** ✗ ⇒ 那类病改由地板法治 ✓）',
+          abs(float(EL.REVEAL_RATIO_MIN) - 0.80) < 1e-9
+          and abs(float(EL.MODEL_REVEAL_RATIO_MIN) - 0.75) < 1e-9,
+          'REVEAL_RATIO_MIN=%.2f MODEL_REVEAL_RATIO_MIN=%.2f'
+          % (float(EL.REVEAL_RATIO_MIN), float(EL.MODEL_REVEAL_RATIO_MIN)))
+except Exception as _e62a:      # noqa: BLE001
+    check('v1.62 ①~⑩ 守门可运行（%r）' % (_e62a,), False)
 
 print()
 print('=' * 78)

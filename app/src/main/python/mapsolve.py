@@ -380,7 +380,36 @@ class Problem:
         #   ⇒ 三处（`block_revealed` / `visible` / `camp_nb`）**同口径** ✓
         if self.camp is not None:
             for cc2 in self.camp_reveal:
-                _add_nb(cc2)
+                _add_nb(cc2)                         # ⚠ v1.62 恢复（上一次编辑误删 ✗）
+        # ③ ⭐⭐⭐⭐ v1.62【「观测里就亮的块」也是可点的】—— **照抄 PC** `19b4ed8`
+        #
+        #   ## 治什么（手机端真机铁证：矿洞 13:38 那把 `cost=18`、8 步）
+        #     `order = ['3,2','4,2','5,4','5,5','5,6','5,7','3,7','1,6']`
+        #     其中 `1,6`（**recommend 魔晶矿**）在观测里**明明亮着**、真机**能直接点**，
+        #     可它**不挨着营地、也不挨着已消耗格** ⇒ 旧的 `visible()` 不含它
+        #     ⇒ 求解器以为"够不到" ⇒ 绕 **6 步开路**去够它（其中 5 步是雾格）✗✗
+        #   ⇒ 加这一支：**观测里 revealed=True 的块**直接进候选 ✓
+        #     离线实测（v1.62，同一帧）：`cost 18→13`、`steps 8→3`、**雾格 7→2** ✓
+        #
+        #   ## ⚠ 语义为什么成立
+        #     "观测里亮着" = 游戏里**现在就能点它**（暗格点不动、亮格点得动 ——
+        #     项目 §5/§7 的实测结论）⇒ 它当然该在候选里 ✓
+        #
+        #   ## ⚠⚠ **只增不减**（PC 原文）
+        #     一条旧判据都没删。原规划书曾想给 `visible()`/`block_revealed()` 加
+        #     **observed 闸门**（"雾格不许当候选"）—— PC 执行时**按证据推翻**了：
+        #     那会把"连锁推演出来的可点"全掐死 ⇒ **永远走不出营地** ✗✗
+        #     （PC 见 `PLAN_FIX_BAD_PLANS.md` §7）
+        #
+        #   ⚠⚠ **与地板法（`_cells_for_model` 的 floor veto）必须配对**：
+        #     只加这一支、不纠 `revealed` ⇒ 会把"ratio 说亮、其实是雾"的格
+        #     （矿洞 `(1,6)` ratio 0.84 / floor 65）排到**首步** ⇒ 真机点不动 ✗
+        #     ⇒ v1.62 两个一起上：**先按地板纠 revealed，再让这一支只收"地板判亮"的块** ✓
+        for _bi62, _b62 in self.blocks.items():
+            if _bi62 in state or _bi62 == self.camp:
+                continue
+            if getattr(_b62, 'observed', False):
+                vis.add(_bi62)
         # ⭐ v1.44：拉黑块**既不是候选动作、也不能当通路** ✓
         #   （根因：拉黑块原本只"事后从点序剔除"⇒ 求解器算连通性/代价时仍按能走算
         #    ⇒ 计划出现断档/绕路不合理 ✗ —— 与 PC 端 d81c42c 同一个问题）
@@ -616,8 +645,20 @@ def _build_cache(prob):
     for bi in idxs:
         if getattr(prob.blocks[bi], 'blocked', False):
             blocked_mask |= bit[bi]
+    # ⭐⭐⭐⭐ v1.62【「观测里就亮的块」掩码】—— 照抄 PC `19b4ed8`
+    #   ⚠⚠ **这里才是真正生效的地方**（与 v1.51 拉黑那次同一个坑！）：
+    #     `solve()` 用的是它自己那份**位掩码版 `visible(m)`**，
+    #     `Problem.visible()`（集合版）在生产路径上**没人调用**（PC 报告 §E4 早写过）✗
+    #   ⇒ 两处都要建/都要用（PC 原文：「只改一处 ⇒ A\* 走缓存版、白改 ✗」）✓
+    #   ⚠ 拉黑块**不排除在这一支之外**也不行 —— 它在 `visible(m)` 里统一 `&= ~blocked_mask` ✓
+    obs_lit = 0
+    for bi in idxs:
+        if getattr(prob.blocks[bi], 'observed', False):
+            obs_lit |= bit[bi]
+    obs_lit &= ~camp_mask                 # ⚠ 营地自己**不可点**（与集合版同口径 ✓）
     return {'bit': bit, 'bits': [bit[bi] for bi in idxs],
             'blocked_mask': blocked_mask,
+            'obs_lit': obs_lit,
             'NB_MASK': {bit[k]: v for k, v in NB_MASK.items()},   # ⭐ 键 = 单 bit
             'PLAIN_GROUP_MASK': PLAIN_GROUP_MASK, 'REP': REP,
             'cost': cost, 'camp_mask': camp_mask, 'camp_nb': camp_nb,
@@ -659,7 +700,10 @@ def solve(prob, max_states=400000, report=None, max_secs=None):
 
     def visible(m):
         # ⭐ 起手可见 = 营地四邻 ∪ **观测里已经空掉的格的邻块**（= 已经走出去的地图 ✓）
-        out = camp_nb | empty_adj
+        #   ∪ ⭐⭐⭐ v1.62 **观测里就亮的块**（`obs_lit`；照抄 PC `19b4ed8`
+        #     —— 详见 `Problem.visible()` ③ 那段长注释）✓
+        #   ⚠ PC 原文：「只改一处 ⇒ A\* 走缓存版、**白改** ✗」⇒ 这里与集合版**必须一致** ✓
+        out = camp_nb | empty_adj | ch.get('obs_lit', 0)
         mm = m
         while mm:
             low = mm & -mm
