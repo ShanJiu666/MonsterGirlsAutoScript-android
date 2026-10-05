@@ -1149,8 +1149,12 @@ check('②b 死代码已拔掉（不再读 `st[\'cells\'][\'board\']`）',
 check('③ 免拉黑范围扩到 粘性集/跨轮记忆/探点（"永不拉黑"对**认到过**的宝库成立 ✓）',
       "set(buy) | set(buy_hidden) | set(sticky)" in src
       and "set(st.get('buy_seen') or {})" in src)
-check('③b 已揭示的宝库**排到点序最前**（用户口径：能直接点就先点 ✓）',
-      'order = _buy_first + list(order)' in src and "'buy_first'" in src)
+check('③b 已揭示的宝库**排到点序最前**（用户口径：能直接点就先点 ✓）'
+      '—— ⚠ v1.66 起**只在兜底模式**下成立（`if FALLBACK_EFF:` 守着 ✓），'
+      '默认"只听规划的" ⇒ 不插队（否则与用户口径①直接冲突 ✗）',
+      'order = _buy_first + list(order)' in src and "'buy_first'" in src
+      and 'if FALLBACK_EFF:' in src
+      and "'skipped_plan_only'" in src)
 try:
     _sys6 = __import__('sys')
     _sys6.path.insert(0, os.path.join(MAPBOT))
@@ -2667,17 +2671,19 @@ try:
           and "_pact, _pwhy = plan_mode(st, len(_rest), _tleft)" in _src28)
     check('v1.29 ③ 每轮重解要**覆盖**旧计划（`st[\'plan\'] = list(_sol)` ✓）',
           "st['plan'] = list(_sol)          # ⭐ 每轮**覆盖**" in _src28)
-    check('v1.28 ④ 纯函数 `plan_next()` 仍在（"进图一次"那条路没被删 ✗）',
+    check('v1.28 ④ 纯函数 `plan_next()` 仍在（"进图一次"那条路没被删 ✗）'
+          '＋ ⚠ v1.66 起 `eff` 两条出口**都带兜底开关**（默认关 ⇒ 走 `done` ✓）',
           'def plan_next(st, rest_n, targets_left):' in _src28
           and "return 'plan', 'first'" in _src28
           and "return 'keep', 'has_rest'" in _src28
-          and "return 'eff', 'exhausted'" in _src28
-          and "return 'eff', 'stuck'" in _src28)
-    check('v1.28 ⑤ 走完还有目标 ⇒ 切 EffPolicy（`plan: exhausted` ✓）'
-          '；推不动 ⇒ `plan: stuck`（安全网 ✓）',
+          and "return ('eff', 'exhausted') if FALLBACK_EFF else ('done', 'exhausted')" in _src28
+          and "return ('eff', 'stuck') if FALLBACK_EFF else ('done', 'stuck')" in _src28)
+    check('v1.28 ⑤ 走完还有目标 ⇒ **默认**退图（`plan_only_giveup` 日志 ✓）'
+          '；推不动 ⇒ 同样退图（安全网 ✓）；⚠ 旧口径「切 EffPolicy」由开关守 ✓',
           "log.append({'plan': _pwhy" in _src28
           and 'PLAN_STUCK_ROUNDS = 3' in _src28
-          and "_pwhy == 'exhausted'" in _src28)
+          and "_pwhy == 'exhausted'" in _src28
+          and "'plan_only_giveup'" in _src28)
 
     import importlib.util as _ilu28
     _spec28 = _ilu28.spec_from_file_location('el_v128', _el28p)
@@ -2700,16 +2706,50 @@ try:
           _pm(_s, 2, 3, once=True) == ('keep', 'has_rest'))
     _s = {'planned': True, 'plan': [(1, 1)], 'plan_stuck': 0, 'plan_prev_len': 1}
     _r = [_pm(_s, 1, 2, once=True) for _ in range(3)]
-    check('v1.28 ⑩ 执行级：`PLAN_ONCE=1` 连着 3 轮没推进 ⇒ `eff/stuck`（安全网 ✓）',
-          _r == [('keep', 'has_rest'), ('keep', 'has_rest'), ('eff', 'stuck')],
+    check('v1.28 ⑩ 执行级：`PLAN_ONCE=1` 连着 3 轮没推进 ⇒ **默认（禁用兜底）** 走 '
+          '`done/stuck` ⇒ 退图 ✓（⚠ v1.66 用户口径「只听规划的」）',
+          _r == [('keep', 'has_rest'), ('keep', 'has_rest'), ('done', 'stuck')],
           'got=%s' % (_r,))
+    # ⭐ v1.66 双口径：把开关打开 ⇒ 必须**逐字复现旧行为**（回退路径不能坏 ✓）
+    _s = {'planned': True, 'plan': [(1, 1)], 'plan_stuck': 0, 'plan_prev_len': 1}
+    _old28 = _el28m.FALLBACK_EFF
+    try:
+        _el28m.FALLBACK_EFF = True
+        _r2 = [_pm(_s, 1, 2, once=True) for _ in range(3)]
+    finally:
+        _el28m.FALLBACK_EFF = _old28
+    check('v1.66 ① 开关打开（`MAPBOT_FALLBACK_EFF=1`）⇒ **旧行为逐字复现** `eff/stuck`'
+          '（回退路径必须仍然可用 ✓）',
+          _r2 == [('keep', 'has_rest'), ('keep', 'has_rest'), ('eff', 'stuck')],
+          'got=%s' % (_r2,))
     _s = {'planned': True, 'plan_stuck': 2, 'plan_prev_len': 4}
     check('v1.28 ⑪ 执行级：步数有减少 ⇒ 计数清零（继续照走 ✓）',
           _pm(_s, 2, 2, once=True) == ('keep', 'has_rest') and _s['plan_stuck'] == 0,
           'stuck=%s' % _s.get('plan_stuck'))
-    check('v1.28 ⑫ 执行级：走完还有目标 ⇒ `eff/exhausted`；走完没目标 ⇒ `none/no_targets` ✓',
-          _pm({'planned': True}, 0, 2, once=True) == ('eff', 'exhausted')
+    check('v1.28 ⑫ 执行级：走完还有目标 ⇒ **默认** `done/exhausted`（退图，**不切兜底** ✓）；'
+          '走完没目标 ⇒ `none/no_targets` ✓',
+          _pm({'planned': True}, 0, 2, once=True) == ('done', 'exhausted')
           and _pm({'planned': True}, 0, 0, once=True) == ('none', 'no_targets'))
+    # ⭐ v1.66 双口径（同上）：开关打开 ⇒ 旧行为 `eff/exhausted` ✓
+    try:
+        _el28m.FALLBACK_EFF = True
+        _old_r = _pm({'planned': True}, 0, 2, once=True)
+    finally:
+        _el28m.FALLBACK_EFF = _old28
+    check('v1.66 ② 开关打开 ⇒ 走完还有目标仍是 `eff/exhausted`（旧行为可回退 ✓）',
+          _old_r == ('eff', 'exhausted'), 'got=%s' % (_old_r,))
+    # ⭐⭐ v1.66 ③ 禁用兜底时，精确解算连着 `PLAN_GIVEUP_TRIES` 轮算不出 ⇒ 本图**算无解**退图
+    #   ⚠ 这条正是治「兜底策略又买了黄金宝库」的前置：**不让它有机会接管** ✓
+    check('v1.66 ③ 禁用兜底 + 精确解算连着 %d 轮算不出 ⇒ `done/no_solution`（退图，不切兜底 ✓）'
+          % _el28m.PLAN_GIVEUP_TRIES,
+          _pm({'plan_tries': _el28m.PLAN_GIVEUP_TRIES}, 0, 0, once=True)
+          == ('done', 'no_solution')
+          and _pm({'plan_tries': 1}, 0, 0, once=True) == ('plan', 'first'))
+    # ⭐⭐ v1.66 ④ 开关默认值必须是 **关**（用户口径「禁用兜底策略」是**默认行为** ✓）
+    check('v1.66 ④ `FALLBACK_EFF` 默认**关**（`MAPBOT_FALLBACK_EFF` 不设 ⇒ 禁用兜底 ✓）',
+          _el28m.FALLBACK_EFF is False
+          and "os.environ.get('MAPBOT_FALLBACK_EFF', '0')" in _src28,
+          'FALLBACK_EFF=%s' % _el28m.FALLBACK_EFF)
 except Exception as _e28:       # noqa: BLE001
     check('v1.28/v1.29 规划口径守门可运行（%r）' % (_e28,), False)
 
@@ -4984,11 +5024,11 @@ try:
         ('已规划有剩余', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 4},
          4, 2, 'keep', 'has_rest'),
         ('走完还有目标', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 0},
-         0, 2, 'eff', 'exhausted'),
+         0, 2, 'done', 'exhausted'),
         ('走完且无目标', {'planned': True, 'plan_stuck': 0, 'plan_prev_len': 0},
          0, 0, 'none', 'no_targets'),
         ('连着没推进', {'planned': True, 'plan_stuck': 3, 'plan_prev_len': 5},
-         5, 2, 'eff', 'stuck'),
+         5, 2, 'done', 'stuck'),
     ]
     _bad45 = []
     for _lbl45, _st45, _rest45, _tl45, _wa45, _ww45 in _cases45:
@@ -7228,6 +7268,204 @@ try:
         skip('v1.63c ⑥ 大拇指闸门执行级（缺 probe_recommend_gate.py）')
 except Exception as _e63c:      # noqa: BLE001
     check('v1.63c 守门可运行（%r）' % (_e63c,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊾⏤ v1.66【三条根因一起收口】—— 用户 2026-10-06 两条口径 + 一条真机复盘
+#   用户原话：
+#     ① 「**刚刚真机那边的脚本靠兜底策略又购买了黄金宝库**。。**禁用兜底策略**，
+#         规划执行完**就算还有目标也直接退**，**只听规划的**」
+#     ② 「顺便看看真机这几把的日志，看看为什么幸运草都低于8了，为什么还要打大拇指地块」
+#     ③ 「最近一次的日志，规划出了问题，我猜测是**把拉黑的方块认为已经可以连锁通过了**？
+#         也可能是把宝箱认为可以连锁通过了」
+#
+#   三条的根因**都不是"判据写错"**，而是**判据改在了错的层**：
+#     · ① `EffPolicy` 直接读模型 ⇒ 清 `buy`/`buy_hidden` 对它毫无影响
+#          （真机：`block_buy` ⇒ `plan exhausted` ⇒ `eff ok` ⇒ `vault_panel_by_dlg` ✗）
+#     · ② 幸运草闸门剔的是 `mk`，而 `_cells_for_model` 会把 `st['obs']` 里
+#          **累积的标记重新贴回** ⇒ 剔了又回来 ✗
+#     · ③ `Block.blocked` 的语义注释写着「不可点、**不可借道**」，
+#          但 `plain` / `connected_plain` / `plain_group` / `REP` **全都没判它** ✗
+#          ⇒ 拉黑格照样被并进连通空地片 ⇒ 片被撑大 ⇒ 连锁穿透 ✗✗
+#   ⚠ 三条是**同一类"静默失效"**（v1.62 veto 被冲掉 / v1.63 band 裁掉 HUD 之后第三次）
+#     ⇒ 门禁必须**执行级**钉住，不能只查字符串（否则改回去也能绿 ✗）
+# ─────────────────────────────────────────────────────────────────────────
+print()
+print('㊾⏤ v1.66 禁用兜底（只听规划的）+ 闸门模型层收口 + 拉黑块阻断连锁')
+try:
+    import importlib as _il66
+    _il66.invalidate_caches()
+    import spots as _sp66
+    import mapsim as _msim66
+    import mapsolve as _mv66
+
+    # ── ③【拉黑块阻断连锁】—— 本组最核心的一条，**执行级** ────────────────
+    #   造一条"1 行 5 格"的空地走廊，正中塞一个**拉黑块**：
+    #     真机语义：点左端 ⇒ 连锁只吃左半边（拉黑格**阻断穿透** ✓）
+    #     旧行为（bug）：`plain` 不判 `blocked` ⇒ 整条 5 格算一片 ⇒ 以为右边也消了 ✗✗
+    def _c66(sid, name, anchor, marks=None, blocked=False, target=None,
+             revealed=True, ratio=1.0):
+        _d = {'sid': sid, 'name': name, 'revealed': revealed, 'ratio': ratio,
+              'score': 0.99, 'marks': list(marks or []), 'anchor': anchor,
+              'top': [(0.99, sid, anchor)]}
+        if blocked:
+            _d['blocked'] = True
+        if target is not None:
+            _d['target'] = target
+        return _d
+
+    # (3,2) 是拉黑块（名字命中黑名单且被 `_cells_for_model` 打了 blocked ✓）
+    _cells66 = {
+        (3, 1): _c66('S00003_001', '草地', (3, 1)),
+        (3, 2): _c66('S50002_001', '沙地', (3, 2), blocked=True, target=False),
+        (3, 3): _c66('S00003_001', '草地', (3, 3)),
+        (3, 4): _c66('S00003_001', '草地', (3, 4)),
+        (3, 5): _c66('S00003_001', '草地', (3, 5)),
+    }
+    _sim66 = _msim66.MapSim.from_observation(_cells66, _sp66.spot_rows())
+    _c66i = _msim66.cell_of
+    _b66_blk = _sim66.board[_c66i(3, 2)]
+    _b66_l = _sim66.board[_c66i(3, 1)]
+    check('v1.66 ③a `blocked` 字段真的进到 `Block`（观测→模型 ✓）',
+          _b66_blk >= 0 and bool(getattr(_sim66.blocks[_b66_blk], 'blocked', False)),
+          'bi=%s' % (_b66_blk,))
+    check('v1.66 ③b ⭐ **拉黑块 `plain` 恒 False**（"不可借道"真的实现了 ✓）'
+          '—— 旧代码这里必然 True（注释写了语义但没实现 ✗）',
+          _sim66.blocks[_b66_blk].plain is False,
+          'plain=%s' % (_sim66.blocks[_b66_blk].plain,))
+    _conn66 = _sim66.connected_plain(_c66i(3, 1))
+    check('v1.66 ③c ⭐⭐ **连锁不许穿过拉黑块**（点 (3,1) ⇒ 只吃左边 1 格，'
+          '**右边 3 格不许被算进来** ✗）—— 用户猜测的正是这条 ✓',
+          _b66_l in _conn66 and _b66_blk not in _conn66
+          and len(_conn66) == 1,
+          '连通片=%s（应只含 bi=%s；含拉黑块 bi=%s = 漏 ✗）'
+          % (sorted(_conn66), _b66_l, _b66_blk))
+    _prob66 = _mv66.Problem(_sim66)
+    _pg66 = _prob66.plain_group(_b66_l)
+    check('v1.66 ③d ⭐⭐ `Problem.plain_group` 同样不跨拉黑块'
+          '（`REP`/`PLAIN_GROUP_MASK` 都是从它推的 ⇒ 一处漏就三处漏 ✗）',
+          _b66_blk not in _pg66 and len(_pg66) == 1,
+          'plain_group=%s' % (sorted(_pg66),))
+    _cache66 = _mv66._build_cache(_prob66)
+    check('v1.66 ③e `REP[拉黑块]` **不等于**左侧空地（否则 A* 走掩码那条路又会串起来 ✗）',
+          _cache66['REP'].get(_b66_blk, _b66_blk) != _cache66['REP'].get(_b66_l, _b66_l),
+          'REP[blk]=%s REP[L]=%s'
+          % (_cache66['REP'].get(_b66_blk), _cache66['REP'].get(_b66_l)))
+    # 负样本（**必须有**）：把 `blocked` 摘掉 ⇒ 必须恢复成"整条 5 格一片"
+    #   ⇒ 证明上面那条不是恒绿（fixture 本身有意义 ✓）
+    _cells66b = {}
+    for _k66b, _v66b in _cells66.items():
+        _v66b = dict(_v66b)
+        _v66b.pop('blocked', None)
+        _cells66b[_k66b] = _v66b
+    _sim66b = _msim66.MapSim.from_observation(_cells66b, _sp66.spot_rows())
+    _conn66b = _sim66b.connected_plain(_c66i(3, 1))
+    check('v1.66 ③f 对照项：摘掉 `blocked` ⇒ **恢复成整条 5 格连通**'
+          '（证明 ③c 不是恒绿、fixture 真的在测东西 ✓）',
+          len(_conn66b) == 5, '连通片=%d 格（应 5）' % len(_conn66b))
+
+    # ── ①②【闸门模型层收口】—— `st['nogo_rc']` 的执行级验证 ──────────────
+    _el66p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _el66 = open(_el66p, encoding='utf-8').read()
+    check('v1.66 ①a `_cells_for_model` 末尾有 `nogo_rc` 收口，且**三件事一起做**'
+          '（blocked + target=False + 清 marks ✓）',
+          "_nogo = st.get('nogo_rc') or ()" in _el66
+          and "_vv['blocked'] = True" in _el66
+          and "_vv['target'] = False" in _el66
+          and "_vv['marks'] = []" in _el66)
+    #   ⚠ 用 `find()` 不用 `index()`：代码被 stash/回退时 `index` 会抛 ValueError
+    #     把本组后面 8 条断言**全吞掉**（牙齿测试只剩一条"守门可运行"红，看不出细节 ✗）
+    _i66_tgt = _el66.find("_vv['target'] = bool(tcfg_mod.is_target(")
+    _i66_ng = _el66.find("_nogo = st.get('nogo_rc') or ()")
+    check('v1.66 ①b ⚠⚠ 收口位置**必须在 `target` 重算之后**'
+          '（放前面会被 `is_target(...)` 冲掉 ✗ —— 与 v1.62 那条"veto 位置"同一个坑）',
+          _i66_tgt >= 0 and _i66_ng > _i66_tgt,
+          'target 重算 idx=%d，nogo 收口 idx=%d' % (_i66_tgt, _i66_ng))
+    check('v1.66 ①c 金币闸门把"按名字命中的商人/宝库"塞进 `nogo_rc`'
+          '（⚠ 光清 `buy`/`buy_hidden` 会被模型层绕过 ✗ —— 真机就是这么买掉宝库的）',
+          "'coin_gate': 'nogo_tagged'" in _el66
+          and "tcfg_mod.is_blocked(_v66.get('name'))" in _el66)
+    check('v1.66 ①d 幸运草闸门把剔掉的大拇指格塞进 `nogo_rc`'
+          '（⚠ 光剔 `mk` 会被 `st[\'obs\']` 回流贴回来 ✗ —— 真机日志实证）',
+          "'clover_gate': 'nogo_tagged'" in _el66
+          and "_nogo66.add(tuple(_rcp))" in _el66)
+    check('v1.66 ①e ⚠ `nogo_rc` 每图重建（`run_one_map` 里 `st` 是**新建 dict**、'
+          '初始键里**没有** `nogo_rc` ⇒ 不跨图残留 ✗）＋ 两处写入都用 `setdefault`'
+          '（不覆盖上一轮塞的 ⇒ 同图内两道闸门**累加** ✓）',
+          "st = {'cold': {}, 'done': set(), 'last': None, 'err': 0, 'stuck': 0," in _el66
+          and "'nogo_rc'" not in _el66.split("st = {'cold': {}, 'done': set()")[1][:220]
+          and _el66.count("st.setdefault('nogo_rc', set())") == 2)
+    check('v1.66 ①f `_vv` 是 `st[\'obs\']` 的**副本**（清 marks 不许污染观测累积 ✗）'
+          '—— 下一轮闸门要能重新判、重新塞 ✓',
+          '_vv = dict(_v)' in _el66)
+    # 执行级：真跑 `_cells_for_model`，确认 nogo 格真的变成 blocked + 非目标 + 无标记
+    _mk66 = {(3, 2): {'marks': ['recommend']}}
+    _lg66 = []
+    _m66 = EL._cells_for_model(
+        {'marks': dict(_mk66), 'obs': dict(_cells66), 'done': set(),
+         'nogo_rc': {(3, 2)}},
+        {'st': dict(_cells66)}, log=_lg66, tag='nogo66', mark_revealed=False)
+    _out66 = _m66.get((3, 2)) or {}
+    _txt66 = ' '.join(str(x) for x in _lg66)
+    check('v1.66 ①g ⭐执行级：`nogo_rc` 里的格**真的**变成 `blocked=True` + '
+          '`target=False` + `marks=[]`（不是只写了代码没生效 ✓）',
+          bool(_out66.get('blocked')) and _out66.get('target') is False
+          and not _out66.get('marks'),
+          'blocked=%s target=%s marks=%s'
+          % (_out66.get('blocked'), _out66.get('target'), _out66.get('marks')))
+    check('v1.66 ①h 执行级：落了 `nogo_applied` 日志（复盘能看见收口生效 ✓）',
+          'nogo_applied' in _txt66, _txt66[:200])
+    # ⚠ 对照：**不带** nogo_rc ⇒ 同一格必须**不被**拉黑（证明上面不是恒真 ✓）
+    #   ⚠ 必须用**没打 `blocked`** 的那份观测（`_cells66b`）——
+    #     否则测的是"夹具自己带的 blocked"，与 `nogo_rc` 那条路无关 ✗（第一版就踩了）
+    _lg66b = []
+    _m66b = EL._cells_for_model(
+        {'marks': dict(_mk66), 'obs': dict(_cells66b), 'done': set()},
+        {'st': dict(_cells66b)}, log=_lg66b, tag='nogo66b', mark_revealed=False)
+    _out66b = _m66b.get((3, 2)) or {}
+    check('v1.66 ①i 对照项：观测里**没打 `blocked`** 且不带 `nogo_rc` ⇒ 同一格**不被**拉黑'
+          '（证明 ①g 真的在测 nogo 那条路 ✓）',
+          not _out66b.get('blocked'), 'blocked=%s' % (_out66b.get('blocked'),))
+
+    # ── ①【禁用兜底：只听规划的】── 源码级 ────────────────────────────────
+    check('v1.66 ①j `FALLBACK_EFF` 默认**关** + 有环境变量开关（回退路径完整 ✓）',
+          "MAPBOT_FALLBACK_EFF" in _el66
+          and "FALLBACK_EFF = (os.environ.get('MAPBOT_FALLBACK_EFF', '0') or '0')" in _el66)
+    check('v1.66 ①k ⭐ `_pact == \'done\'` 分支**保持 `plan_src = \'solver\'`**'
+          '（⚠ 置成 `\'eff\'` 会让下面那段 EffPolicy **照跑** ⇒ "禁用"变成空话 ✗✗）',
+          "_pact == 'done':" in _el66
+          and "st['plan_src'] = 'solver'          # ⛔ 关键：**不置 'eff'**" in _el66)
+    check('v1.66 ①l ⭐ 退图原因**如实报**（`plan_only_giveup` + `why` + `targets_left`）'
+          '—— 不许冒充"目标已清完" ✗',
+          "'finish': 'plan_only_giveup'" in _el66
+          and "'why': _pwhy" in _el66
+          and "'fallback_eff': False" in _el66)
+    # ⚠ 切片段：`done` 分支**后面没有 `elif`**（紧跟着就是 EffPolicy 那段 `if`）
+    #   ⇒ 用 `return 'done'` 收口，否则切片会一路吃到 EffPolicy ✗（第一版就栽在这）
+    #   ⚠ 也不能拿 `[:1400]` 截——分支里有大段中文注释，`return 'done'` 在 1400 之后 ✗
+    _parts66 = _el66.split("_pact == 'done':")[1].split("return 'done'")
+    check('v1.66 ①m ⚠ 返回 **`\'done\'`** 不是 `\'stuck\'`**'
+          '（`run()` 里 stuck/blank 连着 2 张会**停掉整局** ⇒ 退图是正常行为，不能停局 ✗）'
+          '＋ 这段里**一次都没有** `return \'stuck\'`',
+          len(_parts66) >= 2 and "return 'stuck'" not in _parts66[0],
+          '分支里出现 `return \'stuck\'` = 会连停整局 ✗' if len(_parts66) >= 2
+          else '压根没找到 `return \'done\'` ⇒ 退图语义丢了 ✗')
+    check('v1.66 ①n ⭐ `_buy_first`（未规划目标插队）**只在兜底模式下**生效'
+          '（它是旧世界遗留；`FOLLOW_PLAN_ONLY` 之后点序由 `st[\'plan\']` 说了算 ⇒ '
+          '再插队就与"只听规划的"直接冲突 ✗）',
+          'if FALLBACK_EFF:' in _el66
+          and "'buy_first': 'skipped_plan_only'" in _el66)
+    check('v1.66 ①o 结构级：`done` 分支里**没有** `st[\'plan_src\'] = \'eff\'`'
+          '（置了它 ⇒ 下面 EffPolicy 那段立刻接管 ⇒ 用户口径①被架空 ✗）',
+          "st['plan_src'] = 'eff'" not in _parts66[0],
+          '⚠ 分支片段里出现 `plan_src = \'eff\'` ⇒ "禁用兜底"是空话 ✗')
+
+    # ── ②【幸运草闸门为什么没生效】—— 把根因钉成断言 ──────────────────────
+    check('v1.66 ②a ⚠⚠ 根因固化：`_cells_for_model` 会把 `st[\'obs\']` 的标记**贴回** '
+          '`marks`（`if _mlist: _vv[\'marks\'] = _mlist`）—— 这就是闸门被绕过的通道 ✗',
+          "if _mlist:" in _el66 and "_vv['marks'] = _mlist" in _el66,
+          '⚠ 这条是**病根**不是修复：它必须与 ①d/①g 的 `nogo_rc` 收口同时存在 ✓')
+except Exception as _e66:       # noqa: BLE001
+    check('v1.66 守门可运行（%r）' % (_e66,), False)
 
 print()
 print('=' * 78)

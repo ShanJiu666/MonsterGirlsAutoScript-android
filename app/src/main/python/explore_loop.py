@@ -1239,6 +1239,54 @@ def _cells_for_model(st, c, log=None, tag='solver', mark_revealed=True,
             except Exception:           # noqa: BLE001
                 pass
             _out[_k] = _vv
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⭐⭐⭐⭐ v1.66【本图「不碰」格 —— **模型层收口**】
+    #
+    #   ## 治什么（两条闸门都被模型层绕过 ✗）
+    #     v1.63b（金币）/ v1.63c（幸运草）两道闸门都只改**执行侧**的汇聚点：
+    #       · 金币闸门清 `buy` / `buy_hidden`
+    #       · 幸运草闸门剔 `marked` / `mk`
+    #     可**规划器喂的是另一份数据**（`_cells_for_model` → `MapSim` → `Problem`）：
+    #       ① `Problem.targets` 由 `row['want']` 算，而 `want` = `cell['target']`
+    #          = `tcfg_mod.is_target(名字, sid, marks)` ⇒ **商人/宝库按"名字"照样进目标** ✗
+    #          （`is_target` 只看名字 ⇒ 清 `buy` 对它**毫无影响**）
+    #       ② 标记那半：本函数上面 `if _mlist: _vv['marks'] = _mlist` 会把
+    #          **`st['obs']` 里累积的标记**重新贴回去 ⇒ 闸门从 `mk` 剔掉的 recommend
+    #          又被贴回来 ⇒ 目标照旧 ✗
+    #     ⇒ 结果就是用户报的：**金币闸门判对了、兜底策略照样把黄金宝库买了** ✗✗
+    #       （`_tmpman/devlog/mgas_log.txt` 第 2 张图：`block_buy` ⇒ `plan exhausted`
+    #        ⇒ `eff ok` ⇒ `tap vault_panel_by_dlg`）
+    #     ⚠ 这是**同一类"静默失效"的第三次**（v1.62 veto 被冲掉 / v1.63 band 裁掉 HUD
+    #       / 本次闸门改错层）⇒ 教训固化成一句：**闸门必须改在"模型读的那份数据"上** ✓
+    #
+    #   ## 修法：`st['nogo_rc']`（本图不碰格集合，逐图重建 ✓）
+    #     两个闸门各自把"判掉的格"塞进去（`(r,c)` 坐标）；
+    #     本函数在**所有字段算完之后**统一收口 ⇒ 三件事一起做：
+    #       · `blocked=True`  ⇒ ① 不进候选（`blocked_mask`）② **非空地**（v1.66 新修：
+    #                            `Block.plain` 见 `blocked` 即 False ⇒ 阻断连锁穿透）
+    #       · `target=False`  ⇒ 不进 `Problem.targets`（**唯一**的目标来源 ✓）
+    #       · `marks=[]`      ⇒ 连带把 `is_target(mark=…)` / `block_cost` 的标记影响清掉
+    #     ⚠ 必须放在**最后**（`target` 在上面 L1237 才被重算 ⇒ 早放会被冲掉 ✗，
+    #       与 v1.62 那条"veto 位置"是同一个坑）
+    #     ⚠ `_vv` 是 `st['obs']` 的**副本**（`dict(_v)`）⇒ 清 `marks` **不会**污染观测累积 ✓
+    #       （下一轮闸门会重新判、重新塞 ⇒ 决策每轮都是新鲜的 ✓）
+    _nogo = st.get('nogo_rc') or ()
+    if _nogo:
+        _nogo_hit = []
+        for _k in _nogo:
+            _vv = _out.get(_k)
+            if not isinstance(_vv, dict):
+                continue
+            _vv['blocked'] = True
+            _vv['target'] = False
+            _vv['marks'] = []
+            _nogo_hit.append(_k)
+        if _nogo_hit and log is not None:
+            log.append({tag: 'nogo_applied', 'n': len(_nogo_hit),
+                        'cells': ['%d,%d' % k for k in sorted(_nogo_hit)[:12]],
+                        'note': '本图不碰格（金币/幸运草闸门）⇒ 模型层收口：'
+                                'blocked + 非目标 + 清标记 ✓'
+                                '（只改执行侧会被模型层绕过 ✗ —— v1.66 的根因）'})
     if _dropped and log is not None:
         log.append({tag: 'done_cells_dropped', 'n': len(_dropped),
                     'cells': ['%d,%d' % k for k in _dropped[:12]]})
@@ -1395,6 +1443,36 @@ PLAN_MAX_STEPS = int(os.environ.get('MAPBOT_PLAN_MAX_STEPS', '10') or 10)
 PLAN_ONCE = (os.environ.get('MAPBOT_PLAN_ONCE', '1') or '1') \
     not in ('0', '', 'no', 'false')
 
+# ⭐⭐⭐ v1.66【禁用兜底策略（EffPolicy）—— 用户口径：「**只听规划的**」】
+#   用户 2026-10-06 原话：
+#     「刚刚真机那边的脚本靠兜底策略又购买了黄金宝库。。**禁用兜底策略**，
+#       规划执行完就算还有目标也**直接退**，**只听规划的**」
+#
+#   ## 治什么（真机铁证，`_tmpman/devlog/mgas_log.txt` 第 2 张图）
+#     L150 `{"coin_gate":"block_buy","coin":165531,…,"allow_buy":false}` ⇒ 闸门**判对了** ✓
+#     L177 `{"plan":"exhausted","targets_left":1}` ⇒ 计划走完，还剩 1 个目标
+#     L178-184 `{"eff":"ok","steps":16,…}` ⇒ **兜底策略接管**
+#     L186 `{"tap":"vault_panel_by_dlg",…}` ⇒ **兜底策略把黄金宝库买了** ✗✗
+#     ⇒ 金币闸门只清了 `buy`/`buy_hidden`（那是"要买的目标"的汇聚点），
+#       而 **EffPolicy 走的是另一条路**：它直接看模型的 `plain`/目标块 ⇒
+#       清 `buy` 对它**无效** ⇒ 闸门被绕过 ✗（与 v1.62/v1.63 同一类"静默失效"）
+#
+#   ## 用户口径的完整含义（两条一起）
+#     ① **不再切兜底**：计划走完 / 推不动 ⇒ **不再换 EffPolicy**
+#     ② **直接退图**：即使还有目标 ⇒ 也退（退图原因必须**如实**报，不冒充"目标已清完"）
+#     ⚠ 退图走 `return 'done'`（**不是 'stuck'**）—— `run()` 里
+#       `why in ('stuck','blank')` 连着 2 张会**停掉整局**；退图是用户要的正常行为，
+#       不能因为"还有目标"就把整局停了 ✗
+#
+#   ## 开关（可现场回退，不用改代码 ✓）
+#     `MAPBOT_FALLBACK_EFF=1` ⇒ 恢复旧行为（切 EffPolicy + 宝库直接点先点）
+#     ⚠ 默认 **0 = 关**（用户口径）；它同时管住 `_buy_first` 那条"绕过规划的先点"✓
+FALLBACK_EFF = (os.environ.get('MAPBOT_FALLBACK_EFF', '0') or '0') \
+    not in ('0', '', 'no', 'false')
+
+# 精确解算连着几次算不出 ⇒ 判本图"无解"（**只在禁用兜底时有意义** ✓）
+PLAN_GIVEUP_TRIES = 3
+
 
 def plan_mode(st, rest_n, targets_left, once=None):
     """规划口径决策（纯函数，`once` 可注入 ⇒ 两种模式都能离线对拍 ✓）
@@ -1432,14 +1510,21 @@ def plan_next(st, rest_n, targets_left):
             st['plan_stuck'] = 0
         st['plan_prev_len'] = rest_n
         if st.get('plan_stuck', 0) >= PLAN_STUCK_ROUNDS:
-            return 'eff', 'stuck'
+            # ⭐ v1.66：禁用兜底 ⇒ 不再切 EffPolicy，改为**本图收工**（用户口径 ✓）
+            return ('eff', 'stuck') if FALLBACK_EFF else ('done', 'stuck')
         return 'keep', 'has_rest'
     st['plan_stuck'] = 0
     st['plan_prev_len'] = 0
     if not st.get('planned'):
+        # ⭐ v1.66：精确解算连着 `PLAN_GIVEUP_TRIES` 轮算不出 ⇒ 本图**无解** ⇒ 收工
+        #   （禁用兜底时才有这条；开着兜底照旧去切 EffPolicy ✓）
+        if (not FALLBACK_EFF) and st.get('plan_tries', 0) >= PLAN_GIVEUP_TRIES:
+            return 'done', 'no_solution'
         return 'plan', 'first'
     if targets_left > 0:
-        return 'eff', 'exhausted'
+        # ⭐⭐⭐ v1.66【用户口径的核心】：「规划执行完就算还有目标也**直接退**」✓
+        #   ⚠ 这里**不是**失败 —— 是"规划器认为剩下的目标拿不到"⇒ 诚实退图 ✓
+        return ('eff', 'exhausted') if FALLBACK_EFF else ('done', 'exhausted')
     return 'none', 'no_targets'
 
 
@@ -8486,6 +8571,34 @@ def one_round(b, log, rnd, prefix, st):
         _nb, _nh = len(buy), len(buy_hidden)
         buy = []
         buy_hidden = []
+        # ⭐⭐⭐⭐ v1.66【**模型层收口**】—— 光清 `buy`/`buy_hidden` 不够 ✗
+        #   规划器读的是 `_cells_for_model()` 那份模型，而里面的 `target` 是
+        #   **按名字重算**的（`tcfg_mod.is_target(名字,…)`）⇒ 商人/宝库**照样进
+        #   `Problem.targets`** ⇒ 兜底策略（EffPolicy）直接读模型 ⇒ 照样去买 ✗✗
+        #   真机铁证（`_tmpman/devlog/mgas_log.txt` 第 2 张图）：
+        #     `{"coin_gate":"block_buy","coin":165531,"allow_buy":false,"dropped_hidden":1}`
+        #     ⇒ `{"plan":"exhausted","targets_left":1}` ⇒ `{"eff":"ok","steps":16}`
+        #     ⇒ `{"tap":"vault_panel_by_dlg","at":[972,1650]}`  ← **宝库被买了** ✗✗
+        #   ⇒ 把"按名字命中的商人/宝库格"塞进 `st['nogo_rc']`（本图不碰格 ✓）
+        #     `_cells_for_model()` 末尾统一收口：blocked + 非目标 + 清标记 ✓
+        try:
+            _nogo = st.setdefault('nogo_rc', set())
+            _base66 = st.get('obs') or (c.get('st') or {})
+            _nv66 = []
+            for _k66, _v66 in _base66.items():
+                if not isinstance(_v66, dict):
+                    continue
+                if tcfg_mod.is_blocked(_v66.get('name')):
+                    _nogo.add(tuple(_k66))
+                    _nv66.append(tuple(_k66))
+            if _nv66 and log is not None:
+                log.append({'coin_gate': 'nogo_tagged', 'n': len(_nv66),
+                            'cells': ['%d,%d' % k for k in sorted(_nv66)[:12]],
+                            'note': '金币不足 ⇒ 商人/宝库进 `nogo_rc` ⇒ '
+                                    '**模型层**也看不到它们 ✓'
+                                    '（只清 buy 会被模型层绕过 ✗ —— v1.66 根因）'})
+        except Exception:           # noqa: BLE001
+            pass
         if (_nb or _nh) and log is not None:
             log.append({'coin_gate': 'block_buy', 'coin': _coin_now,
                         'min_buy': COIN_MIN_BUY,
@@ -8645,6 +8758,27 @@ def one_round(b, log, rnd, prefix, st):
                 marked = _kept
                 for _rcp in _dropped:
                     mk.pop(_rcp, None)          # ⚠ 同步从 `mk` 里剔（下游多处读它 ✓）
+                # ⭐⭐⭐⭐ v1.66【**模型层收口**】—— 剔 `mk` 不够 ✗
+                #   `_cells_for_model()` 喂模型时，会把 `st['obs']` 里**累积的标记**
+                #   重新贴回 `marks`（见那里 `if _mlist: _vv['marks'] = _mlist`）
+                #   ⇒ 刚剔掉的大拇指**又回到模型里** ⇒ 求解器照样把它排进点序 ✗✗
+                #   真机铁证（`_tmpman/devlog/mgas_log.txt` 第 0 张图）：
+                #     `{"clover_gate":"drop_recommend","clover":1,"min":8,"cells":["2,4"]}`
+                #     ⇒ `plan_block ... "cell":"2,4" ... "marks":"recommend"` ← **又回来了** ✗
+                #   ⇒ 塞进 `st['nogo_rc']` ⇒ `_cells_for_model()` 末尾统一收口 ✓
+                try:
+                    _nogo66 = st.setdefault('nogo_rc', set())
+                    for _rcp in _dropped:
+                        _nogo66.add(tuple(_rcp))
+                    if log is not None:
+                        log.append({'clover_gate': 'nogo_tagged',
+                                    'n': len(_dropped),
+                                    'cells': ['%d,%d' % k for k in _dropped[:12]],
+                                    'note': '幸运草不足 ⇒ 大拇指格进 `nogo_rc` ⇒ '
+                                            '**模型层**也看不到它们 ✓'
+                                            '（只剔 mk 会被 obs 回流贴回来 ✗ —— v1.66 根因）'})
+                except Exception:       # noqa: BLE001
+                    pass
                 entry['recommend_dropped'] = len(_dropped)
                 if log is not None:
                     log.append({'clover_gate': 'drop_recommend',
@@ -9257,13 +9391,25 @@ def one_round(b, log, rnd, prefix, st):
                 if not _so.get('no_targets'):
                     st['plan_tries'] = st.get('plan_tries', 0) + 1
                     if st['plan_tries'] >= 3:
-                        st['plan_src'] = 'eff'
-                        say('       · 进图规划连续 %d 轮没算出 ⇒ 本图直接用片感知兜底'
-                            '（EffPolicy）' % st['plan_tries'])
-                        try:        # ⭐ 悬浮条也告诉用户"这图改走兜底策略了" ✓
-                            status('规划：改用片感知兜底（精确解算没出结果）')
-                        except Exception:       # noqa: BLE001
-                            pass
+                        if FALLBACK_EFF:
+                            st['plan_src'] = 'eff'
+                            say('       · 进图规划连续 %d 轮没算出 ⇒ 本图直接用片感知兜底'
+                                '（EffPolicy）' % st['plan_tries'])
+                            try:        # ⭐ 悬浮条也告诉用户"这图改走兜底策略了" ✓
+                                status('规划：改用片感知兜底（精确解算没出结果）')
+                            except Exception:       # noqa: BLE001
+                                pass
+                        else:
+                            # ⭐ v1.66：禁用兜底 ⇒ 不切 EffPolicy；`plan_tries` 已到 3
+                            #   ⇒ 下一轮 `plan_next` 直接给 `('done','no_solution')` ⇒ 退图 ✓
+                            #   （这里**不立刻 return**：本轮可能还有别的活要收尾，
+                            #     交给下一轮的 `plan_mode` 统一处置更干净 ✓）
+                            say('       · 进图规划连续 %d 轮没算出 ⇒ **只听规划的**：'
+                                '本图算无解（不切兜底策略 ✓）' % st['plan_tries'])
+                            try:
+                                status('只听规划的 · 精确解算算不出 ⇒ 退图')
+                            except Exception:       # noqa: BLE001
+                                pass
         elif _pact == 'eff':
             st['plan'] = []
             st['plan_src'] = 'eff'
@@ -9277,6 +9423,36 @@ def one_round(b, log, rnd, prefix, st):
                 say('       · 计划连着 %d 轮没推进（格子点不动/被挡）⇒ 切回片感知兜底 ✓'
                     % PLAN_STUCK_ROUNDS)
                 status('计划推不动 · 改用兜底策略')
+        elif _pact == 'done':
+            # ⭐⭐⭐ v1.66【禁用兜底 ⇒ **只听规划的**：计划走完/推不动就退图】
+            #   用户 2026-10-06 原话：「禁用兜底策略，规划执行完**就算还有目标也直接退**，
+            #     **只听规划的**」
+            #   ⚠ 这里**不切 EffPolicy**（`plan_src` 保持 `solver` ⇒ 下面 `if plan_src=='eff'`
+            #     那一支整段不执行 ⇒ **EffPolicy 一步都不会点** ✓ 这才是"禁用"的实现）
+            #   ⚠ 退图原因**如实报**（不冒充"目标已清完" ✗）：
+            #     · `exhausted`   —— 计划走完但还有目标（规划器认为剩下的拿不到）
+            #     · `stuck`       —— 连着 `PLAN_STUCK_ROUNDS` 轮推不动
+            #     · `no_solution` —— 精确解算连着 `PLAN_GIVEUP_TRIES` 轮算不出
+            #   ⚠ 返回 **'done'**（退图）**不是 'stuck'**：`run()` 里
+            #     `why in ('stuck','blank')` 连着 2 张会**停掉整局**；
+            #     退图是用户明确要的正常行为 ⇒ 不能把整局停掉 ✗
+            st['plan'] = []
+            st['plan_src'] = 'solver'          # ⛔ 关键：**不置 'eff'** ⇒ 兜底不启动 ✓
+            _sol = None
+            log.append(entry)
+            log.append({'finish': 'plan_only_giveup', 'why': _pwhy,
+                        'targets_left': _tleft,
+                        'fallback_eff': False,
+                        'note': 'v1.66 禁用兜底 ⇒ 只听规划的：计划走完/推不动就退图 ✓'
+                                '（**不切 EffPolicy**、也不冒充"目标已清完" ✗）'})
+            say('   · 计划%s ⇒ **只听规划的**：本图收工（不切兜底策略 ✓；'
+                '还剩 %d 个目标没拿）'
+                % ('走完' if _pwhy == 'exhausted' else '推不动', _tleft))
+            try:
+                status('只听规划的 · 计划走完就退图')
+            except Exception:       # noqa: BLE001
+                pass
+            return 'done'
         # ⭐⭐ 2026-09-28：EffPolicy 兜底 —— 每轮用**最新观测**现算点序（毫秒级 ✓）
         if st.get('plan_src') == 'eff' and c.get('st'):
             _eff = eff_order(st, c, log=log, max_steps=20)
@@ -9446,13 +9622,37 @@ def one_round(b, log, rnd, prefix, st):
     #   ⇒ 第一下永远是**开路格**；枯木丛林那类图的开路格常触发"拦路"战斗
     #   ⇒ 用户看到的就是"宝库就摆在眼前，机器人先去打了两个战斗地块"✗
     #   ⇒ 宝库是 1 体力、点完就买；直接把它放最前（面板流程照旧接管 ✓）
-    try:
-        _buy_first = [p for p in buy if p not in done]
-        if _buy_first:
-            order = _buy_first + list(order)
-            entry['buy_first'] = ['%d,%d' % cell_of(*p) for p in _buy_first]
-    except Exception:       # noqa: BLE001
-        pass
+    #
+    #   ⭐⭐⭐⭐ v1.66【**这段也必须受"只听规划的"管辖**（用户口径①）】
+    #     用户原话（2026-10-06）：
+    #       「**禁用兜底策略，规划执行完就算还有目标也直接退，只听规划的**」
+    #     本段是**唯一**一处"绕过规划直接插到点序最前"的地方 ⇒ 与上面那句直接冲突 ✗
+    #     而且它是**旧世界（FOLLOW_PLAN_ONLY 之前）的遗留**：
+    #       · 那时 `order` 是启发式拼的（开路格 + 目标交替）⇒ 才需要"宝库提前" ✓
+    #       · 现在 `FOLLOW_PLAN_ONLY=True` ⇒ `order` 起手是空的，**点序完全由
+    #         `st['plan']` 决定**（求解器把宝库/商人算进 `Problem.targets` ✓，
+    #         见 `targets_cfg.DEFAULT_ON` 含 `旅行商人`/`黄金宝库`）
+    #       ⇒ 宝库**该点的时候规划自己会排**，不需要这里再插一次 ✓
+    #     ⚠ 但**不能删** —— 它是 `MAPBOT_FALLBACK_EFF=1`（兜底模式）下的既有行为，
+    #       回退路径必须完整（门禁 v1.66 ⑤ 守着）✓
+    #     ⚠⚠ 这条与"金币闸门"是**两道独立的门**：闸门管"要不要买"（钱够不够），
+    #       本条管"谁说了算"（规划 vs 旧启发式）⇒ 两处都得有 ✓
+    if FALLBACK_EFF:
+        try:
+            _buy_first = [p for p in buy if p not in done]
+            if _buy_first:
+                order = _buy_first + list(order)
+                entry['buy_first'] = ['%d,%d' % cell_of(*p) for p in _buy_first]
+        except Exception:       # noqa: BLE001
+            pass
+    elif buy and log is not None and not st.get('_buy_first_skip_logged'):
+        # 只报一次（防刷屏）：让复盘者知道"这里有目标没插队"是**故意的** ✓
+        st['_buy_first_skip_logged'] = True
+        log.append({'buy_first': 'skipped_plan_only',
+                    'n': len(buy),
+                    'note': '只听规划的（v1.66 用户口径）⇒ **不把未规划的目标插到最前** ✓'
+                            '（宝库/商人由求解器排进 `st[plan]`；'
+                            '要恢复旧行为设 `MAPBOT_FALLBACK_EFF=1`）'})
     # ⭐ 2026-09-26：按格累计「点了画面完全没反应」（跨轮持久，见下方拉黑逻辑）
     _nc = st.setdefault('nochange', {})
     cands = [x for x in order if x not in done

@@ -3647,3 +3647,170 @@ shift = screenH - REF_H*kx         // 2772 - 2275.6 = 496.4（>0 ⇒ anchored）
 #### 新增探针
 
 `tools/probe_hud_devframe.py` —— 真机帧 → 参考系**反算** ＋ 窗口命中 ＋ `topInset` 自洽性
+
+---
+
+### 6.64 ⭐⭐⭐⭐⭐ v1.66 「**禁用兜底：只听规划的**」＋ 闸门**模型层收口** ＋ 拉黑块**阻断连锁**（2026-10-06）
+
+> 用户三条口径（原话）：
+> ① 「刚刚真机那边的脚本**靠兜底策略又购买了黄金宝库**。。**禁用兜底策略**，
+>    规划执行完**就算还有目标也直接退**，**只听规划的**」
+> ② 「顺便看看真机这几把的日志，看看**为什么幸运草都低于8了，为什么还要打大拇指地块**」
+> ③ 「最近一次的日志，规划出了问题，我猜测是**把拉黑的方块认为已经可以连锁通过了**？
+>    也可能是把宝箱认为可以连锁通过了」
+
+#### ⭐⭐⭐ 一句话：三条**都不是"判据写错"，而是"判据改在了错的层"**
+
+这是本项目**第四次**同一族的 bug（v1.62「veto 被冲掉」→ v1.63「band 裁掉 HUD ⇒
+闸门拿不到数据」→ v1.64「`mk` 是 dict 不是 list」→ 本次）。三次的共同形状：
+
+```
+在 A 处改了状态，但真正做决策的地方读的是 B 处的另一份数据
+⇒ 判据静默失效、fail-open、不报错、不崩、门禁还可能全绿 ✗
+```
+
+| # | 用户看到的现象 | 真根因（代码级） | 改在哪一层 |
+|---|---|---|---|
+| ① | 金币 <50 万还是买了黄金宝库 | `EffPolicy` **直接读模型**，清 `buy`/`buy_hidden` 对它**毫无影响** | 规划器选择层 |
+| ② | 幸运草 <8 还是打大拇指格 | 闸门剔的是 `mk`，而 `_cells_for_model` 会把 `st['obs']` 里**累积的标记贴回来** | 模型输入层 |
+| ③ | 计划点了雾格 / 连片被高估 | `Block.blocked` 注释写着「不可点、**不可借道**」，但 `plain` 系**从没判过它** | 语义实现层 |
+
+#### ① 禁用兜底 ⇒ 只听规划的
+
+**真机铁证**（`devlog` map 2）：`block_buy`（金币闸门生效 ✓）⇒ `plan exhausted` ⇒
+`eff ok` ⇒ `tap vault_panel_by_dlg` ⇒ **宝库被买了** ✗
+
+- 新增 `FALLBACK_EFF`（env `MAPBOT_FALLBACK_EFF`，**默认关**）
+- `plan_next()` 的两条 `eff` 出口改成双形态：
+  `return ('eff', 'exhausted') if FALLBACK_EFF else ('done', 'exhausted')`（`stuck` 同理）
+- 新增 `_pact == 'done'` 分支：`st['plan'] = []` ＋ **`st['plan_src'] = 'solver'`**
+  （⛔ 关键：**不置 `'eff'`** ⇒ 下面那段 `if plan_src == 'eff'` 整段不执行
+  ⇒ **EffPolicy 一步都不会点** —— 这才是"禁用"的真正实现 ✓）
+- ⚠ 退图原因**如实报**（`finish: plan_only_giveup` ＋ `why` ＋ `targets_left`），
+  **不冒充"目标已清完"** ✗
+- ⚠⚠ 返回 **`'done'`** 不是 `'stuck'`：`run()` 里 `why in ('stuck','blank')` 连着 2 张会
+  **停掉整局**；退图是用户明确要的**正常行为** ⇒ 不能把整局停掉 ✗
+- ⚠ `_buy_first`（把未规划的宝库插到点序最前）**只在兜底模式下**生效
+  （`FOLLOW_PLAN_ONLY` 之后点序由 `st['plan']` 说了算 ⇒ 再插队与口径①直接冲突 ✗）；
+  默认走 `elif` 记一条 `buy_first: skipped_plan_only`
+
+#### ② 幸运草闸门为什么"看起来没生效"
+
+真机日志（`devlog` map 0）：`clover_gate drop_recommend cells ["2,4"]` ✓ 闸门**触发了**，
+可同一张图的 `plan_block` 里 `"cell":"2,4" … "marks":"recommend"` —— **它又回来了** ✗
+
+**根因**：`_cells_for_model()` 里有这一行
+
+```python
+_mlist = list((_mk_all.get(_k) or {}).get('marks') or [])
+if _mlist:
+    _vv['marks'] = _mlist        # ← 从 st['obs'] 累积的标记贴回来
+```
+
+⇒ 闸门剔 `mk`、模型层从 `obs` 贴回 ⇒ **闸门被绕过** ✗
+
+#### ③ 拉黑块"不可借道"从没实现（**用户猜对了前半句**）
+
+用户猜「把拉黑的方块认为已经可以连锁通过了」⇒ **正是这条** ✓
+（后半句只对"雾里的宝箱"，见 `fog_flat` 那支）
+
+**真机铁证**（`devlog3`，2026-10-06 00:07，47 行）：
+- `L31 {"solver":"blocked_cells_tagged","n":1,"cells":["2,4"]}` ⇒ 拉黑**打上了** ✓
+- `L37 plan_block i=0 cell="2,5" plain=true group=["1,1","1,4","1,5",…,"+13"] gn=19`
+  ⇒ 计划第一步的连通片 **19 格**，而 `2,4` 就在这片里
+- `L41 {"tap":"fogged_noop","cell":"5,1","ratio":0.655,"streak":1}`
+  ⇒ 模型以为「点 `2,5` ⇒ 19 格连片全消 ⇒ `4,1` 被消耗 ⇒ `5,1` 变可点」，
+    **可真机点下去它还是雾**（0.655）✗✗
+
+**为什么 v1.44 打了 `blocked` 标还是漏**：`Block.blocked` 的注释（`mapsim.py:170-177`）
+写着语义是「不可点、**不可借道**」，可代码里**从来没有实现"不可借道"** ✗
+
+| 位置 | 判据 | 漏了吗 |
+|---|---|---|
+| `mapsim.connected_plain()` | 只判 `blk.plain` | ✗ |
+| `mapsolve.Problem.plain_group()` | 只判 `_nb_b.plain` | ✗ |
+| `mapsolve._build_cache` 的 `REP` / `PLAIN_GROUP_MASK` | 从 `plain_group` 推出 | ✗（连带） |
+| `solve().visible(m)` 的 `out &= ~blocked_mask` | 只挡"**当候选动作**" | 挡不住"**当通路**" ✗ |
+
+⚠ **两件事别混**：`blocked_mask` 挡的是"能不能点它"，
+"连锁能不能穿过它"是**另一条**通路 ⇒ 只改前者等于没改 ✓
+
+**修法（一处收口）**：`Block.plain` **最前面**加
+
+```python
+if getattr(self, 'blocked', False):
+    return False          # 拉黑块：不可点、**不可借道**（阻断连锁穿透 ✓）
+```
+
+⇒ 自动同时修好四件事（都是 `plain` 的下游 ✓）：
+`connected_plain` / `plain_group` / `REP` / `PLAIN_GROUP_MASK`
+
+这正是 v0.99 注释（`explore_loop.py:1013-1015`）早就写下的**正确语义**：
+「拉黑格 = **一个不可点的普通内容格**（游戏里它同样**阻断连锁穿透** ✓）」
+
+⚠ **代价字段不受影响**：拉黑块被 `blocked_mask` 排除在候选之外（永不入选），
+而 `h()` 只数 `targets_mask` ⇒ `block_cost` 走 `size` 分支也无副作用 ✓
+⚠ **PC 端有同一个洞**（`mapbot_pc/mapsim.py:168` 的 `plain` 也没判 `blocked`）
+—— 本条**只在手机端落地**，PC 仓不动（两端平行独立开发 ✓）
+
+#### ⭐ 两条闸门都改成"**模型层收口**"：`st['nogo_rc']`
+
+两条闸门原来只改**执行侧**（`buy`/`buy_hidden`/`marked`/`mk`），而规划器读的是
+`_cells_for_model()` 的输出 ⇒ 被绕过。现在统一加一个**本图不碰格集合**：
+
+- 金币闸门：把"按名字命中的商人/宝库格"塞进去（`tcfg_mod.is_blocked(name)`）
+- 幸运草闸门：把剔掉的大拇指格塞进去
+- `_cells_for_model()` **末尾统一收口**（⚠ 位置**必须在 `target` 重算之后**，
+  否则会被 `is_target(...)` 冲掉 —— 与 v1.62 那条"veto 位置"**同一个坑** ✗）：
+
+```python
+_nogo = st.get('nogo_rc') or ()
+if _nogo:
+    for _k in _nogo:
+        _vv = _out.get(_k)
+        if not isinstance(_vv, dict):
+            continue
+        _vv['blocked'] = True
+        _vv['target'] = False
+        _vv['marks'] = []
+```
+
+- ⚠ `_vv` 是 `st['obs']` 的**副本**（`dict(_v)`）⇒ 清 `marks` **不污染观测累积** ✓
+  （下一轮闸门要能重新判、重新塞 ✓）
+- ⚠ `nogo_rc` **每图重建**（`run_one_map` 里 `st` 是新建 dict、初始键里没有它）
+  ⇒ 不跨图残留 ✓；两处写入都用 `setdefault` ⇒ 同图内两道闸门**累加** ✓
+- ⚠⚠ **新引入的风险（需真机观察）**：进了 `nogo_rc` 的格会变 `blocked`
+  ⇒ **同时变"非空地"** ⇒ 它**也阻断连锁**。对大拇指格这符合 v0.99 语义，
+  但若某格是唯一通路，图可能变得不可解。**若真机出现过阻断，修法是只置
+  `target=False`、保持 `blocked=False`**（已记在未决事项里）
+
+#### 门禁
+
+**780 项 / 780 通过 / 0 失败 / 跳过 1**（754 → 780）
+
+- 改写 **5 条**过时断言（`v1.28 ④`/`⑤`/`⑩`/`⑫` ＋ `_cases45` 表 ＋ ③b）为**双形态**：
+  开关关 ⇒ 新 `done` 行为；开关开 ⇒ **复现旧 `eff` 行为** ✓
+- 新增 **v1.66 组 26 条**，其中三条是**执行级**（不是查字符串）：
+  - **③b~③f 拉黑块阻断连锁**：造"1 行 5 格走廊 + 正中一个拉黑块"的夹具 ⇒
+    断言 `plain is False`、`connected_plain` **只吃左边 1 格**、
+    `plain_group` 不跨它、`REP[blk] != REP[L]`；
+    ⚠ **带对照项**（摘掉 `blocked` ⇒ 恢复整条 5 格连通）证明**不是恒绿** ✓
+  - **①g~①i `nogo_rc` 收口**：真跑 `_cells_for_model()` ⇒ 断言那一格真的变成
+    `blocked=True` ＋ `target=False` ＋ `marks=[]`、日志落了 `nogo_applied`；
+    ⚠ 对照项**必须用没打 `blocked` 的那份观测**（第一版用了带 `blocked` 的
+    ⇒ 测的是夹具自己、与 `nogo_rc` 那条路无关 ✗，被门禁当场抓出）
+  - **①o 结构级**：`done` 分支里**没有** `st['plan_src'] = 'eff'`
+    （置了它 ⇒ EffPolicy 立刻接管 ⇒ 口径①被架空 ✗）
+- ⚠ 断言写法两个坑（都在本次踩到、已修）：
+  - `done` 分支**后面没有 `elif`**（紧跟 EffPolicy 那段 `if`）⇒
+    用 `split('elif ')` 切片会**一路吃到 EffPolicy** ⇒ 假红 ✗ ⇒ 改用 `return 'done'` 收口
+  - `str.index()` 在代码被 stash 时抛 `ValueError` ⇒ **把本组后面 8 条断言全吞掉**
+    （牙齿测试只剩一条"守门可运行"红，看不出细节 ✗）⇒ 改用 `find()` ＋ 显式判 `>= 0`
+- **牙齿**：`git stash` `explore_loop.py` ＋ `mapsim.py` ⇒ **12 项红 / exit 1** ✓
+  其中 `③e` 那行 `REP[blk]=0 REP[L]=0` 正是"拉黑块被并进同一片"的**铁证**
+- 四个面板自检 **exit 0** ✓
+
+#### 交付
+
+- 待出包：`MGAS-v1.66-release.apk`
+- ⚠ **装机后截图权限必掉** ⇒ 需在界面上点一次「① 授权截图」
