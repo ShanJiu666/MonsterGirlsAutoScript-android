@@ -2894,6 +2894,50 @@ COIN_HUD_Y = (15, 65)          # **第 1 行**（金币 cy≈40；与幸运草�
 COIN_MIN_BUY = 500000
 
 
+def _hud_number(items, x_win, y_win):
+    """从 `items` 里取「落在窗口内的那个数字」—— 读不到返回 None（**不猜** ✓）
+
+    ⭐⭐⭐ v1.64 抽出（`coin_count` / `clover_count` 共用）＋ **按 x 拼接**：
+      ⚠⚠ 起初两处都写的是 `max(候选)`，但**万一 OCR 把 `165531` 拆成 6 个单字符条目**，
+        `max(1,6,5,5,3,1) = 6` ⇒ **静默读成一个错误的数**（比读不到更糟 ✗✗）
+        ⇒ 现在：把窗口内的纯数字条目**按 cx 从左到右拼起来** ✓
+           · OCR 给整串（`"165531"`）⇒ 拼接结果就是它本身 ✓
+           · OCR 拆成单字符 ⇒ 拼回 `"165531"` ✓（两种都正确 ✓）
+      ⚠ 拼接长度 > 12 位 ⇒ 判为"窗口里混进了别的东西"⇒ 返回 None（**不猜** ✓）
+
+    ## 为什么必须**分行**（本项目最坑的一处）
+      手机端实测（`tools/probe_clover_row.py`，6 张真机帧**分行**量白字簇）：
+        · **金币**在 **第 1 行**（`cy≈40`），白字簇 x **609~698**
+        · **幸运草**在 **第 2 行**（`cy≈94`），x 688~699
+      ⇒ 两者 **x 几乎重合** ⇒ **只能靠 y 分行区分** ✗
+        （v1.63 第一版把 `y 60~120` 混着量 ⇒ **金币被当幸运草** ✗）
+      ⇒ 两个窗口的 y 区间**必须不重叠**（门禁 v1.63b ② 守着 ✓）
+
+    ## ⚠ 只认**纯数字** ⇒ 体力（带 `/`）/PID（带 `:`）/绿加号（`+`）都不会被误取 ✓
+    """
+    cands = []
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '').replace('+', '')
+        if not t.isdigit():
+            continue
+        try:
+            cx, cy = int(it.get('cx', -1)), int(it.get('cy', -1))
+        except (TypeError, ValueError):
+            continue
+        if x_win[0] <= cx <= x_win[1] and y_win[0] <= cy <= y_win[1]:
+            cands.append((cx, t))
+    if not cands:
+        return None
+    cands.sort()                       # 按 x 从左到右 = 从高位到低位 ✓
+    s = ''.join(t for _cx, t in cands)
+    if (not s.isdigit()) or len(s) > 12:
+        return None                    # 窗口里混进了别的东西 ⇒ **不猜** ✓
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def clover_count(items):
     """HUD 上「幸运草（四叶草）还剩几个」—— 读不到返回 None（**不猜** ✓）
     ⭐⭐⭐⭐ v1.63 新增（**照抄 PC** 未提交改动 `explore_loop.py:clover_count`）
@@ -2922,17 +2966,9 @@ def clover_count(items):
 
     ## ⚠ 只认**纯数字**，且必须落在窗口内
       ⇒ 不会被金币（不同行）/体力（带 `/`）/PID（带 `:`）误取 ✓
+      ⚠ v1.64：抽取改为**按 x 拼接**（防"OCR 把数字拆成单字符 ⇒ max 读错"✗）
     """
-    best = None
-    for it in items or []:
-        t = (it.get('text') or '').replace(' ', '').replace('+', '')
-        if not t.isdigit():
-            continue
-        cx, cy = int(it.get('cx', -1)), int(it.get('cy', -1))
-        if CLOVER_HUD_X[0] <= cx <= CLOVER_HUD_X[1] \
-                and CLOVER_HUD_Y[0] <= cy <= CLOVER_HUD_Y[1]:
-            best = int(t) if best is None else max(best, int(t))
-    return best
+    return _hud_number(items, CLOVER_HUD_X, CLOVER_HUD_Y)
 
 
 def coin_count(items):
@@ -2958,16 +2994,7 @@ def coin_count(items):
 
     ## ⚠ 只认**纯数字** ⇒ 不会被体力（带 `/`）/PID（带 `:`）误取 ✓
     """
-    best = None
-    for it in items or []:
-        t = (it.get('text') or '').replace(' ', '').replace('+', '')
-        if not t.isdigit():
-            continue
-        cx, cy = int(it.get('cx', -1)), int(it.get('cy', -1))
-        if COIN_HUD_X[0] <= cx <= COIN_HUD_X[1] \
-                and COIN_HUD_Y[0] <= cy <= COIN_HUD_Y[1]:
-            best = int(t) if best is None else max(best, int(t))
-    return best
+    return _hud_number(items, COIN_HUD_X, COIN_HUD_Y)
 
 
 def coin_allows_buy(n):

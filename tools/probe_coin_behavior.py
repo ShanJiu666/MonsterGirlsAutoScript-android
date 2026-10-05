@@ -116,6 +116,33 @@ def main():
           % (got, '✓' if ok3 else '**✗ 串行了**'))
     print()
 
+    print('=== ②b ⚠⚠⚠ 「OCR 把数字拆成单字符」守门（我第一版写 `max()` 会读错）===')
+    # 真机截图反算出的金币簇（参考系 x）：613 629 645 662 678 694 ⇒ 真值 165531
+    split = [{'text': d, 'cx': x, 'cy': 40}
+             for d, x in zip('165531', (613, 629, 645, 662, 678, 694))]
+    got = EL.coin_count(split)
+    ok = (got == 165531)
+    if not ok:
+        fails.append(('coin_split', 165531, got))
+    print('   金币拆成 6 条(1,6,5,5,3,1) ⇒ 读出 %-8s 期望 165531  %s'
+          % (got, '✓' if ok else '**✗ 被 max() 读成单个数字了**'))
+    whole = [{'text': '165531', 'cx': 653, 'cy': 40}]
+    got = EL.coin_count(whole)
+    ok = (got == 165531)
+    if not ok:
+        fails.append(('coin_whole', 165531, got))
+    print('   金币是整串(165531)       ⇒ 读出 %-8s 期望 165531  %s'
+          % (got, '✓' if ok else '**✗**'))
+    # 窗口里混进别的东西（超过 12 位）⇒ 不猜
+    junk = [{'text': '9' * 13, 'cx': 650, 'cy': 40}]
+    got = EL.coin_count(junk)
+    ok = (got is None)
+    if not ok:
+        fails.append(('coin_junk', None, got))
+    print('   窗口里塞 13 位垃圾         ⇒ 读出 %-8s 期望 None     %s'
+          % (got, '✓' if ok else '**✗ 该不猜**'))
+    print()
+
     print('=== ③ `coin_allows_buy`（用户口径：低于 50 万拉黑，高于正常买） ===')
     print('%-12s %-10s %-8s %s' % ('金币', '判定', '期望', '说明'))
     for n, want in ((None, True), (0, False), (499999, False), (500000, True),

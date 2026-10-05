@@ -7098,6 +7098,86 @@ except Exception as _e63b:      # noqa: BLE001
     check('v1.63b 守门可运行（%r）' % (_e63b,), False)
 
 # =====================================================================================
+# ㊿⭐⭐⭐⭐ v1.64b【真机截图反算验证】＋ **修一个我自己刚引入的读错隐患**
+#
+# 背景：v1.64 装机后我想在真机上验读数，但**截图权限失效**（`截图=False`）⇒ 走另一条路：
+#   用 `adb screencap` 拍一张真机帧（1280×2772 / 选图界面，HUD 完整）
+#   ⇒ 按 `RefMapper` 的**同一条公式**反算回 1080×1920 参考系，再和窗口对拍 ✓
+#   意外收获：这张截图的 HUD 真值是 **金币 165531 / 幸运草 1**
+#     ⇒ 正好都落在**我新加的阈值**两侧（<50万 ⇒ 不买；<8 ⇒ 不摇+剔大拇指）✓
+#
+# ⭐⭐ 反算发现的两个问题（都已修）：
+#   ① ⚠⚠ **`max(候选)` 会读错**：若 OCR 把 `165531` 拆成 6 个单字符条目，
+#      `max(1,6,5,5,3,1) = 6` ⇒ **静默读成一个错误的数**（比读不到更糟 ✗✗）
+#      ⇒ 改成**按 cx 从左到右拼接**（整串/拆字符两种都正确 ✓）
+#   ② 映射自洽性：两行各自反解出的 `topInset` 只差 9px（128.6 / 119.6）
+#      ⇒ 证明「设备帧 HUD」与「参考系标定」是**同一套映射**，窗口成立 ✓
+# =====================================================================================
+print()
+print('㊿⭐⭐⭐⭐ v1.64b 真机截图反算验证 + 「数字被拆成单字符」读错守门')
+try:
+    check('v1.64b ① 抽出共用的 `_hud_number(items, x_win, y_win)`，'
+          '`coin_count`/`clover_count` 都走它（**一份判据，不会两边漂移** ✓）',
+          'def _hud_number(items, x_win, y_win):' in _el62
+          and 'return _hud_number(items, COIN_HUD_X, COIN_HUD_Y)' in _el62
+          and 'return _hud_number(items, CLOVER_HUD_X, CLOVER_HUD_Y)' in _el62)
+    check('v1.64b ② ⛔ **撤回守门：不许再用 `max(候选)`** ——'
+          'OCR 一旦把 `165531` 拆成单字符，`max()` 会给出 `6`（**静默读错** ✗✗）'
+          '⇒ 必须**按 cx 拼接**',
+          "cands.sort()" in _el62
+          and "s = ''.join(t for _cx, t in cands)" in _el62,
+          '⚠ 我 v1.64 第一版两处都写的 `max(best, int(t))`')
+    check('v1.64b ③ 拼接长度 > 12 位 ⇒ **判为"窗口混进别的东西"⇒ 返回 None**'
+          '（**不猜** ✓，比给个错数好）',
+          'or len(s) > 12' in _el62)
+    # 执行级：真机截图反算（映射自洽 + 窗口命中）
+    if os.path.exists(os.path.join(HERE, 'probe_hud_devframe.py')):
+        import subprocess as _sp1
+        _r1 = _sp1.run([sys.executable,
+                        os.path.join(HERE, 'probe_hud_devframe.py')],
+                       stdout=_sp1.PIPE, stderr=_sp1.STDOUT,
+                       env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        _o1 = _r1.stdout.decode('utf-8', 'replace')
+        _out1 = os.path.join(os.path.abspath(os.path.join(PROJ, '..', '_tmpman')),
+                             '_hud_devframe_out.txt')
+        try:
+            _o1 = open(_out1, encoding='utf-8').read()
+        except Exception:       # noqa: BLE001
+            pass
+        if '缺真机截图' in _o1 or '读不了' in _o1:
+            skip('v1.64b ④ 真机截图反算（缺 `_tmpman/_dev_screen.png`；'
+                 '用 `adb shell screencap -p` 拍一张放那儿 ✓）')
+        else:
+            check('v1.64b ④ **执行级（真机截图反算）**：两行各自反解出的 `topInset` '
+                  '**必须几乎相等**（⇒ 设备帧 HUD 与参考系标定是同一套映射）'
+                  '＋ 两行峰**各自落进各自的 y 窗口** ✓',
+                  '自洽 ✓' in _o1
+                  and '落在金币 y 窗内：True' in _o1
+                  and '落在幸运草 y 窗内：True' in _o1,
+                  '⚠ 不自洽 ⇒ 我的参考系窗口在设备帧上不成立 ✗')
+            check('v1.64b ⑤ **执行级（真机截图反算）**：金币窗口 x(595,715) '
+                  '命中 **6 个簇**（= `165531` 的 6 位）'
+                  '＋ 第 2 行体力(276~398)/大拇指(905) **都在幸运草窗之外** ✓',
+                  '窗口 x(595, 715) 命中 6 个' in _o1
+                  and '窗口 x(655, 735) 命中' in _o1)
+    else:
+        skip('v1.64b ④⑤ 真机截图反算（缺 probe_hud_devframe.py）')
+    # 执行级：拆字符守门
+    if os.path.exists(os.path.join(HERE, 'probe_coin_behavior.py')):
+        import subprocess as _sp2
+        _r2 = _sp2.run([sys.executable,
+                        os.path.join(HERE, 'probe_coin_behavior.py')],
+                       stdout=_sp2.PIPE, stderr=_sp2.STDOUT,
+                       env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        _o2 = _r2.stdout.decode('utf-8', 'replace')
+        check('v1.64b ⑥ **执行级**：数字被拆成 6 条 ⇒ 仍读出 `165531`'
+              '（不是 `6`）；整串也读对；13 位垃圾 ⇒ None',
+              _r2.returncode == 0 and '拆成 6 条' in _o2 and '165531' in _o2,
+              'exit=%d' % _r2.returncode)
+except Exception as _e64b:      # noqa: BLE001
+    check('v1.64b 守门可运行（%r）' % (_e64b,), False)
+
+# =====================================================================================
 # ㊿⭐⭐⭐ v1.63c【幸运草 < 8 ⇒ **本图剔掉"纯大拇指"目标**】
 #   用户原话（2026-10-05）：
 #     「**而且我发现幸运草低于8还是摇色子，改成低于8这张图的大拇指目标都拉黑不去打**」
