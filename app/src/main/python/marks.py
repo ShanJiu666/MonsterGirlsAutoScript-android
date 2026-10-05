@@ -57,6 +57,19 @@ COLOR_MIN = 0.68           # ⭐ 配色下限（NCC，对雾格变暗不敏感 �
 GLYPH_KEEP = 1.0           # （保留：1.0 = 不裁剪；裁过 0.62 反而更差 ✗）          # ⭐ 只保留模板中间 62%（挖掉共有的沙地圆角底纹 ✓）
 GLYPH_SCALES = [round(3.8 + 0.1 * i, 2) for i in range(15)]   # ⭐ 真标记尺度 3.8~5.2
 
+# ⭐⭐⭐ v1.63 **每个模板每帧取几个候选峰**（治「一图只能认一个标记」✗）—— 照抄 PC
+#   用户口径（PC 原话）：「**能不能认得一个格子里有四个标志那种**」
+#   几何账：格 144px / 图标 64px ⇒ 2×2 = **4 个**（PC 720 系：格 96 / 图标 36 ⇒ 同样 2×2 ✓）
+#   真机样本：PC `runs/acc2/anno_src.png` 的 `(2,1)` = `redEquip,boss,recommend,clover` ✓
+#   ⇒ 取 8 给"同格 4 个 + 邻近格同类型"留余量（NMS 会抑制重叠，不会爆量 ✓）
+#
+#   ⚠ 手机端**已实证有病**（v1.63 造帧实验，`tools/probe_mark_dup_frame.py`）：
+#     把 `(4,2)` 的 boss 像素**整格复制**到 `(4,5)`（两格真值**完全相同**）：
+#       · 旧行为（`topn=1`）⇒ **只认到 1 格** ✗ ｜ `topn=8` ⇒ **认到 2 格** ✓
+#     逐类型聚类（`tools/probe_mark_positions.py`，6 张真机帧）：
+#       **`boss`/`redEquip` 每帧只聚出 1 个位置**（`boss` **正是目标**）✗
+MARK_TOPN = 8
+
 # ══════════════════════════════════════════════════════════════════════════
 # ⭐⭐⭐ v1.45 提速（施工单 ①）：**参考系定点窗口搜索**
 #
@@ -150,12 +163,39 @@ def _load_tpls_raw():
     return out
 
 
-def match_at_scales(bgr, tpl_rgba, scales):
+def match_at_scales(bgr, tpl_rgba, scales, topn=1, min_score=None):
     """多尺度模板匹配，返回 [(score, scale, cx, cy, w, h)]（score 越大越像）
 
     ⚠ 2026-09-25 加防御：调用方可能塞进 4 通道图（带 alpha 的 PNG）或灰度图，
       OpenCV 会报 `type == _templ.type()` 直接崩。这里统一成 3 通道 float32；
       掩码统一成 CV_8U（OpenCV 只认 8U/32F，且必须和模板同尺寸）。
+
+    ⭐⭐⭐⭐ v1.63 **`topn`（同一尺度返回几个峰）** —— 照抄 PC 未提交改动
+      （PC `marks.py:match_at_scales`，配合 `MARK_TOPN = 8`）
+      治「**一图/一格只能认一个标记**」✗
+
+      ## 根因
+        `cv2.minMaxLoc(res)` ⇒ **每个尺度只回 1 个点**（= 该尺度上的**全局最优**）
+        ⇒ 同一模板出现在**两格**时，分高的那格**在每个尺度上都赢**
+        ⇒ 另一格**连候选都不是** ⇒ 不被当目标 ⇒ 计划以为清完了 ✗✗
+
+      ## ⭐ 手机端**已实证有病**（v1.63 造帧实验，`tools/probe_mark_dup_frame.py`）
+        把矿洞帧 `(4,2)` 那一格的像素**整格复制**到 `(4,5)`（两格真值**完全相同**）：
+          · 现状（`topn=1`）⇒ **只认到 1 格**（`(4,2)`）✗
+          · `topn=8`      ⇒ **认到 2 格**（`(4,2)` + `(4,5)`）✓
+        逐类型聚类（`tools/probe_mark_positions.py`，6 张真机帧）：
+          · **`boss` / `redEquip`：每帧只聚出 1 个位置** ✗（而 `boss` **正是目标**）
+          · `recommend`：多尺度**偶然**给出 2~3 个位置（时好时坏）
+        ⇒ 这段"同格多标记按位置保留"的聚合（`_dedup_candidates`，注释里写着
+          `保 4 标记格`）**本来就是为多标记写的，却因上游只给 1 个点而从来没派上用场** ✗
+
+      ## 实现
+        `topn > 1` 时做**非极大值抑制**：按分数取峰，抑制掉与已选峰距离 < `nms_r`
+        的邻居，直到取满 `topn` 个或低于 `min_score`
+      ⚠ **默认 `topn=1` = 老行为**（逐位不变）⇒ 不影响没传参的调用方 ✓
+      ⚠ `min_score`（默认 None）**只用于提前停止**；真正的门槛仍由调用方
+        （`scan_board_fast` 的 `thr` / `TYPE_MIN`）把关 ⇒ 不改变判据语义 ✓
+      ⚠ 抑制半径按**模板尺寸**算（同一图标在不同尺度上重叠 ⇒ 只留最好的那个）✓
     """
     if bgr is None:
         return []
@@ -179,9 +219,26 @@ def match_at_scales(bgr, tpl_rgba, scales):
             continue
         res = cv2.matchTemplate(src, t, cv2.TM_SQDIFF, mask=m)
         res = np.nan_to_num(res, nan=1e12, posinf=1e12, neginf=1e12)
-        mn, _, mnloc, _ = cv2.minMaxLoc(res)
-        norm = mn / (float((m > 0).sum()) * 255.0 * 255.0)      # 0=完全一致
-        out.append((1.0 - norm, float(s), mnloc[0] + w / 2.0, mnloc[1] + h / 2.0, w, h))
+        denom = float((m > 0).sum()) * 255.0 * 255.0        # 0=完全一致
+        if int(topn) <= 1:
+            # ---- 老路径：全局最优 1 个（**逐位不变** ✓）----
+            mn, _, mnloc, _ = cv2.minMaxLoc(res)
+            out.append((1.0 - mn / denom, float(s),
+                        mnloc[0] + w / 2.0, mnloc[1] + h / 2.0, w, h))
+            continue
+        # ---- 新路径：非极大值抑制取前 topn 个峰（照抄 PC）----
+        nms_r = max(8, int(round(min(w, h) * 0.5)))
+        work = res.copy()
+        for _ in range(int(topn)):
+            mn, _mx, loc, _l2 = cv2.minMaxLoc(work)
+            score = 1.0 - mn / denom
+            if min_score is not None and score < float(min_score):
+                break
+            out.append((score, float(s), loc[0] + w / 2.0, loc[1] + h / 2.0, w, h))
+            x0_, y0_ = loc
+            ya, yb = max(0, y0_ - nms_r), min(work.shape[0], y0_ + nms_r + 1)
+            xa, xb = max(0, x0_ - nms_r), min(work.shape[1], x0_ + nms_r + 1)
+            work[ya:yb, xa:xb] = 1e12
     return out
 
 
@@ -318,7 +375,11 @@ def scan_board(img, thr=None, scales=None, region=None, use_color=True):
     out = {}
     _jobs = _jobs_of()
     for key, tpl in _jobs:
-        for sc, s, cx, cy, w, h in match_at_scales(sub, tpl, scales):
+        # ⭐⭐⭐ v1.63 **每模板取多个候选点**（旧行为只取 1 个 ⇒ 一图只能认一个标记 ✗）
+        #   ⇒ `topn=MARK_TOPN`：NMS 取前 N 个峰；`min_score=thr*0.9` **只用于提前停止**
+        #     （真正的门槛判据仍是下面的 `if sc < thr: continue` 与 `TYPE_MIN` ✓）
+        for sc, s, cx, cy, w, h in match_at_scales(sub, tpl, scales,
+                                                   topn=MARK_TOPN, min_score=thr * 0.9):
             if sc < thr:
                 continue
             gx, gy = cx + x0, cy + y0

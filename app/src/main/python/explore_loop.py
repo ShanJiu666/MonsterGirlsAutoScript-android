@@ -2864,6 +2864,61 @@ def is_battle_panel(items):
     return False
 
 
+# ⭐⭐⭐⭐ v1.63【幸运草读数窗口 + 门槛】—— 照抄 PC 未提交改动（**坐标按手机端重标**）
+#   ⚠⚠ PC 的 `CLOVER_HUD_X = (430, 520)` / `Y = (35, 85)` 是 **720×1280 系**；
+#      手机端是 **1080×1920** ⇒ **必须重标**（PC 自己也强调过"别照抄坐标"）
+#   手机端实测定标（`tools/probe_clover_row.py`，6 张真机帧**分行**量白字簇）：
+#     · 幸运草数在 **第 2 行**（`cy ≈ 94`），白字簇实测 **x 688~699（心 693.5）** ✓
+#     · 同一行还有：体力条（x≈276~404）、大拇指数（x≈905）
+#     · ⚠ **第 1 行的金币数 x≈609~698 与幸运草几乎重合** ⇒ **只能靠 y 分行区分** ✗
+#   ✅ 交叉验证：PC `cx=462.5 × 1.5 = 694` ≈ 手机端实测 **693.5** ✓（1.5 倍换算成立）
+#   ⇒ x 取实测 ±35（留 OCR 框中心抖动余量）；y 卡死第 2 行（`70~120`）✓
+CLOVER_HUD_X = (655, 735)      # 幸运草数字所在 x 区间（实测心 693.5）
+CLOVER_HUD_Y = (70, 120)       # 所在 y 区间（**第 2 行**；金币在第 1 行 cy≈40 ⇒ 不会撞 ✓）
+CLOVER_MIN_REROLL = 8          # 低于它就**不摇色子**（用户口径；原想 5、后改 8 ✓）
+
+
+def clover_count(items):
+    """HUD 上「幸运草（四叶草）还剩几个」—— 读不到返回 None（**不猜** ✓）
+    ⭐⭐⭐⭐ v1.63 新增（**照抄 PC** 未提交改动 `explore_loop.py:clover_count`）
+    用户口径（PC 原话）：「**改成幸运草低于 8 就不摇色子吧**」（原先想的是 5，后改成 8 ✓）
+
+    ## 治什么（PC 真机背景，`runs/acc3`）
+      幸运草只剩 **1**，`handle_dice` 还是去点四叶草 ⇒ 游戏**不弹确认框**
+      ⇒ 那道"没弹框就不点确定"的闸门跳掉这一圈
+      ⇒ **白点 2 次**，日志只写 `no_dlg_skip` ⇒ **真因（草不够）被掩盖** ✗
+      ⇒ 判据从"猜框在不在"改成**确定性的"钱够不够"** ✓
+
+    ## ⚠ 零额外成本
+      幸运草数字跟体力在**同一行 HUD**，而体力每轮本来就要读
+      （`stamina(items)` 用的就是同一次 `items`）⇒ 顺手多读一个数字而已 ✓
+
+    ## ⚠⚠ 手机端坐标**必须自己标定**（PC 的是 720×1280 系，这里是 1080×1920）
+      v1.63 实测定标（`tools/probe_clover_row.py`，6 张真机帧**分行**量白字簇）：
+        · 幸运草数在**第 2 行**（cy ≈ 94），白字簇实测 **x 688~699（心 693.5）** ✓
+        · **同一行**还有：体力条（`2037/2100`，x≈276~404）、大拇指数（x≈905）
+        · **第 1 行**（cy≈40）是 PID/Ver/**金币 357731**（x≈609~698）——
+          ⚠ 金币那个簇的 x 与幸运草**几乎重合**（609~698 vs 688~699）
+          ⇒ **只能靠 y 分行区分**（这正是我第一版量错的原因：
+            把 y 60~120 混着量 ⇒ 金币数被当幸运草 ✗）
+      ✅ 交叉验证：PC 的 `cx=462.5 × 1.5 = 694` ≈ 手机端实测 **693.5** ✓（1.5 倍换算成立）
+        ⇒ 所以 `CLOVER_HUD_X` 上下界取实测 ±35、`CLOVER_HUD_Y` 卡死第 2 行 ✓
+
+    ## ⚠ 只认**纯数字**，且必须落在窗口内
+      ⇒ 不会被金币（不同行）/体力（带 `/`）/PID（带 `:`）误取 ✓
+    """
+    best = None
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '').replace('+', '')
+        if not t.isdigit():
+            continue
+        cx, cy = int(it.get('cx', -1)), int(it.get('cy', -1))
+        if CLOVER_HUD_X[0] <= cx <= CLOVER_HUD_X[1] \
+                and CLOVER_HUD_Y[0] <= cy <= CLOVER_HUD_Y[1]:
+            best = int(t) if best is None else max(best, int(t))
+    return best
+
+
 def stamina(items):
     """读体力：HUD 左上角那个 `x/2500`（实测坐标 ≈ (338,94)）
 
@@ -3732,6 +3787,34 @@ def handle_dice(b, log, items, tries=3):
     rolls = 0
     btn_pos = None
     items = list(items)      # ⭐ v0.35：结算面板 = 归一化系，绝不再 +C
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐⭐ v1.63【幸运草不够就别摇】—— 照抄 PC 未提交改动
+    #   （用户口径原话：「**改成幸运草低于 8 就不摇色子吧**」）
+    #
+    #   ## 治什么（PC 真机铁证 `runs/acc3`，幸运草只剩 **1** 的那几张图）
+    #     点四叶草 ⇒ 游戏**不弹确认框** ⇒ 我那道"没弹框就不点确定"的闸门跳掉这一圈
+    #     ⇒ **白点 2 次**、日志只写 `dice: no_dlg_skip`
+    #     ⇒ **真因（幸运草不足）被掩盖** ✗（用户看日志才发现是草不够）
+    #   ⇒ 现在**一进函数就先看 HUD 的幸运草数**：< `CLOVER_MIN_REROLL(8)`
+    #     ⇒ **一次都不点，直接返回 0** ✓
+    #
+    #   ## ⚠ 读不到（OCR 没认出来）⇒ **不猜、照常走**
+    #     保守：宁可试一次，也别因为**一次 OCR 失败就永远不摇** ✓
+    #     （那种情况下面"没弹框就不点确定"那道闸门仍然兜住 ✓）
+    #   ## ⚠ 判据从"猜框在不在"改成**确定性的"钱够不够"** ✓
+    _cv_now = clover_count(items)
+    if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:
+        STATS['dice_skip_low'] = STATS.get('dice_skip_low', 0) + 1
+        log.append({'dice': 'skip_low_clover', 'clover': _cv_now,
+                    'min': CLOVER_MIN_REROLL,
+                    'note': '幸运草 %d < %d ⇒ **这张图不摇色子**（用户口径）；'
+                            '一次都不点，省掉白点 + 白等 ✓'
+                            % (_cv_now, CLOVER_MIN_REROLL)})
+        say('       · 幸运草只剩 %d（< %d）⇒ 这张图不摇色子 ✓'
+            % (_cv_now, CLOVER_MIN_REROLL))
+        status('幸运草不足 · 跳过摇色子')
+        return 0
 
     # ⭐⭐ 2026-09-29 真机实锤（用户目击 + dice_0.png + loop_log mark_routes 佐证）：
     #   结算面板奖励行**初始就可能已带大拇指装备**（推荐怪掉的就是追踪装备）——
@@ -5195,11 +5278,42 @@ def popups(b, items, log, ctx=None):
             pass
     # ⭐ 槽位满了 ⇒ 不走探索 ✓（落到下面的战斗分支 ⇒ 打掉它 ✓ 用户 2026-09-26）
     _free_now = int(ctx.get('slots_free', 1) or 0)
-    if (EXPLORE_DISPATCH and _is_purple and _free_now > 0
-            and (fb(items, L['expl'])
-                 # ⭐ v0.32：真机上「探索产出」标题（dlg≈443）落弹性区看不见 ⇒
-                 #   用看得见的「探索」按钮（dlg≈735）进分支（仅 C>0 生效）
-                 or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn'])))):
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐ v1.63【再补一条入口：**紫/橙格 + 有空闲槽**】—— 照抄 PC 未提交改动
+    #   （用户第二次报「**修了个寂寞啊，和之前一模一样，没打探索格**」）
+    #
+    #   ## PC 的真根因（**分支优先级**）
+    #     那一格 `(3,1)` = `S00003_221`（紫格，识别**正确** ✓）、`slots_free=1`（有空槽 ✓）
+    #     但它那块面板的标题被识别成「**战斗事件**」而**不是「探索产出」**
+    #     ⇒ 只按标题进门的探索分支**必然漏** ✗ ⇒ 被战斗分支接住
+    #     ⇒ 战斗分支里 `_is_purple=True` 但 `_free_now=1>0` ⇒ 那条"槽满才打"不成立
+    #     ⇒ `mk=[]` ⇒ 掉进 `if not mk:` 按"不在路上/不在计划里"判 ⇒ **面板被关掉**：
+    #        **既没探索、也没打** ✗✗（日志实证：那一局**探索/派遣事件 0 条**）
+    #
+    #   ## ⚠⚠ 手机端的结构**比 PC 好，但同一个窄门仍在**
+    #     ✅ 手机端本分支（L5281）**排在**战斗分支（L5349）**之前** ⇒ 不会被战斗抢先 ✓
+    #     ❌ **但入口判据同样是"「探索产出」标题 或 「探索」按钮"** ——
+    #        标题被认成别的（如「战斗事件」）+ 按钮也不在带里 ⇒ **这个门不命中** ✗
+    #        ⇒ 照样掉进战斗分支 ⇒ 同一个病 ✓
+    #     ⇒ 补 `_is_purple and _free_now > 0`（**紫格是目标，有空槽就该走探索** ✓）
+    #       ⚠ 槽满时**不加**这一条 ⇒ 照旧落到战斗分支"槽满就开打" ✓（口径一致）
+    #   ## ⚠ 用 `_is_purple`（= `_is_purple_cell`，与 v1.62 那条**同一个判据** ✓）
+    #     顶层 sid 是垃圾猜测时靠本轮 `ev_tiles` 兜住 ✓
+    _expl_entry63 = (fb(items, L['expl'])
+                     or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))
+                     or (_is_purple and _free_now > 0))
+    if EXPLORE_DISPATCH and _is_purple and _free_now > 0 and _expl_entry63:
+        if not (fb(items, L['expl'])
+                or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))):
+            # 命中的是 v1.63 新补的那一条 ⇒ 记一笔（便于日后对账 ✓）
+            log.append({'popup': 'purple_prefer_explore', 'cell': ('%d,%d' % _tc)
+                        if _tc is not None else None, 'tapped_sid': _tapped_sid,
+                        'slots_free': _free_now,
+                        'note': '紫/橙格 + 有空闲槽，但**面板标题不是「探索产出」**'
+                                '⇒ 靠新补的入口走探索（PC 未提交改动：防被战斗分支抢先）✓'})
+            say('       · 紫/橙探索格（有空闲槽 %d）且标题没认出来 ⇒ 按紫格身份走探索 ✓'
+                % _free_now)
+            status('紫金地块 · 去派小队')
         # ⭐ v0.31 方案 B：面板按钮 y 带是弹窗系标定 ⇒ 用 +C 后的条目筛、tap_dlg 点
         act = None
         for it in ditems:
@@ -6218,6 +6332,54 @@ def final_collect(b, log, st):
     pos = clicks[-1] if clicks else st.get('last')
     if not pos:
         log.append({'collect': 'none'})
+        return 0
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐⭐ v1.63【紫/橙探索格：**补点没用，该走的是"探索/派遣"**】—— 照抄 PC
+    #   （PC 未提交改动 `explore_loop.py:final_collect`，用户第二次报
+    #    「**修了个寂寞啊，和之前一模一样，没打探索格**」的**真正根因**）
+    #
+    #   ## PC 的真机证据链（`runs/acc1/` 第 3 张图）
+    #     · 那一格 `(3,1)` = `S00003_221`（紫格 ✓）、`slots_free=1`（**有空闲槽** ✓）
+    #     · 计划把它排在最后 ⇒ 它成了 `clicks[-1]` ⇒ **本函数补点又点它一次** ✗
+    #     · 紫格弹出的是「探索产出」面板，而本函数只处理
+    #       **莱姆 / 获得新装备 / 预言石板** 三种弹窗 ⇒ 紫格面板**关不掉** ✗
+    #     · gui 日志原文：`· 点 (72,908) → 弹面板`
+    #                    `· 退图前补点点出了面板且关不掉 ⇒ 已强制脱困`
+    #     · 日志实证：那一局**探索/派遣事件 0 条**、带 `content_skipped=6` 退图 ✗
+    #
+    #   ## ⭐ PC 的自我纠正（**最值得学的一句**）
+    #     「⇒ 这就是"和之前一模一样"的原因：**我前几轮一直在修 `popups()` 那条链，
+    #        而真正吃掉这一格的是 `final_collect()` 这条完全独立的路径** ✗」
+    #
+    #   ## ⚠ 手机端也同构（已核实）
+    #     手机端 `final_collect` 的补点**同样无条件**（`b.tap(pos)`）——
+    #     虽然手机端关面板走的是 `lime_back(it)` 等**判据式**调用（没有 PC 那种
+    #     "盲点固定坐标落棋盘"的问题），但"**紫格被补点又点一次**"这条**一模一样** ✓
+    #
+    #   ## 判据
+    #     紫/橙格（`_is_purple_cell`，与探索分支**同一个判据** ✓）**且有空闲槽**
+    #     ⇒ **直接跳过补点**（记 `collect: purple_skip`）
+    #     理由：**紫格是"目标"，本来就该由探索分支处理**；
+    #       补点第二次点它只会把探索面板再弹一次、且关不掉 ✗
+    #     ⚠ 槽满时不跳过 ⇒ 它会走"槽满就开打"那条路（与探索分支口径一致 ✓）
+    _fc_sid = ''
+    _fc_rc = None
+    try:
+        _fc_rc = cell_of(pos[0], pos[1])
+        _fc_sid = str((st.get('st') or {}).get(_fc_rc, {}).get('sid')
+                      or (st.get('obs') or {}).get(_fc_rc, {}).get('sid') or '')
+    except Exception:       # noqa: BLE001
+        _fc_sid = ''
+    _fc_purple = _is_purple_cell(_fc_sid, st.get('ev_tiles'), pos)
+    _fc_free = int(st.get('slots_free') or 0)
+    if _fc_purple and _fc_free > 0 and EXPLORE_DISPATCH:
+        log.append({'collect': 'purple_skip', 'at': list(pos), 'sid': _fc_sid,
+                    'cell': ('%d,%d' % _fc_rc) if _fc_rc else None,
+                    'slots_free': _fc_free,
+                    'note': '紫/橙探索格是**目标**（不是"随手补点"的格）⇒ 补点会重复弹'
+                            '探索面板 ✗；它该由探索分支处理 ✓（PC 未提交改动）'})
+        say('       · 退图前补点：这格是**紫/橙探索格**（有空闲槽 %d）⇒ 跳过补点'
+            '（它该走探索派遣，补点只会重复弹面板 ✗）' % _fc_free)
         return 0
     # ⚠ 2026-09-25 用户报「退出地图后乱点切换到别的图」：
     #   补点前**必须确认还在图里**！上一轮可能已经自己退图 / 被顶回选图界面，
@@ -8525,11 +8687,62 @@ def one_round(b, log, rnd, prefix, st):
     #     已按用户口径删掉它；要治的是 `expanded:1` 本身（D-1/D-2 已治），不是给它盖被子 ✗
     if vis and rnd >= 2 and not marked and not pending_buy:
         if st.get('had_plan'):
-            log.append(entry)
-            log.append({'finish': 'blank_board', 'had_plan': True,
-                        'note': '计划已走完、也没有标记目标 ⇒ 立刻收工'
-                                '（用户口径：删掉无意义的三轮 ✓）'})
-            return 'done'
+            # ─────────────────────────────────────────────────────────────────────
+            # ⭐⭐⭐⭐ v1.63【退图前先确认"那一刻没有面板正在渲染"】—— 照抄 PC
+            #   （PC 未提交改动 `explore_loop.py:one_round`；用户第二次报
+            #    「**修了个寂寞啊，和之前一模一样，没打探索格**」）
+            #
+            #   ## PC 真机铁证（`runs/acc1/_ocr_tmp.png`，点开紫格 `(3,1)` 之后**当时那一帧**）
+            #     画面里**只有 5 条文字**（体力 / 图名 / `RTNl`），**面板一个字都没有** ——
+            #     但棋盘**已经被压暗**了（= 面板正在弹，美术还没画完 ✓）
+            #     ⇒ `panel_seen(it)` 返回 **False**、标题判据全 False ✗
+            #   于是：本轮 `popups()` 读不到面板 ⇒ **什么都没做**；
+            #     下一轮开头面板已经画好了，可它**已经没有"刚点过"的上下文** ⇒ 被当普通棋盘
+            #     ⇒ 这一格既没打探索、也没弹面板记录 ⇒ 走到这里 `not marked and rnd>=2`
+            #     ⇒ **直接退图**（真机 `content_skipped: 6`）⇒ **探索格漏了** ✗✗
+            #
+            #   ## 修法（照 PC）
+            #     `st['last']`（上一次点击）存在、**且棋盘被压暗** ⇒ 判"面板还在渲染"
+            #     ⇒ **本图不判 done**，返回 None 让主循环再转一轮
+            #     （下一轮面板画好 ⇒ `popups()` 正常接手 ⇒ 探索/战斗都能走 ✓）
+            #     ⚠ 上限 **3 轮**防死循环（`st['panel_render_wait']`）✓
+            #
+            #   ## ⚠ 手机端用**自己的**"压暗"量 —— 我第一版写 `b.dim()` 是**错的** ✗
+            #     （实查：手机端 `mapbot.Bot` **没有** `dim()` 方法；
+            #       PC 注释也特意记了「`dim` 是 `Bot.last_change` 里的**相对压暗比**，
+            #       **不是 `Bot.dim()` 方法** —— 没有那个方法 ✗」⇒ 我犯了同一个错）
+            #     ✅ 手机端的等价值：**`b.last_change['dim']`**（`mapbot.py:189/530`）
+            #        语义**与 PC 同名同义**：`1.0` = 没压暗 ✓（`api.lastDim()` 给的）
+            #     ⚠ 阈值用 **0.85**（= PC 口径）；**不用** `DIM_RATIO_MAX(0.42)` ——
+            #       那个是"棋盘被完全盖住"的**另一套判据**（`board_hidden` 用的），语义不同 ✗
+            #     ⚠ 方向安全：**拿不到就按"没压暗"处理** ⇒ 照旧退图（不退化成死循环 ✓）
+            _pr_wait = False
+            try:
+                _pr_last = st.get('last')
+                _pr_dim = float((getattr(b, 'last_change', None) or {}).get('dim', 1.0))
+                _pr_n = int(st.get('panel_render_wait', 0) or 0)
+                if _pr_last and _pr_dim < 0.85 and _pr_n < 3:
+                    st['panel_render_wait'] = _pr_n + 1
+                    _pr_wait = True
+                    _pr_rc = cell_of(_pr_last[0], _pr_last[1])
+                    log.append(entry)
+                    log.append({'finish_hold': 'panel_rendering_wait',
+                                'cell': '%d,%d' % _pr_rc,
+                                'dim': round(_pr_dim, 3), 'wait': st['panel_render_wait'],
+                                'note': '棋盘被压暗但面板还没画出来 ⇒ 先不退图，'
+                                        '再等一轮让 popups() 接住它 ✓'
+                                        '（PC 未提交改动；上限 3 轮 ✓）'})
+                    say('       · 棋盘被压暗（dim=%.2f）但面板还没画出来 ⇒ 先不退图，'
+                        '再等一轮 ✓' % _pr_dim)
+                    status('面板正在弹出 · 再等一轮')
+            except Exception:       # noqa: BLE001
+                _pr_wait = False
+            if not _pr_wait:
+                log.append(entry)
+                log.append({'finish': 'blank_board', 'had_plan': True,
+                            'note': '计划已走完、也没有标记目标 ⇒ 立刻收工'
+                                    '（用户口径：删掉无意义的三轮 ✓）'})
+                return 'done'
         # ⚠ 这里**不能** return —— 交给下面 `blank_board` 的 3 轮耐心（`st['blank'] >= 3`）
         #   也**绝不能**记 `targets_done`（那是"满意收工"，会掩盖模型层坏掉的事实 ✗）
         log.append({'finish_hold': 'no_plan_yet', 'rnd': rnd,

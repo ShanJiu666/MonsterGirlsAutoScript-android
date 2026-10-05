@@ -6863,6 +6863,144 @@ try:
 except Exception as _e62c:      # noqa: BLE001
     check('v1.62c 守门可运行（%r）' % (_e62c,), False)
 
+# =====================================================================================
+# ㊿⭐⭐⭐ v1.63【搬 PC 未提交改动：一格多标记 / 幸运草闸门 / 紫格不补点 / 等面板渲染】
+#
+# 用户说「PC 又有一些新改动，学一下」⇒ 评估单 `D:\MGAS\PC新改动移植评估.md`。
+# ⚠ **学 ≠ 照抄**：PC 那批有 5 条手机端**本来就没有那个病**（已核实，见评估单 §0.1）
+#   ⇒ 本轮只搬**4 条真有病/真可移植**的；门禁只为这 4 条加断言 ✓
+# =====================================================================================
+print()
+print('㊿⭐⭐⭐ v1.63 一格多标记（marks topn）+ 幸运草闸门 + 紫格不补点 + 等面板渲染')
+try:
+    _MK63 = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'marks.py')
+    _mk63 = open(_MK63, encoding='utf-8').read()
+
+    # ---------------- ①~④ B15：一格多标记 / 一帧多格 ----------------
+    check('v1.63 ① `marks.match_at_scales` 支持 `topn`/`min_score`，'
+          '且 **`topn<=1` 走老路径**（逐位不变 ⇒ 不影响没传参的调用方 ✓）',
+          'def match_at_scales(bgr, tpl_rgba, scales, topn=1, min_score=None):' in _mk63
+          and 'if int(topn) <= 1:' in _mk63
+          and 'cv2.minMaxLoc(res)' in _mk63,
+          '⚠ PC 原文：默认 `topn=1` = 老行为')
+    check('v1.63 ② `topn>1` 走 **NMS**（抑制半径按模板尺寸算：`max(8, min(w,h)*0.5)`）',
+          'nms_r = max(8, int(round(min(w, h) * 0.5)))' in _mk63
+          and 'work[ya:yb, xa:xb] = 1e12' in _mk63)
+    check('v1.63 ③ 有 `MARK_TOPN = 8`（PC 口径：同格 4 个 + 邻近格同类型留余量 ✓；'
+          'NMS 会抑制重叠 ⇒ 不会爆量 ✓）',
+          'MARK_TOPN = 8' in _mk63)
+    # ④ ⚠⚠ 这里**不能照抄 PC 的"两处都要改"** —— 手机端两条路径**结构根本不同**：
+    #    · `scan_board`（旧基准路径，`marks.py:358`）：**全图一次 `minMaxLoc`**
+    #      ⇒ **有病**（一模板一帧只认一处）⇒ 已传 `topn=MARK_TOPN` ✓
+    #    · `scan_board_fast`（**热路径**，`marks.py:459`）：**逐格定点窗口**
+    #      （`for r / for c` + 每格 `_match_window` 独立取最优）
+    #      ⇒ **两格同模板都会各自认到 ⇒ 本来就没有这个病** ✓ 无需改
+    #   ⇒ 断言改成"**至少 `scan_board` 那条有病的路径必须传**"，
+    #     并**显式记录**为什么另一条不用传（防后人误以为漏改 ✗；也防"顺手补上"
+    #     把热路径变慢 —— 它每格已经是最优，`topn>1` 只会白算 ✗）
+    _sb_body = _mk63.split('def scan_board(img')[1].split('def _match_window')[0]
+    _sbf_body = _mk63.split('def scan_board_fast(')[1].split('def probe_top_fast')[0]
+    check('v1.63 ④ ⚠ `scan_board`（**全图 minMaxLoc** 那条 ⇒ 有病）'
+          '必须传 `topn=MARK_TOPN`；而 `scan_board_fast`（**逐格定点窗口** ⇒ 无病）'
+          '**故意不传**（它每格已取最优，`topn>1` 只会白算 ✗）',
+          'topn=MARK_TOPN' in _sb_body
+          and 'topn=MARK_TOPN' not in _sbf_body
+          and 'for r in range(1, rows + 1):' in _sbf_body
+          and '_match_window(img, tpl, s, ecx, ecy, half)' in _sbf_body,
+          '⚠ 手机端与 PC 的 `scan_board` 结构不同 —— 别照抄"两处都要改" ✗')
+
+    # ⑤ 执行级：**造帧**（整格复制）验证 —— 真值来自"两格像素完全相同"这个硬事实
+    _DUP63 = os.path.join(_FLOOR_DIR, '_dup_boss.png')
+    if not os.path.exists(_DUP63):
+        skip('v1.63 ⑤ 造帧执行级验证（缺 `_dup_boss.png`；'
+             '用 `tools/probe_mark_dup_frame.py` 造 ✓）')
+    else:
+        import cv2 as _cv63
+        import numpy as _np63
+        import marks as _mk63m
+        _dimg = _cv63.imdecode(_np63.fromfile(_DUP63, dtype=_np63.uint8),
+                               _cv63.IMREAD_COLOR)
+        _dres = _mk63m.scan_board_fast(_dimg)
+        _boss63 = sorted(k for k, v in _dres.items()
+                         if 'boss' in (v.get('marks') or []))
+        check('v1.63 ⑤ 执行级（**造帧**：把 `(4,2)` 的 boss 像素整格复制到 `(4,5)`，'
+              '两格真值**完全相同**）⇒ 必须 **两格都认到** '
+              '（旧行为只认 1 格 ✗ —— 这就是"一图只能认一个标记"）'
+              '；本帧认到 %d 格 %s' % (len(_boss63), _boss63),
+              (4, 2) in _boss63 and (4, 5) in _boss63,
+              '⚠ 牙齿：`topn=1` 时 (4,5) 认不到')
+
+    # ---------------- ⑥~⑨ B14：幸运草闸门 ----------------
+    check('v1.63 ⑥ `clover_count()` 在位，且**只认纯数字**（金币/体力/PID 都不会撞 ✓）',
+          'def clover_count(items):' in _el62
+          and 'if not t.isdigit():' in _el62
+          and 'CLOVER_HUD_X' in _el62 and 'CLOVER_HUD_Y' in _el62)
+    check('v1.63 ⑦ 门槛 `CLOVER_MIN_REROLL == 8`（用户口径；原想 5、后改 8 ✓）'
+          '＋ **`dim` 是第 2 行**（避开第 1 行金币 —— 实测两者 x 几乎重合 ✗）',
+          'CLOVER_MIN_REROLL = 8' in _el62
+          and 'CLOVER_HUD_Y = (70, 120)' in _el62,
+          '⚠ 我第一版把 y 60~120 混着量 ⇒ 金币被当幸运草 ✗（已修）')
+    check('v1.63 ⑧ ⚠ 读不到时 **`None` ⇒ 不猜、照常走**（宁可试一次，'
+          '也别因一次 OCR 失败就永远不摇 ✓）',
+          '_cv_now = clover_count(items)' in _el62
+          and 'if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:' in _el62,
+          '⚠ 方向安全：`None` 不跳过')
+    check('v1.63 ⑨ 闸门位置在 **`handle_dice` 一进函数、点四叶草之前**'
+          '（否则白点 2 次、真因被 `no_dlg_skip` 掩盖 ✗）',
+          _el62.index('if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:')
+          < _el62.index("'dice': 'clover_btn_fallback'"))
+    # ⑩ 执行级：用**真机 HUD 坐标**造的条目验读数（手机端 OCR 在 Java 壳里 ⇒ 离线跑不了）
+    if os.path.exists(os.path.join(HERE, 'probe_clover_behavior.py')):
+        import subprocess as _sp63
+        _r63 = _sp63.run([sys.executable,
+                          os.path.join(HERE, 'probe_clover_behavior.py')],
+                         stdout=_sp63.PIPE, stderr=_sp63.STDOUT,
+                         env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        _o63 = _r63.stdout.decode('utf-8', 'replace')
+        check('v1.63 ⑩ 执行级（真机 HUD 坐标造的条目）：读数正确 ＋ '
+              '**金币/体力/大拇指数不会被误取** ＋ 读不到返回 None',
+              _r63.returncode == 0 and '不会被误取' in _o63,
+              'exit=%d' % _r63.returncode)
+    else:
+        skip('v1.63 ⑩ 幸运草读数执行级（缺 probe_clover_behavior.py）')
+
+    # ---------------- ⑪~⑫ B11：紫格不补点 ----------------
+    check('v1.63 ⑪ `final_collect` 里 **紫/橙格 + 有空闲槽 ⇒ 跳过补点**'
+          '（记 `collect: purple_skip`）—— 治"没打探索格"的**真根因**'
+          '（PC：「我前几轮一直在修 `popups()` 那条链，而真正吃掉这一格的是 '
+          '`final_collect()`」✗）',
+          "log.append({'collect': 'purple_skip'" in _el62
+          and '_fc_purple and _fc_free > 0 and EXPLORE_DISPATCH' in _el62)
+    check('v1.63 ⑫ ⚠ 判据用的 4 个 `st` 键（`st`/`obs`/`ev_tiles`/`slots_free`）'
+          '**必须在调用方真的存在**（否则判据恒不命中 ⇒ 静默失效 ✗）',
+          all(("st.get('%s')" % k) in _el62.split('def final_collect')[1][:9000]
+              for k in ('st', 'obs', 'ev_tiles', 'slots_free')),
+          '⚠ 已用 `_tmpman/chk_fc_keys.py` 核过 ✓')
+
+    # ---------------- ⑬~⑭ 等面板渲染 ----------------
+    check('v1.63 ⑬ `one_round` 退图前先确认"没有面板正在渲染"：'
+          '`st["last"]` 存在 **且** 棋盘被压暗 ⇒ **不判 done**，再等一轮；'
+          '**上限 3 轮**防死循环 ✓（治"面板正在弹却直接退图 ⇒ 探索格漏了"）',
+          "'finish_hold': 'panel_rendering_wait'" in _el62
+          and "_pr_n < 3" in _el62
+          and "getattr(b, 'last_change', None) or {}).get('dim', 1.0)" in _el62)
+    check('v1.63 ⑭ ⚠ **手机端用自己的"压暗"量**（`b.last_change[\'dim\']`，'
+          '与 PC 同名同义：1.0 = 没压暗）；**不许**用 `b.dim()`（手机端没那个方法 ✗）'
+          '／**不许**用 `DIM_RATIO_MAX(0.42)`（那是"棋盘被完全盖住"的另一套判据 ✗）',
+          'b.dim()' not in _el62.replace('我第一版写 `b.dim()` 是**错的**', '')
+          and 'DIM_RATIO_MAX' not in _el62.split("'finish_hold': 'panel_rendering_wait'")[1][:900],
+          '⚠ 我第一版写了 `b.dim()` ⇒ AttributeError（实查后已改成 last_change）')
+
+    # ---------------- ⑮ B11b：紫格面板入口 ----------------
+    check('v1.63 ⑮ 探索分支入口补 `_is_purple and _free_now > 0`'
+          '（治"面板标题被认成「战斗事件」⇒ 探索分支的门不命中 ⇒ 掉进战斗分支"）'
+          '＋ ⚠ 槽满时**不加**这一条（照旧落战斗分支"槽满就开打" ✓ 口径一致）',
+          '_expl_entry63' in _el62
+          and 'or (_is_purple and _free_now > 0))' in _el62
+          and "'popup': 'purple_prefer_explore'" in _el62)
+except Exception as _e63:       # noqa: BLE001
+    check('v1.63 守门可运行（%r）' % (_e63,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
