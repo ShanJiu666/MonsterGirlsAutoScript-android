@@ -2294,8 +2294,13 @@ print('㊱ v1.23 修「遇见大拇指格不摇色子」真根因：结算面板
 try:
     _el23p = os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py')
     _src23 = open(_el23p, encoding='utf-8').read()
-    check('v1.23 ① 结算面板分支里**先摇色子再关**（`result_dice` 标记 ✓）',
-          "'popup': 'result_dice'" in _src23 and 'handle_dice(b, log, items)' in _src23)
+    check('v1.23 ① 结算面板分支里**先摇色子再关**（`result_dice` 标记 ✓）'
+          '＋ ⚠ v1.63b：该调用**必须传 `state=`**（幸运草闸门要靠它拿到 HUD 读数 ——'
+          '`items` 是 band 裁过的、读不到 HUD ✗）',
+          "'popup': 'result_dice'" in _src23
+          and 'handle_dice(b, log, items, state=_state)' in _src23,
+          '⚠ 旧断言写的是 `handle_dice(b, log, items)`（无 state）⇒ v1.63b 后过时；'
+          '已改成带 `state=` 的形式，并顺带守住"必须传 state"' )
     check('v1.23 ② 只有**本格**是大拇指才摇（`near()` 提到分支之前，防邻格白摇 ✗）',
           _src23.index('def near():') < _src23.index("'popup': 'result_dice'")
           and "'recommend' in _mk_here" in _src23)
@@ -7000,6 +7005,149 @@ try:
           and "'popup': 'purple_prefer_explore'" in _el62)
 except Exception as _e63:       # noqa: BLE001
     check('v1.63 守门可运行（%r）' % (_e63,), False)
+
+# =====================================================================================
+# ㊿⭐⭐⭐ v1.63b【金币低于 50 万 ⇒ 不买商人/宝库】＋ **修 v1.63 幸运草闸门静默失效的真 bug**
+#
+# 用户两条口径（2026-10-05）：
+#   ①「**加上金币低于50万就自动拉黑商人和宝库，高于就正常购买**」
+#   ②「**也是在扫体力的时候顺便扫，不要让每图时间变长**」
+#   ③（报 bug）「**我发现幸运草低于8还是摇色子**」
+#
+# ⭐⭐ 那个 bug 的根因值得记住（**与 v1.62 的"veto 被冲掉"同类**）：
+#   `handle_dice()` 拿到的 `items` 是**带 band 裁过的**（`wait_end` 用
+#   `band=(sy(130), sy(1560))`）⇒ **HUD 行 cy≈94 被裁掉** ⇒ `clover_count(items)`
+#   **恒为 None** ⇒ 按"读不到就照常走"⇒ **闸门从来没触发过** ✗✗
+#   （真机日志实证：只有 `dice: no_confirm_popup`，**一条 `skip_low_clover` 都没有**）
+#   ⇒ 把判断放在**拿不到数据**的地方 ⇒ 判据**静默失效**且 **fail-open**（不报错）✗
+#   ⇒ 修法：在 `one_round` **轮首全屏 OCR**（本来就有、含 HUD）读一次存进 `st`，
+#     下游读 `st`（**零额外开销**，正合用户口径② ✓）
+# =====================================================================================
+print()
+print('㊿⭐⭐⭐ v1.63b 金币闸门（<50万不买商人/宝库）+ 幸运草闸门**真 bug**修复')
+try:
+    # ---------------- ①~③ 常数与函数 ----------------
+    check('v1.63b ① 有 `coin_count()` / `coin_allows_buy()` / `COIN_MIN_BUY = 500000`'
+          '（用户口径「低于50万」⇒ 500000 ✓）',
+          'def coin_count(items):' in _el62
+          and 'def coin_allows_buy(n):' in _el62
+          and 'COIN_MIN_BUY = 500000' in _el62)
+    check('v1.63b ② ⚠⚠ 金币窗口 `COIN_HUD_Y` 与幸运草的**行不重叠**'
+          '（实测两者 x 几乎重合 609~698 vs 688~699 ⇒ **只能靠 y 分行区分** ✗；'
+          'v1.63 第一版混着量 ⇒ 金币被当幸运草 ✗）',
+          'COIN_HUD_Y = (15, 65)' in _el62
+          and 'CLOVER_HUD_Y = (70, 120)' in _el62)
+    check('v1.63b ③ ⚠ 读不到金币 ⇒ **允许买**（fail-open：宁可买，也别因一次 OCR 失败'
+          '就整图不买 ✗；与幸运草闸门同口径 ✓）',
+          'if n is None:' in _el62.split('def coin_allows_buy')[1][:400]
+          and 'return True' in _el62.split('def coin_allows_buy')[1][:400])
+
+    # ---------------- ④~⑥ **修 bug 的守门**（这才是本轮最重要的）----------------
+    check('v1.63b ④ ⛔ **撤回守门（v1.63 的真 bug）**：`handle_dice` 必须**优先读 `state`**'
+          '（`state["clover_now"]`），只有拿不到才退回 `items` ——'
+          '因为传进去的 `items` 是 **band 裁过的、HUD 被裁掉** ⇒ 只读 items 会**恒 None** ✗✗',
+          "state.get('clover_now')" in _el62
+          and '_cv_now = clover_count(items)' in _el62,
+          '⚠ 这正是用户报的「幸运草低于8还是摇色子」的根因')
+    check('v1.63b ⑤ `handle_dice` 签名带 `state=None`，且**两处调用点都传了**'
+          '（`wait_end` 传 `state=state`；`popups` 传 `state=_state`）',
+          'def handle_dice(b, log, items, tries=3, state=None):' in _el62
+          and 'handle_dice(b, log, items, state=state)' in _el62
+          and 'handle_dice(b, log, items, state=_state)' in _el62,
+          '⚠ 漏传一处 ⇒ 那条路径的闸门又静默失效 ✗')
+    check('v1.63b ⑥ `one_round` **轮首**（全屏 OCR 之后）读一次存进 `st`：'
+          '`st["clover_now"]`（每轮刷新）＋ `st["coin_now"]`（**用户口径：只进图读一次**）'
+          '—— **零额外 OCR**（用户口径「不要让每图时间变长」✓）',
+          "st['clover_now'] = clover_count(items)" in _el62
+          and "st['coin_now']" in _el62
+          and "st.get('coin_now') is None" in _el62,
+          '⚠ 必须复用轮首那份 `items`，不许新增 OCR 调用')
+    check('v1.63b ⑦ ⚠ 金币"只进图读一次"：**读失败（None）不算读到** ⇒ 下一轮继续尝试'
+          '（否则进图那帧 HUD 没画全就把整图钉死在 None 上 ✗）',
+          "if st.get('coin_now') is None:" in _el62
+          and "if _cn is not None:" in _el62)
+
+    # ---------------- ⑧~⑨ 买目标的闸门 ----------------
+    check('v1.63b ⑧ 金币不够 ⇒ **清空 `buy` 与 `buy_hidden`**（这是它们唯一的汇聚点 ⇒'
+          '整条购买链都看不到它们 ✓）＋ 记 `coin_gate: block_buy` 日志',
+          "if not coin_allows_buy(_coin_now):" in _el62
+          and "'coin_gate': 'block_buy'" in _el62
+          and 'buy = []' in _el62)
+    check('v1.63b ⑨ ⚠ **不写 `done`、也不写 `blocked`** —— 用户 2026-10-05 纠正：'
+          '「商人格买完都不消失，完全不可能开路」⇒ 不买即可，**无需额外拉黑**；'
+          '`done` 的语义是"这一格点过了"（`block_cell` 也往那写）⇒ 混进去语义会乱 ✗',
+          "note': '金币 %s < %d ⇒ **本图不买商人/宝库**" in _el62
+          and '无需额外拉黑' in _el62)
+
+    # ---------------- ⑩ 执行级：读数 + 门槛（真机 HUD 坐标造的条目）----------------
+    if os.path.exists(os.path.join(HERE, 'probe_coin_behavior.py')):
+        import subprocess as _sp63b
+        _rb = _sp63b.run([sys.executable,
+                          os.path.join(HERE, 'probe_coin_behavior.py')],
+                         stdout=_sp63b.PIPE, stderr=_sp63b.STDOUT,
+                         env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        _ob = _rb.stdout.decode('utf-8', 'replace')
+        check('v1.63b ⑩ 执行级：`coin_count` 读数正确 ＋ '
+              '⚠ **金币与幸运草按行分得清**（只有第 2 行时金币读数必须是 None ——'
+              '防 v1.63 那个"串行"的坑复发 ✗）＋ 门槛 None/0/499999/500000 判定正确',
+              _rb.returncode == 0 and '不会互相串' in _ob,
+              'exit=%d' % _rb.returncode)
+    else:
+        skip('v1.63b ⑩ 金币读数执行级（缺 probe_coin_behavior.py）')
+except Exception as _e63b:      # noqa: BLE001
+    check('v1.63b 守门可运行（%r）' % (_e63b,), False)
+
+# =====================================================================================
+# ㊿⭐⭐⭐ v1.63c【幸运草 < 8 ⇒ **本图剔掉"纯大拇指"目标**】
+#   用户原话（2026-10-05）：
+#     「**而且我发现幸运草低于8还是摇色子，改成低于8这张图的大拇指目标都拉黑不去打**」
+#   依据：大拇指格的**唯一价值**就是"结算面板摇色子刷大拇指装备" ⇒ 草不够时打它
+#     只是白花体力（还要多打一场战斗）✗
+#   ⚠ 只剔**纯 recommend** 格；**带 boss/clover/redEquip 的一律保留** ✓
+#     （那格另有价值，不能因为顺带带了个大拇指就整格丢掉 ✗）
+#   ⚠ 读不到草 ⇒ **不剔**（fail-open，与另两道闸门同口径 ✓）
+# =====================================================================================
+print()
+print('㊿⭐⭐⭐ v1.63c 幸运草 <8 ⇒ 剔掉"纯大拇指"目标（不打白费体力的格）')
+try:
+    check('v1.63c ① `one_round` 里在 **`marked` 算完之后**剔纯 recommend 格'
+          '（`marked` 是标记目标的唯一汇聚点 ⇒ 剔这里整条链都看不到 ✓）'
+          '＋ 门槛就是 `CLOVER_MIN_REROLL`（不另立常数 ✓）',
+          "'clover_gate': 'drop_recommend'" in _el62
+          and 'all(_m == \'recommend\' for _m in _mks_p)' in _el62
+          and "if (_clv_now is not None) and (int(_clv_now) < CLOVER_MIN_REROLL) and marked:" in _el62)
+    check('v1.63c ② ⚠ **只剔纯 recommend**：带别的标记（boss/clover…）**一律保留**'
+          '（防"带大拇指的首领格被整格丢掉" ✗）',
+          'if _mks_p and all(_m == \'recommend\' for _m in _mks_p):' in _el62
+          and '_kept.append(_pp)' in _el62)
+    check('v1.63c ③ ⚠⚠ **`mk[格]` 是 dict（`{\'marks\': [...]}`）不是 list**'
+          '—— 实跑确认过（`scan_board_fast` 的返回格式）；'
+          '按 list 解析会**静默什么都读不到** ⇒ 门槛永不触发 ✗',
+          "isinstance(_vv_p, dict) else list(_vv_p or [])" in _el62,
+          '⚠ 我第一版就是按 list 写的（`list(mk.get(格) or [])`）⇒ 会把 dict 的**键**当标记 ✗')
+    check('v1.63c ④ 读不到草（None）⇒ **不剔**（fail-open：宁可白打一格，'
+          '也别因一次 OCR 失败就整图漏掉所有大拇指 ✗）',
+          '(_clv_now is not None) and (int(_clv_now) < CLOVER_MIN_REROLL)' in _el62)
+    check('v1.63c ⑤ 剔掉时**同步从 `mk` 里 pop**（下游多处读 `mk` ⇒ 不同步会不一致 ✗）'
+          '＋ 记 `recommend_dropped` 进 entry（便于对账 ✓）',
+          'mk.pop(_rcp, None)' in _el62
+          and "entry['recommend_dropped'] = len(_dropped)" in _el62)
+    # 执行级：真机帧口径 + 一格多标记（用 probe 验判据本身 ✓）
+    if os.path.exists(os.path.join(HERE, 'probe_recommend_gate.py')):
+        import subprocess as _sp63c
+        _rc_ = _sp63c.run([sys.executable,
+                           os.path.join(HERE, 'probe_recommend_gate.py')],
+                          stdout=_sp63c.PIPE, stderr=_sp63c.STDOUT,
+                          env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+        _oc = _rc_.stdout.decode('utf-8', 'replace')
+        check('v1.63c ⑥ 执行级：草 <8 ⇒ 只剔纯大拇指；**带 boss 的格保留**；'
+              '草够/读不到 ⇒ 一律不剔（真机帧口径 `1,6=recommend`/`4,2=boss` ＋ 一格多标记 ✓）',
+              _rc_.returncode == 0 and '只剔**纯大拇指**格' in _oc,
+              'exit=%d' % _rc_.returncode)
+    else:
+        skip('v1.63c ⑥ 大拇指闸门执行级（缺 probe_recommend_gate.py）')
+except Exception as _e63c:      # noqa: BLE001
+    check('v1.63c 守门可运行（%r）' % (_e63c,), False)
 
 print()
 print('=' * 78)

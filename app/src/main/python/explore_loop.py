@@ -2877,6 +2877,22 @@ CLOVER_HUD_X = (655, 735)      # 幸运草数字所在 x 区间（实测心 693.
 CLOVER_HUD_Y = (70, 120)       # 所在 y 区间（**第 2 行**；金币在第 1 行 cy≈40 ⇒ 不会撞 ✓）
 CLOVER_MIN_REROLL = 8          # 低于它就**不摇色子**（用户口径；原想 5、后改 8 ✓）
 
+# ⭐⭐⭐⭐ v1.63b【**金币**读数 + 低于阈值就不买商人/宝库】—— 用户 2026-10-05 新需求
+#   用户口径（原话）：「**加上金币低于50万就自动拉黑商人和宝库，高于就正常购买**」
+#    ＋「**也是在扫体力的时候顺便扫，不要让每图时间变长**」
+#
+#   ## ⚠⚠ 手机端坐标必须自己标定（PC 那个 720 系不能照抄）
+#     手机端实测（`tools/probe_clover_row.py`，6 张真机帧**分行**量白字簇）：
+#       · 金币数在 **第 1 行**（`cy ≈ 40`），白字簇 x **609~698**
+#       · 幸运草在 **第 2 行**（`cy ≈ 94`），x 688~699
+#       ⚠ 两者 **x 几乎重合** ⇒ **只能靠 y 分行区分** ✗
+#         （v1.63 第一版把 y 60~120 混着量 ⇒ **金币被当幸运草** ✗ 已修）
+#   ⇒ 金币窗口 = x (595, 715) / y **(15, 65)**（第 1 行，与幸运草的行错开 ✓）
+COIN_HUD_X = (595, 715)        # 金币数字 x 区间（实测 609~698）
+COIN_HUD_Y = (15, 65)          # **第 1 行**（金币 cy≈40；与幸运草的 70~120 不重叠 ✓）
+#   用户口径「**低于 50 万**就拉黑」⇒ 500000；**高于**（含等于）就正常买 ✓
+COIN_MIN_BUY = 500000
+
 
 def clover_count(items):
     """HUD 上「幸运草（四叶草）还剩几个」—— 读不到返回 None（**不猜** ✓）
@@ -2917,6 +2933,58 @@ def clover_count(items):
                 and CLOVER_HUD_Y[0] <= cy <= CLOVER_HUD_Y[1]:
             best = int(t) if best is None else max(best, int(t))
     return best
+
+
+def coin_count(items):
+    """HUD 上「金币还剩多少」—— 读不到返回 None（**不猜** ✓）
+
+    ⭐⭐⭐⭐ v1.63b 新增。用户口径（原话）：
+      「**加上金币低于50万就自动拉黑商人和宝库，高于就正常购买**」
+      「**也是在扫体力的时候顺便扫，不要让每图时间变长**」
+
+    ## ⚠ 零额外成本（用户明确要求）
+      金币数字跟体力在**同一行 HUD**，而体力每轮本来就要读
+      （`stamina(items)` 用的就是同一次 `items`）⇒ 顺手多读一个数字 ✓
+      ⚠ **不新增任何 OCR 调用** —— 调用方必须传**已有的全屏 `items`** ✓
+        （见 `handle_dice` 的 v1.63b 注释：**band 裁过的 items 读不到 HUD** ✗）
+
+    ## ⚠⚠ 与幸运草**只差 y**（这是本函数唯一的坑）
+      手机端实测（`tools/probe_clover_row.py`）：
+        · 金币：**第 1 行** `cy ≈ 40`，白字簇 x **609~698**
+        · 幸运草：**第 2 行** `cy ≈ 94`，x 688~699
+      ⇒ 两者 **x 几乎重合** ⇒ **只能靠 y 分行区分** ✗
+        （v1.63 第一版把 y 60~120 混着量 ⇒ 金币被当幸运草 ✗）
+      ⇒ 本函数 `COIN_HUD_Y = (15, 65)`，与幸运草的 `(70, 120)` **不重叠** ✓
+
+    ## ⚠ 只认**纯数字** ⇒ 不会被体力（带 `/`）/PID（带 `:`）误取 ✓
+    """
+    best = None
+    for it in items or []:
+        t = (it.get('text') or '').replace(' ', '').replace('+', '')
+        if not t.isdigit():
+            continue
+        cx, cy = int(it.get('cx', -1)), int(it.get('cy', -1))
+        if COIN_HUD_X[0] <= cx <= COIN_HUD_X[1] \
+                and COIN_HUD_Y[0] <= cy <= COIN_HUD_Y[1]:
+            best = int(t) if best is None else max(best, int(t))
+    return best
+
+
+def coin_allows_buy(n):
+    """金币够不够买商人/宝库 —— **读不到 ⇒ 允许买**（fail-open，与幸运草闸门同口径 ✓）
+
+    用户口径：「**低于 50 万就拉黑商人和宝库，高于就正常购买**」
+      · `n is None`（OCR 没认出来）⇒ **允许买** ✓
+        理由：宁可买（多花点钱），也别因为**一次 OCR 失败**就整局不买商人/宝库 ✗
+      · `n <  COIN_MIN_BUY(500000)` ⇒ **不许买**（拉黑）
+      · `n >= COIN_MIN_BUY`         ⇒ **正常买** ✓（"高于"含等于 —— 取宽松侧）
+    """
+    if n is None:
+        return True
+    try:
+        return int(n) >= int(COIN_MIN_BUY)
+    except (TypeError, ValueError):
+        return True
 
 
 def stamina(items):
@@ -3768,7 +3836,7 @@ def start_fight(b, log, btn, marks=()):
     return False
 
 
-def handle_dice(b, log, items, tries=3):
+def handle_dice(b, log, items, tries=3, state=None):
     """重投命运之骰（源码 `GameApi.Explore.DiceRerollAsync` + `ChangeClover(-1,"重投命运之骰")`）：
     **每次重投消耗 1 个幸运草**，服务端返回新的掉落；`rerollTime` = 已重投次数（上限 3）。
     按钮就在**战斗结算面板**上（不是另开界面），文本含「骰 / 重投 / 命运」。
@@ -3803,11 +3871,42 @@ def handle_dice(b, log, items, tries=3):
     #     保守：宁可试一次，也别因为**一次 OCR 失败就永远不摇** ✓
     #     （那种情况下面"没弹框就不点确定"那道闸门仍然兜住 ✓）
     #   ## ⚠ 判据从"猜框在不在"改成**确定性的"钱够不够"** ✓
-    _cv_now = clover_count(items)
+    #
+    #   ⛔⛔⛔ v1.63b【**修 v1.63 的真 bug：这个闸门在真机上从来没触发过** ✗✗】
+    #     用户 2026-10-05 报：「**我发现幸运草低于8还是摇色子**」⇒ 查真机日志证实：
+    #       只有 `dice: no_confirm_popup`（老路），**一条 `skip_low_clover` 都没有** ✗
+    #     ## 真根因（**我 v1.63 的实现疏忽**）
+    #       本函数拿到的 `items` 是**带 band 裁过的 OCR** ——
+    #         · `wait_end` 里是 `b.ocr(band=(sy(130), sy(1560)))`（战斗/结算那一带）
+    #         · `popups` 里那份也是结算面板带
+    #       ⇒ **HUD 那一行（cy≈94）根本不在 `items` 里** ✗
+    #       ⇒ `clover_count(items)` **恒返回 None** ⇒ 按"读不到就照常走"⇒ **闸门永不触发** ✗✗
+    #       真机日志实证：`{'dice':'panel', 'items':[{...'开始冒险'...cx 539 cy 1889}]}`
+    #         —— 里面**全是面板/底部条目，HUD 一个都没有** ✓
+    #     ## ⚠⚠ 这与我 v1.62 踩的"veto 被冲掉"是**同一类错**：
+    #       把判断放在一个**拿不到数据**的地方 ⇒ 判据静默失效（而且**fail-open** ⇒ 不报错）
+    #     ## 修法（照"幸运草/体力同一趟 OCR"的原始口径）
+    #       · **`one_round` 轮首**本来就做**全屏 OCR**（`items = b.ocr(tag='round')`，
+    #         含 HUD ✓）⇒ 在那里读一次，存进 `st['clover_now']` / `st['coin_now']` ✓
+    #         **零额外开销**（用户明确要求「不要让每图时间变长」✓）
+    #       · 本函数**优先读 `state`**；`state` 没给（老调用/单测）才退回 `items` ✓
+    _cv_now = None
+    try:
+        if isinstance(state, dict) and state.get('clover_now') is not None:
+            _cv_now = int(state.get('clover_now'))
+    except Exception:       # noqa: BLE001
+        _cv_now = None
+    if _cv_now is None:
+        # 退回：只有当调用方给的是**全屏 items** 时才有意义
+        #   （band 裁过的 ⇒ 这里必然是 None ⇒ 会落到"照常走"，与 v1.63 表现一致）
+        _cv_now = clover_count(items)
     if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:
         STATS['dice_skip_low'] = STATS.get('dice_skip_low', 0) + 1
         log.append({'dice': 'skip_low_clover', 'clover': _cv_now,
                     'min': CLOVER_MIN_REROLL,
+                    'src': ('state' if (isinstance(state, dict)
+                                        and state.get('clover_now') is not None)
+                            else 'items'),
                     'note': '幸运草 %d < %d ⇒ **这张图不摇色子**（用户口径）；'
                             '一次都不点，省掉白点 + 白等 ✓'
                             % (_cv_now, CLOVER_MIN_REROLL)})
@@ -4471,7 +4570,7 @@ def wait_end(b, log, timeout=45, marks=(), exact_marks=None, state=None, rc=None
                         say('       · 结算面板文字认不出，但连读两帧「战斗胜利」⇒ 照常试摇色子 ✓')
                         log.append({'dice': 'win_only_attempt', 'win_streak': win_streak,
                                     'marks': list(marks or []), 'exact': list(_ex or [])})
-                    handle_dice(b, log, items)
+                    handle_dice(b, log, items, state=state)
                     if isinstance(state, dict) and rc is not None:
                         state['diced_rc'] = rc          # ⭐ v1.23：记账（防另一条路径重复摇 ✓）
                     items = b.ocr(band=(LAYOUT.sy(130), LAYOUT.sy(1560)), tag='battle')
@@ -5102,7 +5201,7 @@ def popups(b, items, log, ctx=None):
             log.append({'popup': 'result_dice', 'rc': list(_rc) if _rc else None,
                         'marks': _mk_here})
             try:
-                handle_dice(b, log, items)
+                handle_dice(b, log, items, state=_state)
             except Exception as _ed:      # noqa: BLE001
                 log.append({'popup': 'result_dice_err', 'e': repr(_ed)[:80]})
             if _rc is not None:
@@ -7611,6 +7710,44 @@ def one_round(b, log, rnd, prefix, st):
     items = b.ocr(tag='round')
     st['mapname'] = map_name(items) or st.get('mapname')
     entry = {'round': rnd, 'stamina': stamina(items)}
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐⭐ v1.63b【轮首顺手读 HUD 的**幸运草 / 金币**（同一趟全屏 OCR，零额外开销）】
+    #   用户口径：「**也是在扫体力的时候顺便扫，不要让每图时间变长**」✓
+    #
+    #   ## 为什么必须在这里读（v1.63 的真 bug）
+    #     `handle_dice()` 拿到的 `items` 是**带 band 裁过的**
+    #     （`wait_end` 用 `band=(sy(130), sy(1560))`）⇒ **HUD 行 cy≈94 被裁掉**
+    #     ⇒ 那里 `clover_count(items)` **恒为 None** ⇒ 幸运草闸门**从来没触发过** ✗✗
+    #       （用户 2026-10-05 报：「幸运草低于 8 还是摇色子」—— 查日志证实一条
+    #        `skip_low_clover` 都没有 ✓）
+    #   ## 本处的 `items` 是**全屏**的（`b.ocr(tag='round')`）⇒ HUD 在里面 ✓
+    #   ⚠ 只**取一次**并缓存进 `st`；下游一律读 `st`（**不再重复 OCR** ✓）
+    #   ⚠ 读不到 ⇒ 存 None（**不猜** ✓；下游按"允许/照常"处理）
+    #   ⚠ 幸运草**每轮刷新**（它会随摇色子减少 ⇒ 读得越新越准，且零成本 ✓）
+    try:
+        st['clover_now'] = clover_count(items)
+    except Exception:       # noqa: BLE001
+        st['clover_now'] = None
+    #   ⚠⚠ 金币按**用户口径**：「只进图时读一次」（2026-10-05 选定）✓
+    #     · `st['coin_now']` **只在第一次成功读到**时落定，之后**不再覆盖**（口径稳定 ✓）
+    #     · ⚠ 读失败（None）**不算"读到了"** ⇒ 下一轮继续尝试 ——
+    #       这样"进图那一帧 HUD 还没画全"不会把整图钉死在 None 上 ✓
+    #       （None ⇒ `coin_allows_buy` 返回 True ⇒ 照常买，方向安全 ✓）
+    try:
+        if st.get('coin_now') is None:
+            _cn = coin_count(items)
+            if _cn is not None:
+                st['coin_now'] = _cn
+                st['coin_read_round'] = rnd
+                log.append({'coin_hud': {'coin': _cn, 'min_buy': COIN_MIN_BUY,
+                                         'allow_buy': coin_allows_buy(_cn),
+                                         'round': rnd,
+                                         'note': '**进图读一次**（用户口径）⇒ 本图按它决定'
+                                                 '要不要买商人/宝库 ✓'}})
+    except Exception:       # noqa: BLE001
+        pass
+    entry['clover'] = st.get('clover_now')
+    entry['coin'] = st.get('coin_now')
     # ⭐⭐⭐ 2026-09-30 真机事故修复：**每轮轮首都刷新「探索小队槽」**
     #   旧版只在**轮尾**算一次 slots_free ⇒ 凡是走 `act in ('handled','battle',…)`
     #   提前 return 的轮次**根本不会更新** ⇒ 值一直停在旧读数上 ✗。
@@ -8296,6 +8433,59 @@ def one_round(b, log, rnd, prefix, st):
             % _merch_kept)
     buy = [p for p in c['buy'] if p not in done]
     buy_hidden = [p for p in c.get('buy_hidden', []) if p not in done]   # 未揭示的商人/宝库
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐⭐ v1.63b【**金币低于 50 万 ⇒ 自动拉黑商人 / 宝库**（高于就正常买）】
+    #   用户口径（原话）：「**加上金币低于50万就自动拉黑商人和宝库，高于就正常购买**」
+    #
+    #   ## 为什么在这里做（**这是 `buy`/`buy_hidden` 的唯一汇聚点**）
+    #     `buy`/`buy_hidden` 全仓只有这一处被算成"要买的目标" ⇒ 在这里清空即可
+    #     让**整条购买链**都不再看到它们 ✓
+    #     ⚠ 比我先前想的"塞进 `st['done']`"更干净 ——
+    #       `done` 的语义是「这一格**点过**了」（`block_cell` 也往那写）⇒ 混进去语义会乱 ✗
+    #
+    #   ## ⚠ 用户口径：「**完全不可能开路**」（2026-10-05 用户纠正我）
+    #     我最初说"商人格是开路好位置" —— **这句是错的，已收回** ✗
+    #     依据（手机端自己的注释 `explore_loop.py:8246`，记的是**用户明确说的**）：
+    #       「它**也不解锁相邻格**（用户明确说的）⇒ 放回它没有任何收益 ✗」
+    #       且商人**买完不消失**（同格循环购买）⇒ 点它也不会揭示任何新格
+    #     ⇒ 所以**清空 buy/buy_hidden 就是完整的"拉黑"**（不买、也永远不会被当成开路格 ✓）
+    #       —— 不需要额外写 `done`，更不该写 `blocked`（那是"名字疑似特殊方块"的另一套机制）
+    #
+    #   ## ⚠ 方向安全（与幸运草闸门同口径）
+    #     金币**读不到**（None）⇒ `coin_allows_buy` 返回 True ⇒ **照常买** ✓
+    #     宁可多花点钱，也别因为一次 OCR 失败就整图不买商人/宝库 ✗
+    _coin_now = st.get('coin_now')
+    if not coin_allows_buy(_coin_now):
+        _nb, _nh = len(buy), len(buy_hidden)
+        buy = []
+        buy_hidden = []
+        if (_nb or _nh) and log is not None:
+            log.append({'coin_gate': 'block_buy', 'coin': _coin_now,
+                        'min_buy': COIN_MIN_BUY,
+                        'dropped_buy': _nb, 'dropped_hidden': _nh,
+                        'note': '金币 %s < %d ⇒ **本图不买商人/宝库**（用户口径）'
+                                '—— 且它们**不解锁相邻格**（用户明确说的）'
+                                '⇒ 不买即可，无需额外拉黑 ✓'
+                                % (_coin_now, COIN_MIN_BUY)})
+        if (_nb or _nh):
+            try:
+                say('       · 金币 %s < %d ⇒ 本图**不买**商人/宝库（%d 已揭示 + %d 未揭示）✓'
+                    % (_coin_now, COIN_MIN_BUY, _nb, _nh))
+                status('金币不足 · 不买商人宝库')
+            except Exception:       # noqa: BLE001
+                pass
+    else:
+        # 允许买 ⇒ 记一次"看过了"，便于与上面那条对账（只在**真的有钱**时记，防刷屏）
+        try:
+            if (_coin_now is not None) and (st.get('coin_gate_logged') != _coin_now):
+                st['coin_gate_logged'] = _coin_now
+                if log is not None:
+                    log.append({'coin_gate': 'allow_buy', 'coin': _coin_now,
+                                'min_buy': COIN_MIN_BUY,
+                                'note': '金币 %s ≥ %d ⇒ 正常购买 ✓'
+                                        % (_coin_now, COIN_MIN_BUY)})
+        except Exception:       # noqa: BLE001
+            pass
     # ⭐ v1.27：**已经买完/消耗掉的格子不再当目标**（幽灵目标根因，见「vault: consumed」注释）
     _cons_early = st.get('buy_consumed') or set()
     if _cons_early:
@@ -8385,6 +8575,66 @@ def one_round(b, log, rnd, prefix, st):
     except Exception:       # noqa: BLE001
         pass
     marked = [marks_mod.cell_center(r, cc) for (r, cc) in sorted(mk)]
+    # ─────────────────────────────────────────────────────────────────────────
+    # ⭐⭐⭐⭐ v1.63b【幸运草 < 8 ⇒ **本图不要大拇指目标**（用户口径）】
+    #   用户原话（2026-10-05）：
+    #     「**而且我发现幸运草低于8还是摇色子，改成低于8这张图的大拇指目标都拉黑不去打**」
+    #
+    #   ## 为什么（与摇色子闸门配套）
+    #     大拇指格的**唯一价值**就是"结算面板上能摇色子刷大拇指装备" ✓
+    #     ⇒ 草不够时摇不了 ⇒ 打它只是白花体力（还要多打一场战斗）✗
+    #     用户口径就是"**这张图的大拇指目标都拉黑不去打**" ✓
+    #
+    #   ## ⚠ 为什么在 `marked` 这里做（**这是标记目标的唯一汇聚点**）
+    #     `marked` 由 `mk`（`scan_board_fast` 认出的标记格）算出，随后一路决定
+    #     `marked_px` / 点序 / `targets` ⇒ 在这里剔掉 ⇒ 整条链都看不到它 ✓
+    #     ⚠ **只剔 `recommend`（大拇指）** —— `boss` / `clover` / `redEquip` **一律不动** ✗
+    #       （它们跟幸运草无关：boss 是首领关、clover 是四叶草格、红装是停手信号 ✓）
+    #
+    #   ## ⚠ 方向安全（与另两道闸门同口径）
+    #     幸运草**读不到**（None）⇒ **不剔**（照常打 ✓）
+    #     宁可白打一格，也别因为一次 OCR 失败就整图漏掉所有大拇指 ✗
+    #   ## ⚠⚠ 与 `dice_gate` 的关系：**不冲突**
+    #     `dice_gate` 决定"结算面板上摇不摇"；本闸门决定"要不要去打那一格"。
+    #     草不够时两边都关 ⇒ 一致 ✓（草够时两边都开 ⇒ 也一致 ✓）
+    _clv_now = st.get('clover_now')
+    if (_clv_now is not None) and (int(_clv_now) < CLOVER_MIN_REROLL) and marked:
+        try:
+            _kept, _dropped = [], []
+            for _pp in marked:
+                _rcp = cell_of(_pp[0], _pp[1])
+                # ⚠ `mk[格]` 是 **dict**（`{'marks': [...], 'at':…, 'score':…}`），
+                #   不是 list —— 实跑确认过（`scan_board_fast` 的返回格式）✓
+                _vv_p = mk.get(_rcp) or {}
+                _mks_p = list(_vv_p.get('marks') or []) \
+                    if isinstance(_vv_p, dict) else list(_vv_p or [])
+                # ⚠ 该格的标记里**只有** recommend 才剔；只要还带别的标记（boss/clover…）
+                #    ⇒ **保留**（那格另有价值，不能因为带了个大拇指就整格丢掉 ✗）
+                if _mks_p and all(_m == 'recommend' for _m in _mks_p):
+                    _dropped.append(_rcp)
+                else:
+                    _kept.append(_pp)
+            if _dropped:
+                marked = _kept
+                for _rcp in _dropped:
+                    mk.pop(_rcp, None)          # ⚠ 同步从 `mk` 里剔（下游多处读它 ✓）
+                entry['recommend_dropped'] = len(_dropped)
+                if log is not None:
+                    log.append({'clover_gate': 'drop_recommend',
+                                'clover': int(_clv_now), 'min': CLOVER_MIN_REROLL,
+                                'cells': ['%d,%d' % k for k in _dropped[:12]],
+                                'n': len(_dropped),
+                                'note': '幸运草 %d < %d ⇒ **本图不把大拇指当目标**'
+                                        '（用户口径）—— 摇不了色子就打它白费体力 ✗；'
+                                        '⚠ 只剔纯 recommend 格，带 boss/clover 的一律保留 ✓'
+                                        % (int(_clv_now), CLOVER_MIN_REROLL)})
+                try:
+                    say('       · 幸运草 %d < %d ⇒ 本图**不打**大拇指目标 %d 格 ✓'
+                        % (int(_clv_now), CLOVER_MIN_REROLL, len(_dropped)))
+                except Exception:           # noqa: BLE001
+                    pass
+        except Exception:       # noqa: BLE001
+            pass
     # ⭐⭐ 2026-09-26 用户需求（原话）：
     #   「如果探索格子有空闲的就要找这种格子点探索来填满；如果探索格子被填满就不需要找」
     #   这种格子 = 紫/橙探索地块（ID 后缀 221/321/331 ✓ 小助手官方分类 ✓）
