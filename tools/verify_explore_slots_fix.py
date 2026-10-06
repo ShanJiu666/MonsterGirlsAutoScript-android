@@ -8738,6 +8738,169 @@ try:
 except Exception as _e75:       # noqa: BLE001
     check('v1.75 守门可运行（%r）' % (_e75,), False)
 
+# ══════════════════════════════════════════════════════════════════════════
+# v1.76 `fog_sil` 众数**塌回 0.04** ⇒ 矿洞整片岩地判"雾下有东西" ⇒ **连锁全断**
+#   用户 2026-10-06 原话（又一次）：**「规划怎么又犯老毛病了，忘记了连锁机制，挨个去点」**
+#   ## 病根（v1.62 的众数在**真机新帧上会退化**）
+#     `round(v, 3)` 分箱（0.001 粒度）⇒ "岩地"这**同一个视觉簇**被切成
+#     `0.1126/0.1136/0.1141/0.1147/0.1152`… 各 3~7 票；而"真平坦雾格"**都精确 = 0.0000**
+#     ⇒ 一个箱卷走全部那些票 ⇒ 众数 0.0 ⇒ 阈值 `max(0.04, 0)=0.04`（岩地 0.11 远超）
+#     ⇒ 判"雾下有东西" ⇒ `plain=False` ⇒ **连锁全断** ✗✗
+#   ## 真机铁证（`_tmpman/frame74_board_r0_152127.png`，v1.74/v1.75 那两把的真机帧）
+#     生产代码实测：`_fog_sil_thr=0.04` / `_fog_sil_mode=0.0`（同一图种另 3 张帧却是 0.18）
+#     模型级：**22 格**"数据表说空地、却 `plain=False`"（= 连锁断）
+#     规划级：细箱 `cost 14 / 11 步` vs 粗箱 `cost 9 / 6 步` ⇒ 确实影响计划 ✓
+#   ## 修法 = **两级众数**：粗箱 0.01 定位"地面纹理簇" ⇒ 簇内取众数细值
+#     ⚠ 量纲与 v1.62 完全一致（仍 `众数×1.6`）⇒ 只在"碎片抢票"时才不同 ✓
+#   ## 接力单建议的两条**已实测否掉**（`tools/probe_fog_fix_compare.py`）
+#     · 「平局取较大值」⇒ **无效**（真机上 0.0 常是**票数严格最多**，不是平局）✗
+#     · 「只对名字像空地的格统计众数」⇒ **最差**（阈值塌到 1.6 ⇒ 一格不拦、26 格全放行）✗✗
+#   ## ⚖ 已记账的代价（诚实标注，**不许**因此退回 0.04）
+#     `(5,7)` 类**低分**（0.49~0.60）误认成「旅行商人」的格会被放成空地 ——
+#     裁图肉眼核验（`_tmpman/fogrel/sheet.png`）那里**确实有物体** ✗，而 v1.70 闸门
+#     要求 `score>=0.85` ⇒ **兜不住**它。取舍依据：现口径**每次**断 22 格连锁（用户已两次报），
+#     代价是极少数低分误认格 ⇒ 取修好连锁 ✓
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    import spots as _sp76
+    _SRC76 = io.open(os.path.join(MAPBOT, 'spots.py'), encoding='utf-8').read()
+
+    # ── A. 结构级 ─────────────────────────────────────────────────────────
+    check('v1.76 A① ⭐⭐⭐ 众数**两级取**：先用粗箱定位"地面纹理簇"，'
+          '再在**该簇内部**取细值作代表 —— 旧写法（直接对 0.001 箱取众数）'
+          '会让"精确 0.0"一个箱卷走全部票 ⇒ 阈值塌回 0.04 ✗',
+          'FOG_SIL_MODE_COARSE' in _SRC76
+          and '_grp.setdefault(round(_s, _nd), {})' in _SRC76
+          and '_win = max(sorted(_tot), key=lambda x: (_tot[x], -x))' in _SRC76
+          and '_h2 = _grp[_win]' in _SRC76,
+          '⚠ 缺任一句 ⇒ 退回"碎片抢票"那个坑')
+    check('v1.76 A② ⭐⭐ ⚠ **量纲不许变**：阈值仍必须是 `众数 × FOG_SIL_MODE_K(1.6)`，'
+          '且 `_mode2` 取自**簇内细值**（不是粗箱边界 —— 那会让阈值系统性偏低 '
+          '0.1824→0.1760 ⇒ 多放行内容物 ✗）',
+          '_sbase = max(float(FOG_SIL_MIN), float(_mode2) * FOG_SIL_MODE_K)' in _SRC76
+          and '_mode2 = max(sorted(_h2), key=lambda x: (_h2[x], -x))' in _SRC76
+          and '_sbase = max(float(FOG_SIL_MIN), float(_win) * FOG_SIL_MODE_K)'
+          not in _SRC76,
+          '⚠ 用 `_win`（粗箱边界）算阈值 ⇒ 口径漂了 ✗')
+    check('v1.76 A③ ⚠ `_fog_sil_thr` 仍**不塞进 `out`**（`cells_of` 的 '
+          '`sorted(st.items())` 混进字符串键会 **TypeError 直接崩** ✗✗ —— '
+          'v1.62 实跑当场抓到过），且**粗簇**也要挂 Board 实例（诊断用）',
+          "out['_fog_sil_thr']" not in _SRC76
+          and 'self._fog_sil_thr =' in _SRC76
+          and 'self._fog_sil_win =' in _SRC76)
+    check('v1.76 A④ ⛔ **撤回守门（两条建议的实测否证）**：'
+          '(a) "平局取较大值"对真机无效 —— 0.0 常常是**票数严格最多**（不是平局），'
+          '本条修的是"碎片抢票"而不是平局方向；'
+          '(b) "只对名字像空地的格统计众数"**实测最差**（阈值塌到 1.6 ⇒ 一格不拦、'
+          '26 个低分内容物全放行）⇒ **取样集不许按名字过滤**',
+          'is_plain_spot' not in _SRC76.split('_sils = {')[1].split('_sbase')[0],
+          '⚠ 取样集里出现数据表/名字过滤 ⇒ 回到实测最差那条 ✗')
+
+    # ── B. 执行级：**坏帧必须被修好** ──────────────────────────────────────
+    _F76 = os.path.join(PROJ, '..', '_tmpman', 'frame74_board_r0_152127.png')
+    _F76B = os.path.join(_FLOOR_DIR, 'r_152223_0.png')       # 海滩负样本
+    if not os.path.exists(_F76):
+        skip('v1.76 B①~B④ 执行级（缺 `_tmpman/frame74_board_r0_152127.png` '
+             '⇒ 没真验证；复现：`adb shell touch …/bagdbg/pubframe.flag` 后跑一张图）')
+    else:
+        import cv2 as _cv76
+        import numpy as _np76
+        import mapsim as _ms76
+        import mapsolve as _mv76
+
+        _im76 = _cv76.imdecode(_np76.fromfile(_F76, dtype=_np76.uint8),
+                               _cv76.IMREAD_COLOR)
+        _bd76 = _sp76.Board('S30001')
+        _st76 = _bd76.state(_im76, thr=0.0)
+        _nobj76 = sum(1 for v in _st76.values()
+                      if isinstance(v, dict) and v.get('fog_object'))
+        # ⚠ 取值一律用 `getattr(..., None)`：源码被 stash 时这两个属性**不存在** ⇒
+        #   直接属性访问会抛 `AttributeError` ⇒ 把本组后面几条断言**全吞掉** ✗
+        #   （与 v1.76 自己的教训同族：切片/取属性失败不许连坐后面的断言 ✓）
+        _thr76 = getattr(_bd76, '_fog_sil_thr', None)
+        _mode76 = getattr(_bd76, '_fog_sil_mode', None)
+        _win76 = getattr(_bd76, '_fog_sil_win', None)
+        check('v1.76 B① ⭐⭐⭐ **执行级：坏帧的阈值必须被修回 0.18 档** —— '
+              '修复前 `_fog_sil_thr=0.04`（`_fog_sil_mode=0.0` ⇒ 岩地 0.11 全判"有东西"）；'
+              '修复后阈值 **%s**（众数 %s、胜出粗簇 %s）⇒ 判"有东西"仅 **%d 格**'
+              % (_thr76, _mode76, _win76, _nobj76),
+              _thr76 is not None and _thr76 > 0.10 and _nobj76 <= 3,
+              '阈值=%s 判有东西=%d 格（修复前 0.04 / 17 格）' % (_thr76, _nobj76))
+
+        # ★★ 对照项：**同一张帧**、用旧口径（直接对 0.001 箱取众数）⇒ 必须是 0.04
+        _h76 = {}
+        for _v in _st76.values():
+            if isinstance(_v, dict) and _v.get('fog_sil') is not None:
+                _s = round(float(_v['fog_sil']), 3)
+                _h76[_s] = _h76.get(_s, 0) + 1
+        _oldmode76 = max(sorted(_h76), key=lambda x: (_h76[x], -x))
+        _oldthr76 = max(float(_sp76.FOG_SIL_MIN), float(_oldmode76) * _sp76.FOG_SIL_MODE_K)
+        check('v1.76 B② ⭐⭐ **对照项（证明用例真的在测这个 bug）**：同一张帧、'
+              '按**旧口径**（0.001 箱直接取众数）⇒ 阈值必须是 **0.0400**、'
+              '众数必须是 **0.0** —— ⚠ 没有这条的话，万一将来帧换了/病根漂了，'
+              'B① 仍可能绿而**测的不是本 bug** ✗',
+              abs(_oldthr76 - 0.04) < 1e-9 and abs(_oldmode76) < 1e-9,
+              '旧口径：众数=%.4f 阈值=%.4f（应 0.0 / 0.04）' % (_oldmode76, _oldthr76))
+
+        # ★★★ 模型级：修好后**不许**再有"表说空地却 plain=False"的格
+        _mk76 = {}
+        try:
+            import marks as _mk76m
+            _mk76 = _mk76m.scan_board_fast(_im76) or {}
+        except Exception:       # noqa: BLE001
+            _mk76 = {}
+        for _k76, _v76 in (_mk76 or {}).items():
+            if isinstance(_k76, tuple) and _k76 in _st76 and isinstance(_v76, dict):
+                _st76[_k76]['marks'] = list(_v76.get('marks') or [])
+        _cp76 = EL.find_camp_cell(_st76) or EL.cell_center(2, 2)
+        _cells76 = EL._cells_for_model(
+            {'obs': _st76, 'spawn': _cp76, 'camp': _cp76, 'done': [], 'marks': _mk76},
+            {'st': _st76}, log=None, tag='v76', mark_revealed=False, drop_done=False)
+        _sim76 = _ms76.MapSim.from_observation(_cells76, _sp76.spot_rows())
+        _broken76 = []
+        for _r76 in range(1, 6):
+            for _c76 in range(1, 8):
+                _bi76 = _sim76.board[(_r76 - 1) * 7 + (_c76 - 1)]
+                if _bi76 < 0:
+                    continue
+                _o76 = _cells76.get((_r76, _c76)) or {}
+                try:
+                    _tp76 = bool(_sp76.is_plain_spot(_o76.get('sid')))
+                except Exception:       # noqa: BLE001
+                    continue
+                # ⚠ 战斗型地块本来就该 `plain=False`（`is_fight_spot` 分支）⇒ 排除
+                try:
+                    if _sp76.is_fight_spot(_o76.get('sid')):
+                        continue
+                except Exception:       # noqa: BLE001
+                    pass
+                if (not _sim76.blocks[_bi76].plain) and _tp76:
+                    _broken76.append('%d,%d' % (_r76, _c76))
+        check('v1.76 B③ ⭐⭐⭐ **执行级：连锁真的恢复了** —— 修好后，'
+              '"数据表说是空地、模型却判 `plain=False`"的格必须 **= 0**'
+              '（修复前 **22 格**，正是用户报的"挨个去点"）'
+              '⚠ 战斗型地块按设计 `plain=False`，已排除',
+              len(_broken76) == 0,
+              '仍断连锁的格=%s' % (_broken76 or '无 ✓'))
+
+        # ★★ 负样本：海滩帧（众数 0.000）**老行为一字不变**
+        if not os.path.exists(_F76B):
+            skip('v1.76 B④ 负样本（缺 `_tmpman/cal/r_152223_0.png`）')
+        else:
+            _im76b = _cv76.imdecode(_np76.fromfile(_F76B, dtype=_np76.uint8),
+                                    _cv76.IMREAD_COLOR)
+            _bd76b = _sp76.Board('S30001')
+            _bd76b.state(_im76b, thr=0.0)
+            _thr76b = getattr(_bd76b, '_fog_sil_thr', None)
+            _mode76b = getattr(_bd76b, '_fog_sil_mode', None)
+            check('v1.76 B④ ⭐⭐ **负样本守门**：海滩帧（众数 0.000 ⇒ 胜出粗簇 0.00）'
+                  '阈值必须**仍是 0.04**（老行为一字不变 ✓）'
+                  '—— ⚠ 没有这条的话，把阈值一律抬高也能让 B①/B③ 绿 ✗',
+                  _thr76b is not None and abs(_thr76b - 0.04) < 1e-9,
+                  '阈值=%s（应 0.04）众数=%s' % (_thr76b, _mode76b))
+except Exception as _e76:       # noqa: BLE001
+    check('v1.76 守门可运行（%r）' % (_e76,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
