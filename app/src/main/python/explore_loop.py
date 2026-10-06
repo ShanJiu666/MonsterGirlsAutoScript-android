@@ -5506,6 +5506,49 @@ def _set_slots_free(ctx, v):
         pass
 
 
+# ⭐⭐⭐ v1.77【`slots_free == 0` 有两种来源，**必须分开**】
+#   用户 2026-10-06 原话：「**探索紫地块不正常，派遣不出去**」＋「**点不到一键派遣**」
+#
+#   ## 真机铁证（`_tmpman/v176_dispatch/bagdbg/mgas_log.txt`，20:24 那把废弃矿洞）
+#     完美的 **2 轮死循环**，**17 次派遣全是 `skip_slots_full`、0 次成功**：
+#       奇轮  free_txt=1 busy=2  slots_free=1 → 点探索 ✓
+#       偶轮  free_txt=0 busy=1  slots_free=0 → dispatch: skip_slots_full ✗（关面板）
+#     ⭐ **决定性逻辑证明（不需要任何帧）**：17 次派遣**一次都没成功**
+#       ⇒ 槽位真实状态**整场没变过** ⇒ 那个 `0` **只能是读数假象**
+#       （真满不可能下一轮又变回 1）
+#     ⭐ 帧侧确证：对那 9 张真机帧跑真 OCR，「**空闲**」**每一张都读到**（conf 1.00）、
+#       倒计时稳定递减（`04:23:49`→`04:12:45`）⇒ 槽一直是空的，只是**派遣被跳过** ✗
+#
+#   ## 根因：**"读不到"被当成了"确认为满"**
+#     v1.73 为治「假空闲 ⇒ 连派 7 轮」，把"读不到空闲"一律写成 `0`（fail-closed）。
+#     可派遣分支把这个 `0` 当成**"三个槽已满"的正面结论** ⇒ 直接把面板关掉 ✗
+#     ⚠ 而 v1.73 **真正治住**那个死循环的其实是**探索入口**那道闸门
+#       （`_is_purple and _free_now > 0` ⇒ 读不到时不再点探索 ⇒ 循环断掉 ✓）
+#       ⇒ 派遣这道 `slots_free<=0` 是**多余且有害的**（它把上一轮已决定要派的队取消了 ✗）
+#
+#   ## 修法：派遣只认**正面证据**
+#     新增 `slots_full_confirmed`：**只在"游戏真的拒绝过"时**置 True
+#     （= `slots_full_latched` 那条路：连点两次「探索」面板都不关 ⇒ 游戏说没有空闲槽 ✓）
+#     · 派遣分支：`free <= 0` **且** `confirmed` ⇒ 才跳过（关面板）
+#     · `free <= 0` 但不 confirmed（= 读数不可靠）⇒ **照常派遣**
+#       ⚠ 派不动怎么办？**下面本来就有验证**（点完重 OCR，面板还在 ⇒ `still_open_close`）
+#         ⇒ 真有"满了却误派"也只是**多点一下 + 面板关掉**，不会像现在这样**永远派不出去** ✓
+#     · 读到 `free > 0` ⇒ 立刻清掉 confirmed（槽真的空出来了 ✓）
+#     ⛔ **v1.73 的保护必须原样保留**：`one_round` 里"读不到 ⇒ 写 0"**不许**改回
+#       `st.get('slots_free', 1)`（那正是"假空闲连派"的病根 ✗，门禁 `v1.73 A①` 钉着）
+def _set_slots_full_confirmed(ctx, v):
+    """记「槽位满」是不是**有正面证据**（游戏拒绝过）—— 见上面 v1.77 长注释 ✓"""
+    v = bool(v)
+    try:
+        ctx['slots_full_confirmed'] = v
+    except Exception:       # noqa: BLE001
+        pass
+    try:
+        (ctx.get('flags') or {})['slots_full_confirmed'] = v
+    except Exception:       # noqa: BLE001
+        pass
+
+
 def _explore_panel_visible(items, ditems):
     """当前这帧是不是**地块面板**（「探索产出」标题 或 看得见的「探索」按钮）"""
     if fb(items, L['expl']):
@@ -5750,8 +5793,22 @@ def popups(b, items, log, ctx=None):
     if EXPLORE_DISPATCH and any(fb(items, k) for k in ('探索配队', '一键派遣',
                                                  '键派遣', '开始探索')):
         # ⭐ 槽位满了 ⇒ 不能派遣（用户：探索满了还在探索 ✗）⇒ 关掉面板 ✓
-        if int(ctx.get('slots_free', 1) or 0) <= 0:
-            log.append({'dispatch': 'skip_slots_full'})
+        # ⭐⭐⭐ v1.77【**只认正面证据**：见 `_set_slots_full_confirmed` 上方长注释】
+        #   ⛔ 旧写法只判 `slots_free <= 0` —— 可那个 0 **有两种来源**：
+        #     ① `one_round` 里"读不到「空闲」⇒ 写 0"（v1.73 的 fail-closed，**读数不可靠** ✗）
+        #     ② `_set_slots_free(ctx, 0)`：游戏**真的拒绝过**（两次点探索面板都不关）✓
+        #   旧写法把 ① 也当成"确认为满" ⇒ **直接把派遣面板关掉** ⇒ 用户报的
+        #   「**派遣不出去**」「**点不到一键派遣**」✗✗
+        #   真机铁证：17 次派遣**全是** `skip_slots_full`、**0 次成功**，而帧上
+        #   「空闲」**每张都读到**（conf 1.00）⇒ 那个 0 是读数假象 ✓
+        #   ⇒ 只有 ②（confirmed）才跳；① 照常派遣 —— 下面**本来就有验证**
+        #     （点完重 OCR，面板还在 ⇒ `still_open_close`）⇒ 真满也只是多点一下 ✓
+        _sff = int(ctx.get('slots_free', 1) or 0)
+        _sf_confirmed = bool(ctx.get('slots_full_confirmed'))
+        if _sff <= 0 and _sf_confirmed:
+            log.append({'dispatch': 'skip_slots_full', 'slots_free': _sff,
+                        'confirmed': True,
+                        'note': '槽位满**有正面证据**（游戏拒绝过）⇒ 关掉面板不派遣 ✓'})
             say('       · 三个探索槽已满，关掉派遣面板（不派遣 ✓）')
             status('三个小队槽已满 · 收起面板')
             x = find_x(items)
@@ -5764,6 +5821,13 @@ def popups(b, items, log, ctx=None):
                 else:
                     _panel_tap(b, 275, 1507, 'norm', log=log, what='返回(兜底)')
             return 'handled'
+        if _sff <= 0:
+            # ⭐ v1.77：读不到「空闲」但**游戏没拒绝过** ⇒ 照常派遣
+            #   ⚠ 这条日志是"读数不可靠却仍然派遣"的证据（旧代码在这里静默跳过 ✗）
+            log.append({'dispatch': 'dispatch_despite_unknown', 'slots_free': _sff,
+                        'confirmed': False,
+                        'note': '⚠ 读不到「空闲」但**游戏没拒绝过** ⇒ 照常派遣'
+                                '（旧代码把这个 0 当成"确认为满"⇒ 永远派不出去 ✗）'})
         _gone = False
         it2 = None          # ⭐ 初始化：下面 `if _try and it2` 与收尾的 find_x/n_free 都要读它
         for _try in range(2):
@@ -5956,10 +6020,15 @@ def popups(b, items, log, ctx=None):
             return 'handled'
         # ⭐ 连点两次都没反应 ⇒ **游戏说没有空闲槽**（HUD 读数错了）⇒
         #   记满本图（后面的紫/橙格直接走「战斗」分支 ✓ 用户 09-26 口径「满了就改战斗」）
+        # ⭐⭐⭐ v1.77：**这就是"槽位满"的唯一正面证据** ⇒ 同时置 `slots_full_confirmed`
+        #   （派遣分支靠它区分"读不到"与"确认为满"，见 `_set_slots_full_confirmed` ✓）
         _set_slots_free(ctx, 0)
+        _set_slots_full_confirmed(ctx, True)
         _can_fight = _fight_panel_visible(items, ditems)
         log.append({'explore': 'slots_full_latched', 'taps': _n_ex,
-                    'at': _eat, 'can_fight': _can_fight})
+                    'at': _eat, 'can_fight': _can_fight,
+                    'note': '游戏**拒绝过**两次 ⇒ 这是"槽位满"的**正面证据** '
+                            '（v1.77 起派遣分支也用它 ✓）'})
         say('       · 「探索」点了两次都没反应 ⇒ 探索槽其实是满的（本图改开打）')
         status('小队槽已满 · 这格改开打')
         if not _can_fight:
@@ -8355,6 +8424,9 @@ def one_round(b, log, rnd, prefix, st):
         if _sf_now is not None:
             st['slots_free'] = _sf_now
             entry['slots_free'] = _sf_now
+            # ⭐⭐⭐ v1.77：**读到「空闲」是硬证据** ⇒ 槽位满的结论立刻作废
+            #   （否则 confirmed 会一直挂着，把后面的派遣全掐掉 ✗）
+            st['slots_full_confirmed'] = False
             if _sf_now > 0 and (_PANEL_STUCK.get('expl') or 0) >= 2:
                 _PANEL_STUCK['expl'] = 0
                 log.append({'slots': 'free_again', 'free': _sf_now})
@@ -8372,7 +8444,13 @@ def one_round(b, log, rnd, prefix, st):
             #   ⇒ 现在**三处同源**：①`st['slots_free'] = 0` ②`entry` ③下面 ctx 读 `st`
             st['slots_free'] = 0
             entry['slots_free'] = 0
-    act = popups(b, items, log, ctx={'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+    act = popups(b, items, log, ctx={'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0),
+                                      # ⭐⭐⭐ v1.77【必须跟着传，否则派遣分支读不到 ⇒
+                                      #   退回"把读不到当确认为满"那个坑 ✗】
+                                      #   ⚠ 这正是 v1.73 的教训（**在 A 处改状态、
+                                      #   做决策的地方读 B 处**）⇒ 新增字段一律**同一处 ctx 传齐** ✓
+                                      'slots_full_confirmed': st.get('slots_full_confirmed', False),
+                                      'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
                                      'tapped': st.get('last'),
                                      'force_fight': st.get('force_fight'),
                                      'road': st.get('road') or [],
@@ -8617,7 +8695,10 @@ def one_round(b, log, rnd, prefix, st):
         else:
             # 整盘暗格 ⇒ 多半盖着面板 ⇒ 这里补一次**全屏 OCR** 再关
             items = b.ocr(tag='round_full')
-            _hctx = {'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+            _hctx = {'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0),
+                     # ⭐ v1.77：与上面那处 ctx **必须一致**（v1.73 的教训 ✓）
+                     'slots_full_confirmed': st.get('slots_full_confirmed', False),
+                     'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
                      'tapped': st.get('last'),
                      'force_fight': st.get('force_fight'),
                      'road': st.get('road') or [],

@@ -8901,6 +8901,144 @@ try:
 except Exception as _e76:       # noqa: BLE001
     check('v1.76 守门可运行（%r）' % (_e76,), False)
 
+# ══════════════════════════════════════════════════════════════════════════
+# v1.77 派遣分支把"**读不到**「空闲」"当成"**确认为满**" ⇒ **派遣不出去**
+#   用户 2026-10-06 原话：「**探索紫地块不正常，派遣不出去**」＋「**点不到一键派遣**」
+#   ## 真机铁证（`_tmpman/v176_dispatch/bagdbg/mgas_log.txt`，20:24 那把废弃矿洞）
+#     完美的 **2 轮死循环**，**17 次派遣全是 `skip_slots_full`、0 次成功**：
+#       奇轮 free_txt=1 busy=2 slots_free=1 → 点探索 ✓
+#       偶轮 free_txt=0 busy=1 slots_free=0 → dispatch: skip_slots_full ✗（关面板）
+#     ⭐ **决定性逻辑证明（不需要任何帧）**：17 次派遣**一次都没成功**
+#       ⇒ 槽位真实状态**整场没变过** ⇒ 那个 0 **只能是读数假象**（真满不会下轮变回 1）
+#     ⭐ 帧侧确证（真 OCR 跑那 9 张帧）：「**空闲**」**每张都读到**（conf 1.00）、
+#       倒计时稳定递减（`04:23:49`→`04:12:45`）⇒ 槽一直是空的，只是派遣被跳过 ✗
+#   ## 根因："读不到"与"真的满"在派遣分支上**不可区分**
+#     v1.73 为治"假空闲连派"把"读不到"写成 0（fail-closed）；派遣分支把这个 0
+#     当成"三个槽已满"的**正面结论** ⇒ 直接关面板 ✗
+#     ⚠ 而 v1.73 真正治住死循环的是**探索入口**那道闸门（`_free_now > 0`）⇒
+#       派遣这道 `slots_free<=0` 是**多余且有害的**
+#   ## 修法：派遣只认**正面证据** `slots_full_confirmed`（游戏拒绝过两次 = 真满）
+#     ⛔ **v1.73 的"读不到⇒0"不许改回**（那正是"假空闲"的病根 ✗）
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _SRC77 = io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                     encoding='utf-8').read()
+
+    # ── A. 结构级 ─────────────────────────────────────────────────────────
+    check('v1.77 A① ⭐⭐⭐ 派遣分支**不再只看** `slots_free<=0` —— '
+          '必须同时要求 `slots_full_confirmed`（= 游戏**真的拒绝过**的正面证据）'
+          '｜⛔ 旧写法把它当成"确认为满" ⇒ 用户报的「**派遣不出去**」✗',
+          '_sff <= 0 and _sf_confirmed' in _SRC77
+          and "if int(ctx.get('slots_free', 1) or 0) <= 0:" not in _SRC77,
+          '⚠ 少了 confirmed ⇒ 读数不可靠时永远派不出去 ✗')
+    check('v1.77 A② ⭐⭐⭐ **正面证据只有一个来源**（且必须真的置上）：'
+          '`slots_full_latched`（连点两次「探索」面板都不关）处要 '
+          '`_set_slots_full_confirmed(ctx, True)`',
+          'def _set_slots_full_confirmed(' in _SRC77
+          and '_set_slots_full_confirmed(ctx, True)' in _SRC77,
+          '⚠ 不置 ⇒ confirmed 恒 False ⇒ A① 的闸门永不生效（等于全放行）')
+    check('v1.77 A③ ⭐⭐ **读到「空闲」是硬证据 ⇒ 立刻清 confirmed**'
+          '（否则 confirmed 一直挂着、把后面的派遣全掐掉 ✗）',
+          "st['slots_full_confirmed'] = False" in _SRC77)
+    check('v1.77 A④ ⭐⭐⭐ **三处 ctx 同源**：新字段必须跟着两处 `popups` 的 ctx 一起传 '
+          '—— ⚠ 这正是 **v1.73 的教训**（"在 A 处改状态、做决策的地方读 B 处" ⇒ 白改 ✗）；'
+          '少传一处 ⇒ 派遣分支读不到 ⇒ 退回旧行为 ✗',
+          _SRC77.count("'slots_full_confirmed': st.get('slots_full_confirmed', False)") >= 2,
+          '传了 %d 处（需要 ≥2）'
+          % _SRC77.count("'slots_full_confirmed': st.get('slots_full_confirmed', False)"))
+    # ⚠⚠ 撤回守门必须**先剥掉整行注释再查** —— 留档注释里**必然逐字引用**旧写法
+    #    （本文件已第 4 次踩：v1.62c / v1.67 / v1.70 / 本次），字符串 grep 会**假红** ✗
+    def _strip77(s):
+        out = []
+        for _ln in s.splitlines():
+            _t = _ln.strip()
+            if _t.startswith('#'):
+                continue
+            out.append(_ln)
+        return '\n'.join(out)
+
+    _CODE77 = _strip77(_SRC77)
+    check('v1.77 A⑤ ⛔ **撤回守门：v1.73 的"读不到 ⇒ 0"不许改回去** —— '
+          '`one_round` 里**仍须**是 `st[\'slots_free\'] = 0`，'
+          '且**不许**再出现 `st.get(\'slots_free\', 1)`（那正是"假空闲 ⇒ 连派"的病根 ✗）'
+          '｜⚠ 本项**已剥掉注释**再查（留档注释里必然逐字引用旧写法 ⇒ grep 会假红 ✗）',
+          "st['slots_free'] = 0" in _CODE77
+          and "st.get('slots_free', 1)" not in _CODE77,
+          '⚠ 改回默认 1 ⇒ 退回 v1.73 那个坑（门禁 `v1.73 A①` 也钉着）')
+
+    # ── B. 执行级：**拿真机那把的读数**真跑派遣分支 ──────────────────────
+    _LOG77 = os.path.join(PROJ, '..', '_tmpman', 'v176_dispatch', 'bagdbg',
+                          'mgas_log.txt')
+    if not os.path.exists(_LOG77):
+        skip('v1.77 B①~B③ 执行级（缺 `_tmpman/v176_dispatch/bagdbg/mgas_log.txt` '
+             '⇒ 没真验证；复现：真机跑一张带紫格的图，把 `bagdbg/` 拉回来）')
+    else:
+        import re as _re77
+        _txt77 = io.open(_LOG77, encoding='utf-8', errors='replace').read()
+        # ⭐ 从**真机日志**里抠出那把的读数（不手搓夹具 ✓）
+        _free77 = [int(m) for m in _re77.findall(r'"free_txt": (\d+)', _txt77)]
+        _sf77 = [int(m) for m in _re77.findall(r'"slots_free": (\d+)', _txt77)]
+        _nskip77 = len(_re77.findall(r'"dispatch": "skip_slots_full"', _txt77))
+        check('v1.77 B① ⭐⭐⭐ **执行级前提（真机日志本体）**：这把里 `skip_slots_full` '
+              '出现 **%d 次**，而 `free_txt` 在 **0/1 之间交替**（读到 1 的 %d 次 / '
+              '读到 0 的 %d 次）—— ⚠ 前提不成立 ⇒ 下面测的不是本 bug ✗'
+              % (_nskip77, _free77.count(1), _free77.count(0)),
+              _nskip77 >= 5 and 0 in _free77 and 1 in _free77,
+              'skip=%d free_txt 分布=%s' % (_nskip77, sorted(set(_free77))))
+        # ★★★ 决定性逻辑证明：**派遣一次都没成功** ⇒ 0 只能是读数假象
+        _ok77 = len(_re77.findall(r'"dispatch": "btn_by_ocr"', _txt77)) \
+            + len(_re77.findall(r'"dispatch": "tap1"', _txt77))
+        check('v1.77 B② ⭐⭐⭐ **决定性逻辑证明**：`free_txt` 在 1/0 之间交替，'
+              '而日志里**没有任何一次成功派遣**（`btn_by_ocr`/`tap1` = %d 次）'
+              '⇒ 槽位真实状态**整场没变过** ⇒ 那些 0 **只能是读数假象** '
+              '（真满不可能下一轮又变回 1 ✓）'
+              % _ok77,
+              _free77.count(0) > 0 and _ok77 == 0,
+              'free_txt=0 出现 %d 次；成功派遣痕迹 %d 次' % (_free77.count(0), _ok77))
+
+        # ★★ 执行级：**真跑判据** —— 同样的 slots_free=0，两种 confirmed 必须给出不同后果
+        import explore_loop as _el77
+        _seen77 = {}
+
+        def _fake_tap(*a, **k):
+            return None
+
+        class _FakeB77(object):
+            def tap_dlg(self, *a, **k):
+                return None
+
+            def tap(self, *a, **k):
+                return None
+
+            def img(self):
+                return None
+
+        _items77 = [{'text': '一键派遣', 'cx': 891, 'cy': 1350, 'conf': 0.9}]
+        for _conf in (False, True):
+            _lg = []
+            _ctx = {'slots_free': 0, 'slots_full_confirmed': _conf, 'flags': {},
+                    'st': {}, 'ev_tiles': [], 'tapped_sid': '', 'marks': {},
+                    'road': [], 'plain_road': [], 'plan_road': [], 'targets': [],
+                    'clear_fights': 0}
+            try:
+                _el77.popups(_FakeB77(), _items77, _lg, ctx=_ctx)
+            except Exception:       # noqa: BLE001
+                pass
+            _seen77[_conf] = [x for x in _lg if 'dispatch' in x]
+        _k_false = [x.get('dispatch') for x in _seen77[False]]
+        _k_true = [x.get('dispatch') for x in _seen77[True]]
+        check('v1.77 B③ ⭐⭐⭐ **执行级对照（证明不是"一律派遣"的恒真判据）**：'
+              '同样喂 `slots_free=0` ——'
+              '`confirmed=False`（读数不可靠）⇒ 必须落 `dispatch_despite_unknown`'
+              '（**照常派遣** ✓）；`confirmed=True`（游戏拒绝过）⇒ 必须落 '
+              '`skip_slots_full`（**跳过** ✓）'
+              '⚠ 没有这条的话，"把闸门整个删掉"也能让 A① 绿 ✗',
+              'dispatch_despite_unknown' in _k_false
+              and 'skip_slots_full' in _k_true,
+              'confirmed=False → %s ｜ confirmed=True → %s' % (_k_false, _k_true))
+except Exception as _e77:       # noqa: BLE001
+    check('v1.77 守门可运行（%r）' % (_e77,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
