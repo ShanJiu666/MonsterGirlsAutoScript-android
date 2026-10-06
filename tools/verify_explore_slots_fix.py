@@ -7018,7 +7018,10 @@ try:
           and 'CLOVER_HUD_Y = (70, 120)' in _el62,
           '⚠ 我第一版把 y 60~120 混着量 ⇒ 金币被当幸运草 ✗（已修）')
     check('v1.63 ⑧ ⚠ 读不到时 **`None` ⇒ 不猜、照常走**（宁可试一次，'
-          '也别因一次 OCR 失败就永远不摇 ✓）',
+          '也别因一次 OCR 失败就永远不摇 ✓）'
+          '⛔⛔ **v1.71 改口径**：这条**不再是**"读不到就摇" —— 见 v1.71 组；'
+          '现在读不到会先把**能问的三处都问一遍**（轮首 / 上一轮成功值 / 当场全屏），'
+          '三条全空才 fail-open，**且单独记 `clover_unreadable_roll`** ✓',
           '_cv_now = clover_count(items)' in _el62
           and 'if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:' in _el62,
           '⚠ 方向安全：`None` 不跳过')
@@ -8252,6 +8255,127 @@ try:
               'PC 判据@%d < PC 雾格支@%d' % (_pci70, _pcf70))
 except Exception as _e70:       # noqa: BLE001
     check('v1.70 守门可运行（%r）' % (_e70,), False)
+
+# ══════════════════════════════════════════════════════════════════════════
+# v1.71 幸运草闸门**又静默失效了一次** —— 这次是"轮首读数恰好是 None"
+#   用户 2026-10-06 报：「**幸运草低于8怎么还会摇色子？**」
+#   真机铁证（`bagdbg/mgas_log.txt`，map 0，13:14 那把）：
+#     · `{"round": 0, ..., "clover": 2}` ⇒ 读到了 ✓
+#     · `{"round": 1, ..., "clover": null}` ⇒ **轮首 OCR 没读出来** ✗
+#     · 而**摇色子就发生在 round 1**（`dice: reroll_confirm rolls 1` +
+#       `dice: got_recommend`）—— 日志里**一条 `skip_low_clover` 都没有** ✗✗
+#   根因：轮首那趟全屏 OCR 是在**上一场战斗的结算面板还挂着**时拍的 ⇒ HUD 被挡；
+#         旧代码接着退回 `clover_count(items)`，而 `items` 是 **band 裁过的结算带**
+#         ⇒ 恒 None ⇒ **fail-open ⇒ 摇** ✗（**本项目第四次同族教训**）
+#   修法：取值链 ①`state['clover_now']` ②`clover_count(items)` ③**上一次读成功**
+#         （`state['clover_last']`）④**当场全屏 OCR**；三条全空才 fail-open，
+#         且**单独记 `clover_unreadable_roll`**（旧代码在这里一声不响 ✗）
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _el71 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'explore_loop.py'), encoding='utf-8').read()
+    _HD71 = _el71.find('def handle_dice')
+    check('v1.71 A① ⭐⭐⭐ 取值链**四条来源都在**：轮首读数 / `items` 兜底 / '
+          '**上一次读成功**（`clover_last`）/ **当场全屏 OCR**（`b.ocr(tag="dice_hud")`）；'
+          '⚠ `skip_low_clover` 必须记**实际来源**（`src`）—— 排查时要一眼看出'
+          '这次是拿哪一路的数做的判断 ✓',
+          _HD71 >= 0
+          and "state.get('clover_last')" in _el71
+          and "clover_count(b.ocr(tag='dice_hud'))" in _el71
+          and "'dice': 'clover_unreadable_roll'" in _el71
+          and "'src': _cv_src" in _el71,
+          '缺一路 ⇒ 那条路径又会静默 fail-open ✗')
+    check('v1.71 A② ⭐⭐ **顺序守门**：`轮首 → items → clover_last → 当场全屏OCR '
+          '→ 判定`**必须按这个次序**（便宜的先问、贵的后问）—— '
+          '⚠ 把"当场全屏 OCR"提到前面 ⇒ **每次都白付一次全屏 OCR** ✗',
+          _HD71 >= 0
+          and 0 <= _el71.find("state.get('clover_now')", _HD71)
+          < _el71.find("state.get('clover_last')", _HD71)
+          < _el71.find("clover_count(b.ocr(tag='dice_hud'))", _HD71)
+          < _el71.find('if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:',
+                       _HD71))
+    check('v1.71 A③ ⭐ `one_round` 轮首维护 `st["clover_last"]`（**只在读成功时覆盖**）'
+          '—— ⚠ 同时**不许改坏**原来那句 `st[\'clover_now\'] = clover_count(items)`'
+          '（门禁 `v1.63b ⑥` 钉着它的字面形式 ✓）',
+          "st['clover_last'] = st['clover_now']" in _el71
+          and "if st.get('clover_now') is not None:" in _el71
+          and "st['clover_now'] = clover_count(items)" in _el71)
+
+    # ── B. 执行级：**拿真机那个状态**直接喂 `handle_dice` ──────────────────
+    class _FB71(object):
+        """假 bot：闸门只用到 `ocr`（且 `tag` 分流：`dice_hud` = 全屏）"""
+        def __init__(self, hud=(), band=()):
+            self.hud, self.band, self.tags = list(hud), list(band), []
+
+        def ocr(self, *a, **k):
+            _t = k.get('tag')
+            self.tags.append(_t)
+            return list(self.hud if _t == 'dice_hud' else self.band)
+
+        def __getattr__(self, _n):       # 过闸门之后的逻辑一律不测（这里只测闸门）
+            raise RuntimeError('not needed in this test: %s' % _n)
+
+    def _hud71(n):
+        """按真机标定造 HUD 条目：幸运草在**第 2 行** cy≈94、x≈694 ✓"""
+        return [{'text': str(n), 'cx': 694, 'cy': 94,
+                 'x0': 680, 'y0': 80, 'x1': 708, 'y1': 108}]
+
+    def _skip71(state, hud=(), band=()):
+        _b = _FB71(hud=hud, band=band)
+        _lg = []
+        _r = None
+        try:
+            _r = EL.handle_dice(_b, _lg, list(band), state=state)
+        except Exception:       # noqa: BLE001  # 过闸门之后的逻辑会抛，这里不关心
+            _r = 'raised'
+        _e = [x for x in _lg if x.get('dice') in
+              ('skip_low_clover', 'clover_unreadable_roll')]
+        return _r, _e, _b.tags
+
+    _r71a, _e71a, _t71a = _skip71({'clover_now': 2})
+    check('v1.71 B① 执行级：轮首**读到了** 2 ⇒ **不摇**（`skip_low_clover`，'
+          '`src=state.clover_now`），且**一次 OCR 都不额外付出** ✓',
+          _r71a == 0 and len(_e71a) == 1
+          and _e71a[0]['src'] == 'state.clover_now' and not _t71a,
+          'r=%s entries=%s ocr=%s' % (_r71a, _e71a, _t71a))
+
+    _r71b, _e71b, _t71b = _skip71({'clover_now': None, 'clover_last': 2},
+                                  hud=_hud71(2))
+    check('v1.71 B② ⭐⭐⭐ **执行级：复现真机 13:14 那把** —— 轮首**读失败**'
+          '（`clover_now=None`，真机 `entry.clover=null`）但上一轮读到过 **2** ⇒ '
+          '**必须不摇**（`src=state.clover_last`），**且零额外 OCR** ✓'
+          '—— 这正是用户报的「幸运草低于8怎么还会摇色子」的修复点',
+          _r71b == 0 and len(_e71b) == 1
+          and _e71b[0]['src'] == 'state.clover_last' and not _t71b,
+          'r=%s entries=%s ocr=%s' % (_r71b, _e71b, _t71b))
+
+    _r71c, _e71c, _t71c = _skip71({'clover_now': None, 'clover_last': None},
+                                  hud=_hud71(3))
+    check('v1.71 B③ 执行级：①②都没有 ⇒ **当场全屏读一次**（`tag=dice_hud`），'
+          '读到 3 < 8 ⇒ **不摇**（`src=full_ocr`）✓',
+          _r71c == 0 and len(_e71c) == 1
+          and _e71c[0]['src'] == 'full_ocr' and _t71c == ['dice_hud'],
+          'r=%s entries=%s ocr=%s' % (_r71c, _e71c, _t71c))
+
+    _r71d, _e71d, _t71d = _skip71({'clover_now': 9}, hud=_hud71(9))
+    check('v1.71 B④ ⭐ **对照项（证明不是"一律跳过"的恒真判据）**：'
+          '**同一套夹具**、只把轮首读数从 2 换成 **9（≥8）** ⇒ **一条 skip 都不许有**'
+          '（它该照常往下走摇色子）—— ⚠ 没有这一条的话，上面前三条用'
+          '"永远 return 0"也能全绿 ✗'
+          '｜⚠ 别拿"返回值 ≠ 0"当判据：返回 0 也可能只是"没找到色子面板"，'
+          '与闸门无关（我第一版就是这么写错的 ✗）',
+          not _e71d,
+          'r=%s entries=%s ocr=%s' % (_r71d, _e71d, _t71d))
+
+    _r71e, _e71e, _t71e = _skip71({'clover_now': None, 'clover_last': None},
+                                  hud=[], band=[])
+    check('v1.71 B⑤ ⚠ **三条来源全空 ⇒ fail-open（照常摇），但必须"响一声"**：'
+          '落 `clover_unreadable_roll`（旧代码在这里是**一声不响**地摇 ⇒ '
+          '排查时最难的地方 ✗）',
+          len(_e71e) == 1 and _e71e[0]['dice'] == 'clover_unreadable_roll',
+          'entries=%s' % (_e71e,))
+except Exception as _e71:       # noqa: BLE001
+    check('v1.71 守门可运行（%r）' % (_e71,), False)
 
 print()
 print('=' * 78)

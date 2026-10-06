@@ -4034,28 +4034,84 @@ def handle_dice(b, log, items, tries=3, state=None):
     #         含 HUD ✓）⇒ 在那里读一次，存进 `st['clover_now']` / `st['coin_now']` ✓
     #         **零额外开销**（用户明确要求「不要让每图时间变长」✓）
     #       · 本函数**优先读 `state`**；`state` 没给（老调用/单测）才退回 `items` ✓
+    # ⛔⛔⛔ v1.71【真机 13:14 那把：**闸门又静默失效了** —— 这次是"轮首读数恰好是 None"】
+    #   用户 2026-10-06 报：「**幸运草低于8怎么还会摇色子？**」
+    #   真机日志（`bagdbg/mgas_log.txt`，map 0）铁证：
+    #     · `{"round": 0, ..., "clover": 2}` ⇒ round 0 读到了 2 ✓
+    #     · `{"round": 1, ..., "clover": null}` ⇒ **round 1 的轮首 OCR 没读出幸运草** ✗
+    #     · 而**摇色子就发生在 round 1**：`dice: reroll_confirm rolls 1` +
+    #       `dice: got_recommend`（白花 1 棵草）—— 日志里**没有 `skip_low_clover`** ✗✗
+    #   根因（**同一个坑的第三次**）：
+    #     轮首那趟全屏 OCR（`b.ocr(tag='round')`）是在**上一场战斗的结算面板还挂着**
+    #     的时候拍的 ⇒ **HUD 被面板挡住** ⇒ `clover_count` 返回 None ⇒
+    #     旧代码接着退回 `clover_count(items)`，而那个 `items` 是**band 裁过的结算带**
+    #     ⇒ 恒 None ⇒ **fail-open ⇒ 摇** ✗
+    #   ⇒ 判据必须建在**拿得到数据**的地方（本项目第四次同族教训：
+    #     v1.62 veto 被冲掉 → v1.63 band 裁掉 HUD → v1.64 `mk` 是 dict 不是 list → 本次）
+    #   ## 修法：**取值链**（先便宜后贵，且每一步都记来源 ✓）
+    #     ① `state['clover_now']` —— 本轮轮首读数（正常路径）
+    #     ② `clover_count(items)` —— 老兜底（调用方给全屏 items 时才有意义）
+    #     ③ ⭐ `state['clover_last']` —— **上一次读成功**的值
+    #        幸运草变得很慢（只在摇色子时 -1）⇒ 上一轮的值是**可靠兜底** ✓
+    #        ⚠ 本条就是本次真机那把的解法：round 0 读到 2 ⇒ round 1 虽然读失败，
+    #          但 `clover_last=2 < 8` ⇒ **当场跳过，一棵草都不花** ✓
+    #     ④ ⭐ **当场再全屏读一次**（`b.ocr(tag='dice_hud')`）——
+    #        只在①②③都没有时才付这一次 OCR（正常路径**零额外开销** ✓，
+    #        用户口径「不要让每图时间变长」不受影响）
+    #     ⚠ 全空 ⇒ 仍按老口径 **fail-open（摇）**，但**单独记一条**
+    #       `dice: clover_unreadable_roll`，让"读不到"这件事**一眼可见**
+    #       （旧代码在这里是**一声不响**地摇 —— 那正是排查时最难的地方 ✗）
     _cv_now = None
+    _cv_src = None
     try:
         if isinstance(state, dict) and state.get('clover_now') is not None:
             _cv_now = int(state.get('clover_now'))
+            _cv_src = 'state.clover_now'
     except Exception:       # noqa: BLE001
         _cv_now = None
     if _cv_now is None:
         # 退回：只有当调用方给的是**全屏 items** 时才有意义
-        #   （band 裁过的 ⇒ 这里必然是 None ⇒ 会落到"照常走"，与 v1.63 表现一致）
+        #   （band 裁过的 ⇒ 这里必然是 None ⇒ 会落到后面的兜底）
         _cv_now = clover_count(items)
+        if _cv_now is not None:
+            _cv_src = 'items'
+    if _cv_now is None:
+        # ③ 上一次**读成功**的值（v1.71 新增 —— 治"轮首那趟恰好被面板挡住"）
+        try:
+            if isinstance(state, dict) and state.get('clover_last') is not None:
+                _cv_now = int(state.get('clover_last'))
+                _cv_src = 'state.clover_last'
+        except Exception:       # noqa: BLE001
+            _cv_now = None
+    if _cv_now is None:
+        # ④ 当场全屏读一次（只有前三步全空才付；读到就顺手更新缓存 ✓）
+        try:
+            _cv_now = clover_count(b.ocr(tag='dice_hud'))
+        except Exception:       # noqa: BLE001
+            _cv_now = None
+        if _cv_now is not None:
+            _cv_src = 'full_ocr'
+            try:
+                if isinstance(state, dict):
+                    state['clover_last'] = _cv_now
+                    state['clover_now'] = _cv_now
+            except Exception:       # noqa: BLE001
+                pass
+    if _cv_now is None:
+        log.append({'dice': 'clover_unreadable_roll', 'min': CLOVER_MIN_REROLL,
+                    'note': '⚠ 幸运草**三条来源全读不到**（轮首/上一轮/当场全屏）'
+                            '⇒ 按老口径 fail-open 照常摇；⚠ 这条日志就是"读不到"的'
+                            '证据 —— 出现得多 ⇒ 要查 HUD OCR，而不是继续猜 ✗'})
     if _cv_now is not None and _cv_now < CLOVER_MIN_REROLL:
         STATS['dice_skip_low'] = STATS.get('dice_skip_low', 0) + 1
         log.append({'dice': 'skip_low_clover', 'clover': _cv_now,
                     'min': CLOVER_MIN_REROLL,
-                    'src': ('state' if (isinstance(state, dict)
-                                        and state.get('clover_now') is not None)
-                            else 'items'),
+                    'src': _cv_src,
                     'note': '幸运草 %d < %d ⇒ **这张图不摇色子**（用户口径）；'
                             '一次都不点，省掉白点 + 白等 ✓'
                             % (_cv_now, CLOVER_MIN_REROLL)})
-        say('       · 幸运草只剩 %d（< %d）⇒ 这张图不摇色子 ✓'
-            % (_cv_now, CLOVER_MIN_REROLL))
+        say('       · 幸运草只剩 %d（< %d，读数来自 %s）⇒ 这张图不摇色子 ✓'
+            % (_cv_now, CLOVER_MIN_REROLL, _cv_src))
         status('幸运草不足 · 跳过摇色子')
         return 0
 
@@ -8106,6 +8162,16 @@ def one_round(b, log, rnd, prefix, st):
         st['clover_now'] = clover_count(items)
     except Exception:       # noqa: BLE001
         st['clover_now'] = None
+    # ⭐⭐⭐ v1.71【`clover_last`：**上一次读成功**的值】—— 真机 13:14 那把的真根因
+    #   轮首这趟 OCR 是在**上一场战斗的结算面板还挂着**时拍的 ⇒ HUD 被挡 ⇒
+    #   `clover_now` 会是 `None`（真机实测：round 0 = 2、**round 1 = null**、round 2 = 1），
+    #   而**摇色子恰好就发生在 round 1** ⇒ `handle_dice` 拿不到数 ⇒ 旧代码 fail-open 摇 ✗✗
+    #   ⇒ 存一份"上一次读成功"的：幸运草变得**很慢**（只在摇色子时 -1）
+    #     ⇒ 拿它兜底**方向安全**（真机那把 round 0 的 2 < 8 ⇒ 当场跳过 ✓）
+    #   ⚠ 刻意**不改上面那句的字面形式**（门禁 `v1.63b ⑥` 钉着它）✓
+    if st.get('clover_now') is not None:
+        st['clover_last'] = st['clover_now']
+    entry['clover_last'] = st.get('clover_last')
     #   ⚠⚠ 金币按**用户口径**：「只进图时读一次」（2026-10-05 选定）✓
     #     · `st['coin_now']` **只在第一次成功读到**时落定，之后**不再覆盖**（口径稳定 ✓）
     #     · ⚠ 读失败（None）**不算"读到了"** ⇒ 下一轮继续尝试 ——
