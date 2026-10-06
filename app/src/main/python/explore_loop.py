@@ -3815,6 +3815,33 @@ def force_unstick(b, log, why, ctx=None):
         fl = (ctx or {}).get('flags') or {}
         if tp:
             fl.setdefault('done', set()).add((int(tp[0]), int(tp[1])))
+            # ⭐⭐⭐ v1.72【**光写 `done` 不够** —— 真机 13:46 那把证明了这一点】
+            #   现象：`[r8] 同一个动作连续 4 轮没变化 ⇒ 强制脱困（拉黑这一格）` 之后
+            #     round 9/10 **照样重复同一个派遣动作** ✗；计划第 2 步一直没走完
+            #     ⇒ boss（第 4 步 `1,2`）没打到 ⇒ 整张图白烧 61 秒，用户手动停止 ✗✗
+            #   根因（两半，读代码即可证）：
+            #     ① `done` 只被**计划**读（`_rest` 按 `done` 过滤，L9632）——
+            #        那一格仍在**目标列表**里 ⇒ 下一轮照样去点它 ✗
+            #     ② 更坏：`done` 让 `_rest` **变短** ⇒ `plan_next` 判成"**在推进**"
+            #        ⇒ `plan_stuck` **被清零** ⇒ `PLAN_STUCK_ROUNDS=3` 那条看门狗
+            #        **永远不触发** ✗✗（★ 拉黑这个动作**自己把逃生通道堵死了**）
+            #   修法：拉黑时一次做三件事
+            #     · 进 `st['nogo_rc']`（**本图不碰格**，v1.66 既有的模型层收口 ⇒
+            #       `blocked + target=False + 清 marks` ⇒ 目标列表也会掉 ✓）
+            #     · 置 `force_replan` ⇒ 下一轮**强制重算**（无视 `PLAN_ONCE` ——
+            #       与 `fog_noop_streak` 那条同一个做法：**明确坏信号**才重算 ✓）
+            #     · `done` 照旧（让 `_rest` 过滤）
+            try:
+                _rc = cell_of(int(tp[0]), int(tp[1]))
+                fl.setdefault('nogo_rc', set()).add(_rc)
+                log.append({'unstick': 'nogo_tagged', 'cell': '%d,%d' % _rc,
+                            'why': why,
+                            'note': '脱困 ⇒ 这一格进**本图不碰**集合 ＋ 下一轮强制重算 '
+                                    '（⚠ 只写 `done` 会把 `plan_stuck` 清零、'
+                                    '让看门狗永不触发 ✗）'})
+            except Exception:           # noqa: BLE001
+                pass
+            fl['force_replan'] = True
     except Exception:           # noqa: BLE001
         pass
     log.append({'unstick': why, 'tried': tries})
@@ -9647,20 +9674,32 @@ def one_round(b, log, rnd, prefix, st):
         #   ⚠ 它与 `PLAN_ONCE`（一图一次）**不矛盾** —— PC 也是两者并存：
         #     正常路径照样"算一次就沿用"；**只有"点在雾上"这个明确坏信号**才重算 ✓
         _fstr61 = int(st.get('fog_noop_streak', 0) or 0)
-        _force61 = (_fstr61 >= 2) and bool(_rest)
+        # ⭐⭐⭐ v1.72【脱困拉黑 ⇒ **也必须强制重算**】
+        #   否则那一格还在**目标列表**里 ⇒ 下一轮照样点它（真机 13:46：拉黑后又重复 2 轮 ✗）
+        #   ⚠ 与雾格那条共用同一个出口，但**日志分开记**（复盘时要能分清是哪条触发的 ✓）
+        _freplan72 = bool(st.pop('force_replan', False))
+        _force61 = ((_fstr61 >= 2) and bool(_rest)) or _freplan72
         if _force61 and st.get('plan_src') != 'eff':
-            log.append({'solver': 'force_replan_fogged', 'streak': _fstr61,
+            log.append({'solver': ('force_replan_unstick' if _freplan72
+                                   else 'force_replan_fogged'),
+                        'streak': _fstr61,
                         'left': len(_rest),
-                        'note': '连续点雾格无反应 ⇒ **强制重算**计划'
-                                '（不再沿用；PC `:9009-9018` ✓）'})
-            say('       · 连着 %d 轮点到的都是雾格 ⇒ 强制重算计划 ✓' % _fstr61)
+                        'note': ('脱困把那一格拉黑了 ⇒ **强制重算**（否则它还在目标列表里 '
+                                 '⇒ 下一轮照样点它 ✗）' if _freplan72 else
+                                 '连续点雾格无反应 ⇒ **强制重算**计划'
+                                 '（不再沿用；PC `:9009-9018` ✓）')})
+            say('       · %s ⇒ 强制重算计划 ✓'
+                % ('脱困把那一格拉黑了' if _freplan72
+                   else '连着 %d 轮点到的都是雾格' % _fstr61))
             st['plan_stuck'] = 0
             st['plan_prev_len'] = 0
             st['fog_noop_streak'] = 0          # 重算一次就清（否则会连着重算 ✗）
         if st.get('plan_src') == 'eff':
             _pact, _pwhy = 'keep', 'eff_mode'          # 已在兜底模式 ⇒ 不再规划 ✓
         elif _force61:
-            _pact, _pwhy = 'plan', 'force_fogged'      # ⭐ v1.61 强制重算 ✓
+            # ⭐ v1.61/v1.72 强制重算（⚠ 原因要**如实报**，复盘时才分得清是哪条 ✓）
+            _pact, _pwhy = 'plan', ('force_unstick' if _freplan72
+                                    else 'force_fogged')
         else:
             _pact, _pwhy = plan_mode(st, len(_rest), _tleft)
         if _pact == 'plan':

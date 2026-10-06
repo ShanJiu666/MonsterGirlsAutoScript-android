@@ -6535,9 +6535,18 @@ try:
     check('v1.61 ② `fog_noop_streak` **清零**（有真实反应 ⇒ 别累积误判 ✓）',
           "st['fog_noop_streak'] = 0" in _el61)
     check('v1.61 ③ streak ≥ 2 ⇒ **强制重算**（`_pact` 走 `plan`，**无视 PLAN_ONCE**）'
-          '—— PC `:9009-9018` 原文：「连续 ≥2 轮点雾就重算一次」✓',
-          '_fstr61 >= 2' in _el61 and "_pact, _pwhy = 'plan', 'force_fogged'" in _el61
-          and 'force_replan_fogged' in _el61)
+          '—— PC `:9009-9018` 原文：「连续 ≥2 轮点雾就重算一次」✓'
+          '｜⚠⚠ **v1.72 按新行为改写**：这句话现在与"**脱困拉黑也强制重算**"'
+          '**共用同一个出口**（`_force61` 里 OR 进了 `_freplan72`）⇒ `_pwhy` 变成'
+          '**双形态**（`force_fogged` / `force_unstick`）'
+          '—— ⛔ 所以本条的判据从"钉死那句字面量"改成"**fog 那半必须还在**"：'
+          '`_fstr61 >= 2`、`force_fogged`、`force_replan_fogged` 三样缺一不可 '
+          '（少了 ⇒ v1.61 的功能被 v1.72 的改动吃掉 ✗）',
+          '_fstr61 >= 2' in _el61
+          and "'force_fogged'" in _el61
+          and 'force_replan_fogged' in _el61
+          and "_pact, _pwhy = 'plan', " in _el61,
+          '⚠ 这是 v1.72 引入双形态后**必须**同步的改写（不是放宽阈值）')
     check('v1.61 ④ 雾格**不**混进 `tap_no_change`（PC 教训：混了 ⇒ 3 次拉黑 ⇒ '
           'boss 目标等同消失 ⇒ 判 `targets_done` **提前退图** ✗✗）',
           _el61.index("st['fog_noop_streak'] = st.get('fog_noop_streak', 0) + 1")
@@ -8376,6 +8385,97 @@ try:
           'entries=%s' % (_e71e,))
 except Exception as _e71:       # noqa: BLE001
     check('v1.71 守门可运行（%r）' % (_e71,), False)
+
+# ══════════════════════════════════════════════════════════════════════════
+# v1.72 兜底脱困"拉黑"其实**把逃生通道堵死了** —— 计划看门狗永不触发
+#   用户 2026-10-06 报：「**为什么派遣了个绿色地块？还没打掉boss就结束了**」
+#   真机铁证（`bagdbg/mgas_log.txt`，13:46 那把 map 1）：
+#     · 计划 4 步 `["4,5","2,6","2,3","1,2"]`，**boss 在第 4 步** `1,2`（`S20003_101`）
+#     · 卡在第 2 步 `(2,6)`：6 轮「点探索(275,736) → 键派遣×2 → 面板还在 →
+#       `still_open_close` → 返回(兜底)」；`slots_free` 6 轮一直是 1（那格从没被消耗）
+#     · `[r8] 同一个动作连续 4 轮没变化 ⇒ 强制脱困（拉黑这一格）` 之后
+#       round 9/10 **照样重复同一个动作** ✗
+#     · 第 11 轮用户手动停止 ⇒ boss 没打到、整图白烧 61 秒 ✗✗
+#   根因（两半，读代码即可证）：
+#     ① `force_unstick` 只写 `st['done']`；而 `done` **只被计划读**（`_rest` 过滤）
+#        ⇒ 那一格仍在**目标列表**里 ⇒ 下一轮照样点它 ✗
+#     ② ★ 更坏：`done` 让 `_rest` **变短** ⇒ `plan_next` 判成"**在推进**"
+#        ⇒ `plan_stuck` **被清零** ⇒ `PLAN_STUCK_ROUNDS=3` 那条看门狗**永不触发** ✗✗
+#        （**拉黑这个动作自己把逃生通道堵死了** —— 这是本轮最值钱的一条）
+#   修法：拉黑时①进 `nogo_rc`（本图不碰格，v1.66 既有的模型层收口）
+#         ②置 `force_replan` ⇒ 下一轮强制重算（无视 `PLAN_ONCE`，同 `fog_noop_streak`）
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _el72 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'explore_loop.py'), encoding='utf-8').read()
+    _FU72 = _slice68(_el72, 'def force_unstick(b, log, why, ctx=None):',
+                     'def find_orange_btn')
+    check('v1.72 A① ⭐⭐⭐ `force_unstick` 拉黑时**三件事一起做**：'
+          '`done`（老行为）＋ **`nogo_rc`**（本图不碰格 ⇒ 模型层收口 ⇒ 目标列表也会掉）'
+          '＋ **`force_replan`**（下一轮强制重算）',
+          bool(_FU72) and "fl.setdefault('nogo_rc', set()).add(_rc)" in _FU72
+          and "fl['force_replan'] = True" in _FU72
+          and "fl.setdefault('done', set()).add(" in _FU72
+          and "'unstick': 'nogo_tagged'" in _FU72,
+          '⚠ 只写 `done` ⇒ 那一格还在目标列表里 ⇒ 下一轮照样点它 ✗')
+    check('v1.72 A② ⭐⭐ 重算出口**接住了** `force_replan`：'
+          '`_force61` 要把它 **OR** 进去，且**日志原因如实分开**'
+          '（`force_replan_unstick` vs `force_replan_fogged`）—— '
+          '⚠ 复用同一个出口但不分原因 ⇒ 复盘时看不出是哪条触发的 ✗',
+          "st.pop('force_replan', False)" in _el72
+          and '_force61 = ((_fstr61 >= 2) and bool(_rest)) or _freplan72' in _el72
+          and "'force_replan_unstick'" in _el72
+          and "'force_replan_fogged'" in _el72
+          and "'force_unstick'" in _el72)
+    check('v1.72 A③ ⛔ **反证（撤回守门）**：**不许**只靠 `PLAN_STUCK_ROUNDS` 兜底 —— '
+          '即 `_force61` 里**必须**留着 `st.pop(\'force_replan\')` 这一项；'
+          '⚠ 少了它 ⇒ 退回"拉黑把 `plan_stuck` 清零、看门狗永不触发"那个坑 ✗',
+          'or _freplan72' in _el72)
+
+    # ── B. 执行级：真跑 `force_unstick`，看它到底改了什么 ────────────────
+    class _FB72(object):
+        def tap_dlg(self, *a, **k):
+            return True
+
+    _st72 = {'done': set()}
+    _lg72 = []
+    _tp = EL.marks_mod.cell_center(2, 6) if hasattr(EL, 'marks_mod') else (828, 1218)
+    try:
+        EL.force_unstick(_FB72(), _lg72, 'same_action_x4',
+                         {'tapped': _tp, 'flags': _st72})
+        _ok72 = True
+    except Exception as _e72b:       # noqa: BLE001
+        _ok72, _err72b = False, repr(_e72b)
+    if not _ok72:
+        check('v1.72 B① 执行级：`force_unstick` 可运行（%s）' % _err72b, False)
+    else:
+        check('v1.72 B① ⭐⭐⭐ **执行级：真机那把的状态喂进去** —— 拉黑后'
+              '`nogo_rc` 里必须有那一格、`force_replan` 必须为真、`done` 照旧；'
+              '并且**落了 `unstick: nogo_tagged` 日志**（复盘一眼可见 ✓）',
+              (2, 6) in (_st72.get('nogo_rc') or set())
+              and _st72.get('force_replan') is True
+              and _tp in _st72.get('done', set())
+              and any(x.get('unstick') == 'nogo_tagged' for x in _lg72),
+              'nogo=%s force_replan=%s done=%s log=%s'
+              % (sorted(_st72.get('nogo_rc') or []), _st72.get('force_replan'),
+                 sorted(_st72.get('done') or []), _lg72))
+        # ⭐ 对照项：把格子坐标换成**面板按钮**坐标（真机日志里那个 (275,736)）
+        #   ⇒ 仍然不许崩（`cell_of` 会给个盘外坐标），且 `nogo_rc` 不许为空集里塞脏东西
+        _st72b = {'done': set()}
+        try:
+            EL.force_unstick(_FB72(), [], 'same_action_x4',
+                             {'tapped': (275, 736), 'flags': _st72b})
+            _r72b = _st72b.get('nogo_rc') or set()
+            check('v1.72 B② ✅ 对照项：喂**面板坐标** `(275,736)`（用户那把日志里'
+                  '`at` 就是这个）也**不许崩**，且仍然完成拉黑动作 '
+                  '—— ⚠ 没有这条的话，B① 可能只证明了"某个固定输入能过" ✗',
+                  _st72b.get('force_replan') is True and len(_st72b['done']) == 1,
+                  'nogo=%s force_replan=%s' % (sorted(_r72b),
+                                               _st72b.get('force_replan')))
+        except Exception as _e72c:      # noqa: BLE001
+            check('v1.72 B② 对照项：面板坐标不许崩（%r）' % (_e72c,), False)
+except Exception as _e72:       # noqa: BLE001
+    check('v1.72 守门可运行（%r）' % (_e72,), False)
 
 print()
 print('=' * 78)
