@@ -6380,6 +6380,21 @@ def save_board_frame(b, log, rnd=0, img=None):
         _cv2.imencode('.png', img)[1].tofile(rp)
         log.append({'shot': 'saved', 'rnd': rnd, 'file': os.path.basename(rp)})
         say('   ★ 存图：%s' % rp)
+        # ⭐⭐⭐ v1.73b【**把棋盘帧也发一份到公共目录**（`bagdbg/`）—— 靠一个 flag 打开】
+        #   为什么要它（本轮踩了两次）：release 包**不可 `run-as`** ⇒ 私有 `runs/` 的帧
+        #   **取不出来**；而 `mgas_log.txt` 的 board 行被 `[:300]` 截断（`5,6` 排最后正好
+        #   被截掉）、logcat 的 `AutoExplore` 缓冲又常被冲掉
+        #   ⇒ 排查"某一格分类成什么"时**只能靠猜** ✗（本轮 `5,6` 就是这么卡住的）
+        #   ## 用法（**不用重装**，走 `flag_on()` 那套既有机制 ✓）
+        #     adb shell touch /sdcard/Download/autoexplore/bagdbg/pubframe.flag
+        #     （关掉：adb shell rm 同一个文件）
+        #   ⚠ 默认**关**（一次 PNG 编码+落盘 ≈0.1~0.3s；用户口径「不要让每图时间变长」）
+        #   ⚠ 与 `_pub_dump` 同一目录 ⇒ 反馈包会自动带上它（`Feedback.java`）✓
+        try:
+            if flag_on('pubframe'):
+                _pub_dump('board_r%d_%s' % (rnd, time.strftime('%H%M%S')), img)
+        except Exception:       # noqa: BLE001
+            pass
         return rp
     except Exception as e:      # noqa: BLE001
         log.append({'shot': 'error', 'rnd': rnd, 'e': repr(e)[:120]})

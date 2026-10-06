@@ -8518,6 +8518,15 @@ try:
           '只记 `unstick: panel_action` ✓',
           "if 1 <= _rc[0] <= 5 and 1 <= _rc[1] <= 7:" in _el73
           and "'unstick': 'panel_action'" in _el73)
+    check('v1.73 A④ ⭐⭐ `save_board_frame` **可把棋盘帧发到公共目录**（flag 控制，'
+          '**默认关**）—— 治本轮踩了两次的"**帧拿不出来**"：release 包不可 `run-as`、'
+          '`mgas_log` 的 board 行被 `[:300]` 截断、logcat 缓冲常被冲掉 ⇒ '
+          '问"某一格分类成什么"时只能猜 ✗。'
+          '⚠ 必须走**既有的 `flag_on()`**（`adb shell touch …/bagdbg/pubframe.flag` '
+          '即可开，**不用重装**）且**默认关**（用户口径：不要让每图时间变长）',
+          "if flag_on('pubframe'):" in _el73
+          and "_pub_dump('board_r%d_%s'" in _el73,
+          '⚠ 默认开 ⇒ 每图多 0.1~0.3s；写死路径 ⇒ 关不掉 ✗')
 
     # ── B. 执行级：真跑 `explore_slots_free` + 那段判据 ────────────────────
     def _rule73(_sf_here, _st):
