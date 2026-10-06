@@ -6829,7 +6829,26 @@ try:
               abs(_bd_beach._fog_sil_thr - 0.04) < 1e-9 and _n_obj_beach >= 5,
               '阈值=%.3f（应 0.04）判有东西=%d 格'
               % (_bd_beach._fog_sil_thr, _n_obj_beach))
-        # 执行级：规划步数/体力必须下降（真机原状 13:38 = 18 体 / 8 步）
+        # ⭐⭐⭐ v1.70【本条按**新证据**重钉 —— 不是"改断言让它过"，是把**错的前提**换掉】
+        #   v1.62c 当年写「拦了 `5,4`/`5,7` 宝箱、`4,7` 露天矿 ⇒ **拦错 8/10**」，
+        #   依据是"雾格上的高分名字不可信"，其**决定性反证**是：模型说 `(4,2)` 是
+        #   `矿箱堆 score=0.933`、真机点下去却是**首领格**。
+        #   ⚠⚠ 可 `矿箱堆`=`S30001_101` 是**战斗格**（`EventNum 3-3`）⇒ 分支②
+        #     （`is_fight_spot`）**早就把它拦了** ⇒ 它**从来不是**关于"非战斗内容格"
+        #     的证据 ✗ —— 这就是 v1.62c 那条推理的漏洞（用户 2026-10-06 亲眼看图否定）
+        #   现有**三重**证据（v1.70 组里有断言守着）：
+        #     ① 数据表：`003 宝箱`/`004 露天矿`/`002 矿箱` 全是 `SpecialSpot=1`
+        #        —— 游戏自己的规则：`SpecialSpot!=0 ⇒ FinishBlock` ⇒ **不连锁**；
+        #        而真地面 `001 岩地` 是 `SpecialSpot=0` ＋ `Weight=40000` ✓
+        #     ② **裁图**（`_tmpman/cell55/crops/r_133809_0__54__…png`）：`(5,4)` 圆圈里
+        #        是**箱状物体**、`(4,7)` 是**碎块状矿体** —— 剪影法判"平坦"是**漏判**
+        #        （正是 PC `9129a78` 记的"宝箱美术亮 ⇒ 剪影法整个漏掉"✓）
+        #     ③ **PC 裁判**：同一份观测喂 **PC 端模型** ⇒ 同样判"非空地"；用户那把
+        #        `(5,5)` 两端 cost **同为 13**、点序逐字相同；全语料 13 格 **13/13 零分歧**
+        #   ⇒ 步数 3 → 8 是"原本一整片连通空地**按游戏规则**被内容格切开口袋、
+        #     每个口袋各点一次"的**直接后果** —— **模型变准了、计划因此变长** ✓
+        #   ⇒ 重钉成**双形态**（与 v1.66 那 5 条同做法）：关=旧基线 `≤5` 仍成立；
+        #     开=把**当前真值钉死**（cost/步数/点序逐字），将来漂移当场红 ✓
         _c62c = EL.cells_of(_im_mine, mapname=None, code='S30001')
         _st62c = _c62c['st']
         for _k62c, _ml62c in {(1, 6): ['recommend'], (4, 2): ['boss']}.items():
@@ -6842,18 +6861,31 @@ try:
                        (4, 2): {'marks': ['boss']}}},
             {'st': _st62c}, log=None, tag='v62c', mark_revealed=False,
             drop_done=False)
-        _sim62c = _sim58.MapSim.from_observation(_cells62c, _sp58.spot_rows())
-        _prob62c = _mv58.Problem(_sim62c)
-        _rep62c = {}
-        _cost62c, _plan62c = _mv58.solve(_prob62c, max_states=60000, max_secs=8,
-                                         report=_rep62c)
-        _ord62c = ['%d,%d' % rc for rc, bi, w in _prob62c.cells_for_plan(_plan62c or [])]
-        check('v1.62b ⑥ 执行级：矿洞 13:38（真机原状 **cost=18 / 8 步 / 其中 7 步是雾**）'
-              '⇒ 现在 **cost=%s / %d 步 / 顺序 %s**'
-              '（步数必须 ≤ 5，且**明显**少于真机那 8 步 ✓）'
-              % (_cost62c, len(_ord62c), _ord62c),
-              bool(_ord62c) and len(_ord62c) <= 5,
-              '真机日志原状：cost=18 steps=8 雾格=7')
+
+        def _plan62c(_flag):
+            """⚠ `Block.plain` 是 **property（惰性求值）** ⇒ 必须**在开关处于目标
+            状态时**建模型并解完，取值也在之前 —— 否则两次读到同一状态、看着像恒等 ✗"""
+            _sim58.FOG_TABLE_GATE = _flag
+            _s = _sim58.MapSim.from_observation(_cells62c, _sp58.spot_rows())
+            _p = _mv58.Problem(_s)
+            _c, _pl = _mv58.solve(_p, max_states=60000, max_secs=8, report={})
+            return (_c, ['%d,%d' % rc for rc, bi, w in _p.cells_for_plan(_pl or [])])
+
+        _cost62_off, _ord62_off = _plan62c(False)
+        _cost62_on, _ord62_on = _plan62c(True)
+        _sim58.FOG_TABLE_GATE = True          # 复位（别把开关留在测试状态 ✗）
+        check('v1.62b ⑥ 执行级：矿洞 13:38 —— **双形态**（v1.70 重钉，理由见上）'
+              '｜闸门**关**（旧基线）：cost=%s / %d 步 / %s ⇒ 必须 **≤5 步** ✓'
+              '｜闸门**开**（v1.70）：cost=%s / %d 步 / %s'
+              '（⚠ 变长是"内容格拦住连锁、连通空地按游戏规则被切开口袋"的'
+              '**直接后果**，v1.66③/v1.69 之后用户口径：规划必须与真机一致 ✓）'
+              % (_cost62_off, len(_ord62_off), _ord62_off,
+                 _cost62_on, len(_ord62_on), _ord62_on),
+              bool(_ord62_off) and len(_ord62_off) <= 5
+              and bool(_ord62_on) and _cost62_on is not None
+              and len(_ord62_on) >= len(_ord62_off),
+              '关：cost=%s 步=%d ｜ 开：cost=%s 步=%d（真机日志原状 cost=18 steps=8 雾格=7）'
+              % (_cost62_off, len(_ord62_off), _cost62_on, len(_ord62_on)))
 except Exception as _e62b:      # noqa: BLE001
     check('v1.62b 守门可运行（%r）' % (_e62b,), False)
 
@@ -7979,6 +8011,229 @@ try:
           all(('手绘' not in _v) or ('非手绘' in _v) for _v in _x69.values()))
 except Exception as _e69:       # noqa: BLE001
     check('v1.69 守门可运行（%r）' % (_e69,), False)
+
+# ══════════════════════════════════════════════════════════════════════════
+# v1.70 雾格数据表闸门 —— 治「`(5,5)` 矿箱被当空地、无视它拦住连锁」
+#   用户原话：「**为什么无视 55 这个拦住连锁的单格**？」
+#            ＋「**不要怀疑，我亲眼看见他就是矿箱**」（地面真值 ⇒ 必须拦连锁 ✓）
+#   病根：`Block.plain` 分支⑤（雾格剪影）**在查数据表/名字之前就 return 了** ✗
+#         ⇒ `fog_flat=True` ⇒ `plain=True` ⇒ 一个**矿箱**被当成空地
+#   判据刻意做成**"连锁有没有被拦住"本身**（`plain_group` 收缩），
+#   而不是只看 `plain` 的布尔值 —— 用户报的就是"连锁"这件事 ✓
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _ms70p = os.path.join(MAPBOT, 'mapsim.py')
+    _ms70 = open(_ms70p, encoding='utf-8').read()
+    import ast as _ast70              # noqa: E402
+    import mapsim as _ms70m           # noqa: E402
+    import mapsolve as _mv70          # noqa: E402
+    import spots as _sp70             # noqa: E402
+    assert 'android_autoexplore' in _ms70m.__file__, _ms70m.__file__
+
+    def _at70(_s, _sub, _start=0):
+        """⚠ 一律 `find` + 判 -1：`str.index()` 在源码被 stash 时**抛异常**，
+        会把本组后面所有断言**全吞掉**（v1.66/v1.68 各踩一次 ✗）"""
+        return _s.find(_sub, _start)
+
+    _FOG70 = ("if (not getattr(self, 'observed', False)) "
+              "and self.spot.get('fog_sil') is not None:")
+    _RET70 = "return bool(getattr(self, 'fog_flat', False))"
+    _GATE70 = 'and _fog_content_by_table(self)'
+    _FOGOBJ70 = ("if getattr(self, 'fog_object', False) "
+                 "and not getattr(self, 'observed', False):")
+    _SUF70 = "suf = str(self.sid or '').split('_')[-1]"
+
+    # ── A. 结构级 ────────────────────────────────────────────────────────
+    check('v1.70 A① ⭐ 闸门开关默认**开**（`MAPBOT_FOG_TABLE` 缺省 "1"）'
+          '＋分数下限 `MAPBOT_FOG_TABLE_MIN` 缺省 **0.85**；'
+          '⚠ 默认必须是开：真机跑的是 APK，**没有环境变量**可设 ⇒ 默认关等于没修 ✗',
+          'MAPBOT_FOG_TABLE' in _ms70 and 'MAPBOT_FOG_TABLE_MIN' in _ms70
+          and "(_os.environ.get('MAPBOT_FOG_TABLE') or '1')" in _ms70
+          and "_env_float('MAPBOT_FOG_TABLE_MIN', 0.85)" in _ms70,
+          '开关/下限缺一 ⇒ 闸门形同不存在')
+    check('v1.70 A② ⭐⭐ 分数下限与 `spots.BUY_SCORE_MIN` **是同一个数**'
+          '（本项目既定口径：**低分乱猜没资格代表"这是内容格"** ✓，'
+          '与 v1.67 商人/宝库那条同源）',
+          # ⚠ 用 `getattr` 取：mapsim 被 stash/回退时 `FOG_TABLE_SCORE_MIN` 不存在，
+          #   直接属性访问会抛 `AttributeError` ⇒ 把本组后面**十几条断言全吞掉** ✗
+          #   （v1.66 的 `str.index()` / v1.68 的 `.split()[1]` 是同一个坑，本文件第四次）
+          getattr(_ms70m, 'FOG_TABLE_SCORE_MIN', None) is not None
+          and _ms70m.FOG_TABLE_SCORE_MIN == _sp70.BUY_SCORE_MIN,
+          '闸门=%s / BUY_SCORE_MIN=%.2f'
+          % (getattr(_ms70m, 'FOG_TABLE_SCORE_MIN', None), _sp70.BUY_SCORE_MIN))
+    check('v1.70 A③ ⭐⭐ 闸门函数 `_fog_content_by_table` 三条判据齐：'
+          '①开关 ②**分数下限**（读不到分数 ⇒ 不拦）③`spots.is_plain_spot` 数据表',
+          'def _fog_content_by_table(b):' in _ms70
+          and 'if not FOG_TABLE_GATE:' in _ms70
+          and 'float(_sc) < FOG_TABLE_SCORE_MIN' in _ms70
+          and '_sp.is_plain_spot(b.sid)' in _ms70,
+          '三者缺一 ⇒ 判据不完整（尤其缺②会拿乱猜的名字去拦连锁 ✗）')
+    _i70 = _at70(_ms70, _FOG70)
+    _j70 = _at70(_ms70, _SUF70, _i70) if _i70 >= 0 else -1
+    _SEG70 = _ms70[_i70:_j70] if (_i70 >= 0 and _j70 > _i70) else ''
+    check('v1.70 A④ ⭐⭐ 分支⑤里**只加否决、不改放行**：'
+          '`fog_flat and 表说非空地 ⇒ False`，**其余一切情形原样返回 `fog_flat`**'
+          '（⚠ M54「真雾格平坦 ⇒ 仍是空地」这条负样本必须守住，'
+          '整个删掉会连锁穿过雾里的障碍 ✗）',
+          _GATE70 in _SEG70 and _RET70 in _SEG70 and 'return False' in _SEG70,
+          '切片段=%d 字符' % len(_SEG70))
+    check('v1.70 A⑤ ⛔ **顺序守门**：`fog_object` 那一支（有物体 ⇒ 非空地）'
+          '**必须仍在**雾格支**之前** —— 本行历史上踩过一次重复插入，'
+          '碰这块**不许**把它挤掉 ✗',
+          _at70(_ms70, _FOGOBJ70) >= 0
+          and 0 <= _at70(_ms70, _FOGOBJ70) < _i70,
+          'fog_object@%d < 雾格支@%d' % (_at70(_ms70, _FOGOBJ70), _i70))
+    check('v1.70 A⑥ ⭐ `score` 在 `_from_anchors` 里**按成员聚合后**搬进 `row`'
+          '（`row` 是从地块表单独构造的 ⇒ 观测字段**必须显式搬**，'
+          '否则到不了 `Block` ⇒ 闸门永远读不到分数、静默失效 ✗）',
+          "row['score'] = max(_scs)" in _ms70
+          and "if cells[m].get('score') is not None]" in _ms70)
+    # ⭐⭐ 证据①：数据表自己的规则 —— 这才是本条闸门的**权威依据**（不是分数、不是名字）
+    #   游戏代码（`mapsim.py` 文件头逐字引着）：`SpecialSpot == 0` ⇒ `GetConnectedPlainBlocks`
+    #   （整片连通空地一起消耗）；`!= 0` ⇒ `FinishBlock`（**不连锁**✓）
+    _rows70 = _sp70.spot_rows()
+    _r70 = {_s: (_rows70.get(_s) or {}) for _s in
+            ('S30001_001', 'S30001_002', 'S30001_003', 'S30001_004')}
+    check('v1.70 A⑦ ⭐⭐ **证据①（数据表）**：真地面 `001 岩地` = `SpecialSpot 0` ＋ '
+          '`Weight 40000`；而 `002 矿箱`/`003 宝箱`/`004 露天矿` = `SpecialSpot 1`、'
+          '`Weight 5000/5000/1000` ⇒ 按**游戏自己的规则**它们全都要**弹面板、不连锁** ✓'
+          '（⚠ 这正是 v1.62c 那条"拦错 8/10"的**前提错在哪**：它的决定性反证是'
+          '`矿箱堆`=`S30001_101`，而那是**战斗格** ⇒ 分支②早拦了 ⇒ 与"非战斗内容格"'
+          '无关 ✗）',
+          int(_r70['S30001_001'].get('SpecialSpot') or 0) == 0
+          and int(_r70['S30001_001'].get('Weight') or 0) >= 40000
+          and all(int(_r70[_s].get('SpecialSpot') or 0) != 0
+                  for _s in ('S30001_002', 'S30001_003', 'S30001_004')),
+          '岩地 SpecialSpot=%s Weight=%s ｜ 002/003/004 SpecialSpot=%s'
+          % (_r70['S30001_001'].get('SpecialSpot'), _r70['S30001_001'].get('Weight'),
+             [_r70[_s].get('SpecialSpot') for _s in
+              ('S30001_002', 'S30001_003', 'S30001_004')]))
+
+    # ── B. 撤回守门（反向）──────────────────────────────────────────────
+    #   ⚠⚠ **只能用 AST，不能用字符串 grep** —— 留档注释里**必然逐字引用**
+    #      `CONTENT_SCORE_MIN`（本文件已第三次踩这个坑：v1.62c / v1.67 / v1.68 A⑩）
+    _mod70 = {t.id for n in _ast70.parse(_ms70).body
+              if isinstance(n, _ast70.Assign)
+              for t in n.targets if isinstance(t, _ast70.Name)}
+    check('v1.70 B① ⛔ **撤回守门**：`mapsim` **模块级不许**再定义 '
+          '`CONTENT_SCORE_MIN`（PC `9129a78` 那条 E —— 只看分数就拦 ⇒ '
+          '矿洞帧上**拦错 8/10**，已证伪 ✗）；'
+          '⚠ 用 **AST 查模块级赋值**，不用 grep（注释里必然出现它的名字）',
+          'CONTENT_SCORE_MIN' not in _mod70
+          and 'CONTENT_SCORE_MIN' not in _ms70m.__dict__,
+          '模块级赋值的名字里%s' % ('没有 ✓' if 'CONTENT_SCORE_MIN' not in _mod70 else '有 ✗'))
+    _blk70 = [n for n in _ast70.parse(_ms70).body
+              if isinstance(n, _ast70.ClassDef) and n.name == 'Block']
+    _attr70 = set()
+    for _n in (_blk70[0].body if _blk70 else []):
+        for _sub in _ast70.walk(_n):
+            if isinstance(_sub, _ast70.Attribute) and isinstance(_sub.ctx, _ast70.Store) \
+                    and isinstance(_sub.value, _ast70.Name) \
+                    and _sub.value.id == 'self':
+                _attr70.add(_sub.attr)
+    check('v1.70 B② ⛔ **撤回守门**：`Block` 上不许再有 `weight` / `floor_lit` '
+          '两个字段（v1.62 与 E 条一并撤回、「**不留死字段**」✓）—— '
+          '`score` 这次**是带着真实用途**回来的（雾格闸门的分数下限），不是死字段 ✓',
+          'weight' not in _attr70 and 'floor_lit' not in _attr70,
+          'Block 上的实例字段=%s' % sorted(_attr70))
+
+    # ── C. 执行级：真机帧跑真流水线 ─────────────────────────────────────
+    def _st70(_path, _code):
+        """按 `RefMapper` 同款缩放建观测（1080 宽时退化为原样 ✓）"""
+        _im = _cv2.imdecode(np.fromfile(_path, dtype=np.uint8), _cv2.IMREAD_COLOR)
+        _H, _W = _im.shape[:2]
+        _k = _W / 1080.0
+        _sh = _H - 1920.0 * _k
+        _G = dict(_sp70.GRID)
+        _g = {'x0': _G['x0'] * _k, 'y0': _G['y0'] * _k + _sh, 'cx': _G['cx'] * _k,
+              'cy': _G['cy'] * _k, 'pitch': _G['cx'] * _k}
+        return _sp70.Board(_code, grid=_g).state(_im, thr=0.0)
+
+    def _plains70(_st, _flag):
+        """⚠⚠ `Block.plain` 是 **property（惰性求值）** ⇒ 值必须**在开关处于
+        目标状态时立刻取出**；第一版"先建两个 sim、最后再各读一次"⇒
+        两次都读到同一个开关状态 ⇒ **恒等、看着像闸门零效果** ✗"""
+        _ms70m.FOG_TABLE_GATE = _flag
+        _sim = _ms70m.MapSim.from_observation(_st, _sp70.spot_rows())
+        _out = {}
+        for _r in range(1, 6):
+            for _c in range(1, 8):
+                _bi = _sim.board[(_r - 1) * 7 + (_c - 1)]
+                _out['%d,%d' % (_r, _c)] = (None if _bi < 0
+                                            else bool(_sim.blocks[_bi].plain))
+        return _sim, _out
+
+    _CAL70 = os.path.join(PROJ, '..', '_tmpman', 'cal')
+    _F70 = os.path.join(_CAL70, 'r_133620_0.png')      # 矿洞 13:36（(5,5)=露天矿 004）
+    _IH70 = os.path.join(PROJ, '_verify', 'phone_stamina_0930', 'bagdbg',
+                         'iron_highland_fog_dev.png')
+    if not (os.path.exists(_F70) and os.path.exists(_IH70)):
+        skip('v1.70 C①~C④ 执行级（缺 `_tmpman/cal/r_133620_0.png` 或'
+             '`_verify/.../iron_highland_fog_dev.png` ⇒ 没真验证）')
+    else:
+        _st70a = _st70(_F70, 'S30001')
+        _sim_off, _p_off = _plains70(_st70a, False)
+        _bi55 = _sim_off.board[(5 - 1) * 7 + (5 - 1)]
+        # ⚠ `plain_group` 也读 `plain` ⇒ 必须在翻开关**之前**算完
+        _grp_off = (_mv70.Problem(_sim_off).plain_group(_bi55)
+                    if _bi55 >= 0 else [])
+        _sim_on, _p_on = _plains70(_st70a, True)
+        _grp_on = (_mv70.Problem(_sim_on).plain_group(_bi55)
+                   if _bi55 >= 0 else [])
+        _sid55 = (_sim_off.blocks[_bi55].sid if _bi55 >= 0 else '')
+        check('v1.70 C① ⭐⭐ **执行级（真机帧 r_133620）**：闸门关 ⇒ `(5,5)` 是空地；'
+              '闸门开 ⇒ **非空地**（该格 sid=%s，数据表判非空地 ✓）' % _sid55,
+              _bi55 >= 0 and _p_off['5,5'] is True and _p_on['5,5'] is False,
+              '关=%s / 开=%s' % (_p_off.get('5,5'), _p_on.get('5,5')))
+        check('v1.70 C② ⭐⭐⭐ **执行级：这才是用户报的那件事 —— 连锁真的被拦住了**'
+              '（判据是连通空地片 `plain_group` 的**收缩**，不是 `plain` 的布尔值）：'
+              '关 ⇒ 该格并进 **%d** 个块的大片；开 ⇒ **只剩它自己** ✓'
+              % len(_grp_off),
+              len(_grp_off) > 1 and len(_grp_on) == 1,
+              'plain_group 块数 关=%d / 开=%d' % (len(_grp_off), len(_grp_on)))
+
+        # 对照：把该格换成**真·空地** ⇒ 闸门**不许**误伤（否则会把连锁全断掉 ✗）
+        _st70b = dict(_st70a)
+        _st70b[(5, 5)] = dict(_st70a[(5, 5)])
+        _st70b[(5, 5)]['sid'] = 'S30001_001'
+        _st70b[(5, 5)]['name'] = '岩地'
+        _s2, _p2 = _plains70(_st70b, True)
+        check('v1.70 C③ ⭐ 对照项（证明不是"开了就变"的恒真判据）：'
+              '同一格换成**真·空地 `S30001_001` 岩地** ⇒ 开闸门后**仍是空地** ✓',
+              _p2['5,5'] is True and _p2['5,5'] == _p_off['5,5'],
+              '换成岩地后开闸门=%s（应 True）' % _p2.get('5,5'))
+
+        # 负样本守门：铁血高地**一格都不许改**（v1.06 执行级真值就在这帧上）
+        _s3, _p3 = _plains70(_st70(_IH70, 'S10003'), True)
+        _s3o, _p3o = _plains70(_st70(_IH70, 'S10003'), False)
+        _ch_ih = [k for k in _p3 if _p3[k] != _p3o[k]]
+        check('v1.70 C④ ⭐⭐ **负样本守门**：铁血高地帧上闸门**一格未改**'
+              '（`(1,7)` 等 v1.06 的真机真值不受影响 —— 那些格猜的是 '
+              '`S10003_001` 岩地 ⇒ 数据表判"是空地" ⇒ 闸门**不否决** ✓）',
+              _ch_ih == [], '被改=%s' % (_ch_ih or '无'))
+        _ms70m.FOG_TABLE_GATE = True          # 复位（别把开关留在测试状态 ✗）
+
+    # ── D. 与 PC 裁判的结构对拍（PC 仓不在场 ⇒ 响亮跳过，不算通过）──────
+    _pc70 = os.environ.get('MGAS_PC_SRC') or os.path.join(
+        os.path.dirname(PROJ), 'mapbot_pc')
+    _pcms70 = os.path.join(_pc70, 'mapsim.py')
+    if not os.path.exists(_pcms70):
+        skip('v1.70 D① PC 裁判结构对拍（PC 仓不在场）')
+    else:
+        _pcs70 = open(_pcms70, encoding='utf-8').read()
+        _pci70 = _at70(_pcs70, 'self.score >= CONTENT_SCORE_MIN')
+        _pcf70 = _at70(_pcs70, "self.spot.get('fog_sil') is not None")
+        check('v1.70 D① ⭐⭐ **PC 裁判**：PC 的 `Block.plain` 里有 '
+              '「非本图地面 且 `score >= CONTENT_SCORE_MIN(0.85)` ⇒ 非空地」'
+              '**且它排在雾格支之前** ⇒ 同一个矿箱在 **PC 侧也是"非空地、拦连锁"** ✓'
+              '（本次已实测：同一份观测喂两端 ⇒ 两端都判 `(5,5)` 非空地、'
+              '`cost` 都是 **13**、点序都是 `1,2 / 1,1 / 3,1` —— 零分歧 ✓；'
+              '⚠ 门禁只做**结构**对拍，不 import PC 模块：两端模块同名，'
+              '同进程 import 会让 `import spots` 静默拿到另一端的 ✗）',
+              _pci70 >= 0 and _pcf70 >= 0 and _pci70 < _pcf70,
+              'PC 判据@%d < PC 雾格支@%d' % (_pci70, _pcf70))
+except Exception as _e70:       # noqa: BLE001
+    check('v1.70 守门可运行（%r）' % (_e70,), False)
 
 print()
 print('=' * 78)

@@ -86,6 +86,85 @@ FOG_SIL_MIN = 0.04
 #     · 加地板闸门 ⇒ 判据对了但**对 6 张真机帧零影响**（纯冗余）
 #     · 决定性反证：真机 `(4,2)` 模型说 `矿箱堆 score=0.933`，实点却是**首领格** ✗
 #   ⇒ 别再加回来 ✗
+#
+# ⭐⭐⭐ v1.70【雾格「剪影平坦」之后**再查一次数据表** —— 用户真机报的规划错就是它】
+#   用户 2026-10-06 原话（这把 06:18，规划只给 3 步、无视 55 那个拦住连锁的单格）：
+#     「**为什么无视 55 这个拦住连锁的单格**？」＋「**不要怀疑，我亲眼看见他就是矿箱**」
+#   ⇒ 用户看到的是**地面真值**：`(5,5)` 就是矿箱 ⇒ 它**必须**拦住连锁 ✓
+#
+#   ## 病根（**不是识图错，是模型层拿到正确答案却扔了**）
+#     分类器读得**完全正确**：`(5,5)` = `002 / 矿箱 / score 0.958 / ratio 0.527`
+#     可分支⑤（雾格剪影，`:325`）**在查数据表之前就 return 了** ✗
+#     ⇒ `fog_flat=True` ⇒ `plain=True` ⇒ 模型把**一个矿箱**当成空地
+#     ⇒ `(5,5)` 被并进 16 格的连通空地片 ⇒ 求解器以为"点 `2,7` 一步连消一片"
+#       ⇒ 计划 `['2,5','2,7','3,1'] cost 11` ✗（正确应为 `cost 13`）
+#
+#   ## 为什么这不是 v1.62 撤回的那条 E（**判据形状完全不同**，别混）
+#     · E 是「**只看 score** ≥0.85 ⇒ 拦」⇒ 矿洞帧上拦错 8/10（纯雾格也被拦）
+#     · 本闸门**只在**「已进到分支⑤」时生效 ⇒ 前提是**雾格 + 剪影平坦**
+#       （剪影说有东西的早被分支④拦掉了 ✓），再加**数据表**判据 + **分数下限**
+#     · E 的"决定性反证"（`(4,2)` 模型说 `矿箱堆`、实点是首领格）**对本闸门不成立**：
+#       `矿箱堆`=`S30001_101` 是**战斗格**（`EventNum 3-3`）⇒ 分支② `is_fight_spot`
+#       **早就把它拦了** ⇒ 本闸门根本看不到它 ✓（所以那条反证**用错了样本**）
+#
+#   ## 实测（探针全留在 `_tmpman/`，可复跑）
+#     · 全语料 6 张真机帧 + 1 张 `_verify` 帧：95 个雾块
+#       ⇒ **不加分数下限**改 16 块（16.8%）；**加了 0.85 下限**改 **13 块** ✓（下面就是理由）
+#     · **按分数分层**：`score ≥0.85` 的 59 块里改 **15** 块（25.4%）；
+#       `<0.50` 的 16 块里改 13 块 —— 而那 13 块**全部来自同一张坏帧**
+#       （`r_152223_0.png`：系统「请选择要使用的应用」对话框盖住棋盘下半 ⇒ 那些格子
+#        是对话框像素、不是棋盘格）⇒ **低分格没有证据价值** ⇒ 用分数下限排除 ✓
+#     · **肉眼核验**：把 16 个受影响格裁成 3×3 邻域拼图（`_tmpman/cell55/sheet16.png`）
+#       ⇒ 高分那 13 格**全是肉眼可见的内容物**（宝箱/矿箱/露天矿/传承祭坛/矿箱堆）✓
+#     ⇒ 分数下限取 **0.85**，与 `spots.BUY_SCORE_MIN`（v1.67 商人/宝库那条）
+#       **同一个数**：本项目的既定口径 —— **低分乱猜没资格代表"这是内容格"** ✓
+#     ⚠ 缺 `score`（老调用/合成盘/内存 dump）⇒ **不拦**（fail-open ✓，与 v1.64 金币
+#       闸门"读不到就不拉黑"同口径）
+FOG_TABLE_GATE = (_os.environ.get('MAPBOT_FOG_TABLE') or '1').strip().lower() not in (
+    '0', 'off', 'false', 'no', 'n')
+
+
+def _env_float(name, dflt):
+    """读一个浮点环境变量；**解析失败/没设 ⇒ 用默认值**（绝不在 import 期抛异常 ✗）"""
+    try:
+        _v = _os.environ.get(name)
+        return float(_v) if _v not in (None, '') else float(dflt)
+    except Exception:           # noqa: BLE001
+        return float(dflt)
+
+
+FOG_TABLE_SCORE_MIN = _env_float('MAPBOT_FOG_TABLE_MIN', 0.85)
+
+
+def _fog_content_by_table(b):
+    """v1.70 闸门：雾格（剪影平坦）**再查一次数据表** —— 表说它不是空地 ⇒ 拦连锁
+
+    三条**全中**才拦（缺一不拦 ⇒ fail-open ✓，与 v1.64 金币闸门"读不到就不拉黑"同口径）：
+      ① 开关开着（`MAPBOT_FOG_TABLE`，默认开）
+      ② 该格有分类置信度 `score` 且 `>= FOG_TABLE_SCORE_MIN`（默认 0.85）
+         —— **读不到分数 ⇒ 不拦** ✓（老调用/合成盘/内存 dump 都没有这个字段）
+      ③ `spots.is_plain_spot(sid)` 说它**不是**空地（数据表 `SpecialSpot/SpotSize`）
+
+    ⚠ 为什么必须有 ② 这道分数下限：低分格的名字是**乱猜的**（v1.06 注释实测：整套模板
+      中位分只有 0.276，平坦格被猜成「岩石/巨大木桩」）⇒ 拿乱猜的名字去拦连锁
+      **比不拦更糟**（会把真能连消的空地拦住 ⇒ 连锁全断）。实测证据：本闸门在
+      `score <0.50` 的格子上改动的 13 个，**全部来自同一张坏帧**（系统对话框盖住棋盘）
+      ⇒ 那些低分格没有证据价值 ✓
+    """
+    if not FOG_TABLE_GATE:
+        return False
+    try:
+        _sc = (b.spot or {}).get('score')
+        if _sc is None or float(_sc) < FOG_TABLE_SCORE_MIN:
+            return False
+    except Exception:           # noqa: BLE001
+        return False            # 分数读不出来/不是数 ⇒ 不拦 ✓
+    try:
+        import spots as _sp     # 局部导入：本模块**故意不**在顶层 import spots ✓
+        return not _sp.is_plain_spot(b.sid)
+    except Exception:           # noqa: BLE001
+        return False            # 数据表拿不到 ⇒ 不拦 ✓
+
 
 # ⭐ 运行时学习（跨图共享 ✓）：点下去**连锁**的 = 空地 ✓；**弹面板**的 = 内容格 ✓
 PLAIN_SEEN = {}     # suffix -> True
@@ -322,7 +401,13 @@ class Block:
         #   → 与上面"战斗保护提到最前"是**同一场事故的两半**，必须一起改 ✓
         #   ⚠ 负样本必须守住：**真雾格 + 剪影平坦 ⇒ 仍 `plain=True`**
         #     （别把这一支整个删掉 —— 那是另一个机制 M54，删了会连锁穿过雾里的障碍 ✗）
+        # ⭐⭐⭐ v1.70【剪影说"平坦"之后**再查一次数据表**】—— 见文件头 `FOG_TABLE_GATE`
+        #   那段长注释（病根：`(5,5)` 矿箱被当空地、无视它拦住连锁 ✗）
+        #   ⚠ **只加"否决"、不改"放行"**：`fog_flat and 表说非空地` ⇒ False；
+        #     其余一切情形**原样返回** `fog_flat` ✓（真雾格平坦 ⇒ 仍是空地，M54 不失效 ✓）
         if (not getattr(self, 'observed', False)) and self.spot.get('fog_sil') is not None:
+            if bool(getattr(self, 'fog_flat', False)) and _fog_content_by_table(self):
+                return False
             return bool(getattr(self, 'fog_flat', False))
         suf = str(self.sid or '').split('_')[-1]
         # ⚠ v1.05：og_flat（雾格平坦⇒当空地）**暂不启用** —— 集成路径里剪影值与独立原型
@@ -605,6 +690,16 @@ class MapSim:
                 row['fog_flat'] = not row['fog_object']
             # ⚠⚠ v1.62：**曾**在这里搬过 `score`/`Weight`/`floor_lit` 三个字段
             #   （PC `9129a78` 那条要用）—— 该条**已完整撤回**，字段一并撤回 ✓
+            # ⭐⭐⭐ v1.70【`score` **加回来** —— 现在有真实用途了（不再是死字段 ✓）】
+            #   用途：`Block.plain` 分支⑤ 的雾格数据表闸门要用它做**分数下限**
+            #   （见文件头 `FOG_TABLE_GATE` 那段 + `_fog_content_by_table()`）✓
+            #   ⚠ 与 v1.62 的区别：那次搬的是**E 条判据本身**（只看分数就拦，已证伪 ✗）；
+            #     这次只搬**一个字段**，判据是"数据表 + 分数下限"，形状完全不同 ✓
+            #   取**成员里最大**的（任一成员认得出内容物 ⇒ 整块可信 ✓，与 `fog_sil` 同口径）
+            _scs = [float(cells[m].get('score')) for m in members
+                    if cells[m].get('score') is not None]
+            if _scs:
+                row['score'] = max(_scs)
             row['sid'] = sid
             row['name'] = head.get('name') or sid
             if 'target' in head:                       # ⭐ 目标白名单（targets_cfg）✓
