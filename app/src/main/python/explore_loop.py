@@ -351,6 +351,38 @@ def stamina_line():
     return (None, '没读到体力', [])
 
 
+def sample_end_stamina(b):
+    """⭐⭐⭐ v1.68：**收尾体力必须在 `summary_text()` 之前读**（顺序 bug 修复）
+
+    ⛔⛔ 病灶（用户 2026-10-06 报「平均每图消耗为什么是 24？进图不就消耗 25 了吗」）：
+      旧代码把这次读数放在 `say(summary_text())` / `dump_summary()` **之后**
+      ⇒ 序列 `548→520→491→463→435` **只有 4 段**能算，而第 5 段
+        `435 → 收尾 397`（≈38 点）**永远进不了账** ⇒
+        `121 / 5 张 = 24.2 点/张` ✗✗
+      —— 而 `121 / 4 = 30.25` 正好等于日志里那句「上一张图消耗体力约 30」
+      ⇒ **算的是 4 张的账、显示的是 5 张的平均**（数学上不可能低于进图 25 ✗）
+
+    ⭐ 这也是本项目**第五次**同一族 bug（「判据/数据放在了拿不到它的时刻」）：
+      v1.62 veto 被冲掉 → v1.63 band 裁掉 HUD → v1.64 `mk` 是 dict 不是 list
+      → v1.66 判据改在执行侧而模型层读另一份 → **本次：统计先落盘、数据后到** ✓
+
+    ⚠ `stamina_line()` **只吃 `stamina_entries` 的相邻对** ⇒ 少一个"收尾"点就少一整段；
+      所以这里**必须**在 `summary_text()` 之前调用（返回 `_st_end` 或 `None`）。
+    ⚠ 读不到**不猜**（`None` 就少报一段，fail-open 但**不会报错数** ✓
+      —— 与 v1.65 教训一致：「读不到」远好于「读错」）。
+    """
+    try:
+        _st_end = stamina(b.ocr(tag='end'))
+        if _st_end is not None:
+            STATS['stamina_entries'].append((_st_end, time.time()))
+            say('收尾体力 %d（已记入统计 ✓）' % _st_end)
+            return _st_end
+        say('   ⚠ 收尾体力读不到（最后一张图只能算到"进图前"，会少报一段）')
+    except Exception as _e:      # noqa: BLE001
+        say('   ⚠ 收尾体力读取失败：%r' % (_e,))
+    return None
+
+
 def summary_text():
     s = STATS
     avg = (sum(s['map_secs']) / len(s['map_secs'])) if s['map_secs'] else 0
@@ -5080,6 +5112,240 @@ _CLAIM_BACK_XY = (539, 1793)     # 面板「返回」兜底（用户口径「返
 _CLAIM_FAIL_STREAK = 0
 _CLAIM_FAIL_LOGGED = False
 
+# ⭐⭐⭐ v1.68【「已完成」判据：**OCR → 参考系模板快查**】—— 治"有两个已完成但不去领取"
+#
+# ⛔ 病根（PC 端 `mapbot_pc/explore_loop.py:9187-9191` 逐字原话）：
+#     「「已完成」这三个字 **正常 OCR 读不到** ✗（真机实测必须**放大 4 倍**才认得出，
+#       置信 0.99 ✓）⇒ 它既不算「空闲」、也数不到倒计时
+#       ⇒ `explore_slots_free` 以为"还有空位" ✗ ⇒ 于是**反复点「探索 → 派遣」**
+#         而游戏不受理 ✗✗」
+#   ⇒ 手机端 v1.48~v1.67 的判据是 `(i.get('text') or '').strip() == '已完成'`
+#     （**精确等值**，`explore_loop.py:7931`）⇒ **恒为空列表** ⇒ 整块**一声不响地跳过** ✗✗
+#   ⭐ 手机端实证（本轮复盘）：真机 34 条 OCR（`_verify/phone_slots_full_0930.json`）
+#     里只有三个**倒计时** + `背包`，**一条「已完成」都没有** ✓ 与 PC 的结论完全一致。
+#   ⭐ 而 72 张候选帧里**没有任何一张**含「已完成」的 OCR 条目 ⇒
+#     那个精确等值判据**从来没有被真帧行使过**（门禁里的夹具是手搓的，见 v1.68 门禁注）。
+#
+# ⛔⛔ **第二个病根（本轮新发现，比上面那个更隐蔽）**：原来拿
+#     「同一帧里别的槽位标签（`空闲`/倒计时）的 y」当**行锚**
+#     —— 可当**三个槽全是「已完成」**时，帧里既没有「空闲」也没有倒计时
+#     ⇒ `_anchor48` 为空 ⇒ 老代码直接落 `claim_lonely`、**一格都不领** ✗✗
+#     （真机帧 `_verify/fr1264_r0_board.png` **正是这种情形**：三槽全绿 ✓）
+#     ⇒ 行锚本身没错（它防的是"点到棋盘格"），错在**它依赖 OCR 成功** ✗
+#
+# ✅ v1.68 修法：**判据与行锚合成一个东西** —— 在**参考系**里按 y 带做模板快查：
+#     · 带 `(0, 880, 1080, 1000)` 的上界 **1000 < 棋盘顶边 `GRID.y0 = 1002`**
+#       ⇒ 带内**不可能**是棋盘格 ⇒ 行锚的安全性**由几何保证，不再依赖 OCR** ✓
+#     · 不写死槽位 x ⇒ 4 槽账号、槽位改版都照样работает（`layout.REF['slots_x']` 只当参考）
+#     · 实测分离度（72 张候选帧，正 6 / 负 66）：
+#         真「已完成」**0.906 ~ 1.000** ／ 负样本**最高 0.337**（中位 0.21）
+#       ⇒ 门槛 **0.70** 两边余量各 ≥0.20 / 0.36 ✓
+#     · 成本：带内一次 `matchTemplate`（116×36 模板 / 1080×120 带）≈ 10ms 量级
+#       ⇒ 每图一次，**可忽略**（对比：一次 OCR 1.2~2.5s）✓
+_CLAIM_TPL = 'slot_done.png'              # 参考系模板（`templates/ui/`，v1.68 新裁）
+_CLAIM_TPL_THR = 0.70                     # 命中门槛（见上面实测分离度）
+_CLAIM_TPL_BAND = (0, 880, 1080, 1000)    # 槽位行搜索带（**参考系**；棋盘顶边 y=1002）
+_CLAIM_MAX_PER_MAP = 4                    # 一次进图最多领几个（= 槽位数上限，防死循环）
+
+
+def find_claim_slots(b, img=None):
+    """参考系模板快查「已完成」→ `[(cx, cy, score), ...]`（按 x 升序）
+
+    · 没有 ⇒ `[]`
+    · **模板读不出/取不到帧** ⇒ `None`（⚠ 与 `[]` **语义不同**：调用方据此回退旧 OCR 路 ✓）
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:       # noqa: BLE001
+        return None
+    img = b.img() if img is None else img
+    if img is None:
+        return None
+    tpl = _UI_TPL_CACHE.get(_CLAIM_TPL)
+    if tpl is None:
+        # ⭐⭐⭐ v1.68【模板查找必须走 `fixed_ref.tpl_dirs()`，**不许只读资源包**】
+        #   ⛔ 病根：`PackInstaller.ensure()` 是「**只在首启解一次**」
+        #      （`PackInstaller.java:18` 的 `.pack_v3` 标记文件 ⇒ 标记在就直接 return）
+        #      ⇒ **真机上已装过 v1.67 的机器，新加的 `slot_done.png` 永远解不进去** ✗✗
+        #      ⇒ 若这里只认 `_MAPBOT_ROOT/templates/ui/`，本功能在真机上**恒不生效**、
+        #        而且**不报错**（正是本项目反复踩的"静默失效"家族 ✗）
+        #   ✅ `fixed_ref.tpl_dirs()` 的**第 2/3 个目录是外置可写目录**：
+        #        `/sdcard/Android/data/<pkg>/files/templates/ui`
+        #        `/sdcard/Download/autoexplore/templates/ui`
+        #      ⇒ 模板可以**adb 直推**（免重装 APK）✓ —— 真机验证通道靠它
+        #   ⚠ 顺序仍是**资源包优先**（`tpl_dirs()` 保证）⇒ 正式发布路径不受影响 ✓
+        _p = None
+        try:
+            import fixed_ref as _fxr68
+            for _d68 in _fxr68.tpl_dirs():
+                _c68 = os.path.join(_d68, _CLAIM_TPL)
+                if os.path.exists(_c68):
+                    _p = _c68
+                    break
+        except Exception:       # noqa: BLE001
+            _p = None
+        if _p is None:
+            _p = os.path.join(_MAPBOT_ROOT, 'templates', 'ui', _CLAIM_TPL)
+        if not os.path.exists(_p):
+            # ⚠ 模板缺失 ⇒ **不静默**：落一条日志，调用方按"判据不可用"处理
+            say('   ⚙ ui_tpl_missing:' + _CLAIM_TPL)
+            return None
+        try:
+            tpl = cv2.imdecode(np.fromfile(_p, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception:       # noqa: BLE001
+            return None
+        if tpl is None:
+            return None
+        say('   ⚙ claim 模板载入：' + _p)
+        _UI_TPL_CACHE[_CLAIM_TPL] = tpl
+    if tpl is None:
+        return None
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = _CLAIM_TPL_BAND
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(W, int(x1)), min(H, int(y1))
+    sub = img[y0:y1, x0:x1]
+    th, tw = tpl.shape[:2]
+    if sub.size == 0 or sub.shape[0] < th or sub.shape[1] < tw:
+        return []
+    res = cv2.matchTemplate(sub.astype(np.float32), tpl.astype(np.float32),
+                            cv2.TM_CCOEFF_NORMED)
+    ys, xs = np.nonzero(res >= _CLAIM_TPL_THR)
+    if not len(ys):
+        return []
+    # 同一个「已完成」会有一片相邻峰 ⇒ 按 x 聚类，每簇取最高分（否则会连点同一个槽 ✗）
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    groups, cur = [], []
+    for i in order:
+        if cur and xs[i] - xs[cur[-1]] > tw // 2:
+            groups.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        groups.append(cur)
+    hits = []
+    for grp in groups:
+        _bi = max(grp, key=lambda i: res[ys[i], xs[i]])
+        hits.append((int(xs[_bi] + tw // 2 + x0), int(ys[_bi] + th // 2 + y0),
+                     round(float(res[ys[_bi], xs[_bi]]), 3)))
+    hits.sort()
+    return hits
+
+
+def claim_one_slot(b, log, cx, cy, anchor_y=None):
+    """三步领取**一个**「已完成」槽：① 槽位 → ② 弹窗「领取」→ ③ 面板「返回」
+
+    ⭐ v1.68 从 `one_round` 里抽出来（原来内联）—— 只为**能对多个槽循环**，
+    内容与 v1.52 逐字一致（PC `4ac67cf`/`abd47f8`/`15f59e3`），**没有改行为** ✓
+    ⚠ 用户口径：「已完成和领取时间间隔 1s，领取和后面的返回间隔 3s」/「返回在最下面」
+    返回 `True` = 复检确认**已领掉**（或至少判据已消失）；`False` = 仍是「已完成」✗
+    """
+    global _CLAIM_FAIL_STREAK
+    # ⭐⭐⭐ v1.52【完整的**三步**领取流程】—— 抄 PC
+    #   （`4ac67cf` 第一步 / `abd47f8` 第二步 / `15f59e3` 第三步）
+    #   PC 用户口径（原话）：
+    #     「**已完成和领取时间间隔 1s，领取和后面的返回间隔 3s**」
+    #     「**返回在最下面**」
+    #   ⚠⚠ 我 v1.48 **只做了第①步** ✗ —— 点完「已完成」就不管了。
+    #     PC 第二步 commit 原话（不点「领取」的后果）：
+    #     「**不点它的话：弹窗留着盖住棋盘 ⇒ 下一轮被判「棋盘被挡」✗**
+    #       （正是老问题之一 ✓）」
+    #     ⇒ 少两步 = **每领一次就把棋盘糊一次** ✗✗
+    #   ① 槽位「已完成」 → ② 弹窗「领取」 → ③ 奖励面板「返回」
+    # ① 槽位「已完成」
+    _panel_tap(b, cx, cy, 'norm', log=log, what='已完成')
+    log.append({'explore': 'claim_step1_slot', 'at': (cx, cy), 'anchor_y': anchor_y})
+    say('       · 探索槽「已完成」⇒ 点它 (%d,%d) ✓' % (cx, cy))
+    # ② 等 **1.0s**（用户口径）⇒ 点弹窗里的「领取」
+    time.sleep(_CLAIM_GAP_PICK)
+    _cl52 = None
+    try:
+        b.snap('claim_pick')
+        # ⚠⚠ v1.52 真机日志实测：原来只在 (1050,1200) 这 **150px**
+        #   窄带里找「领取」⇒ **一次都没命中** ✗（走了标定兜底）
+        #   · 150px < `BAND_CROP_MIN`(520) ⇒ 本来就退化成整帧+过滤
+        #     ⇒ **带宽没省下任何时间，却把范围限死了** ✗✗
+        #   · 而且「领取」未必正好落在那个带里（弹窗文案/版式会变）
+        # ⇒ 改成**整帧找**（这条路**每图只跑一次** ⇒ 成本可忽略 ✓）
+        #   钱要花在"能认到"上，不是省这一次 OCR ✓
+        _it52 = b.ocr(tag='claim_pick') or []
+        _cl52 = (find_button(_it52, *L['claim'], maxlen=4)
+                 or find_in(_it52, *L['claim']))
+    except Exception:       # noqa: BLE001
+        _cl52 = None
+    if _cl52:
+        _panel_tap(b, _cl52['cx'], _cl52['cy'], 'norm', log=log,
+                   what='领取(弹窗·文字)')
+        log.append({'explore': 'claim_step2_pick',
+                    'at': (_cl52['cx'], _cl52['cy']),
+                    'text': _cl52['text'], 'via': 'text'})
+        say('       · 弹窗「领取」⇒ 点 (%d,%d)（文字命中 ✓）'
+            % (_cl52['cx'], _cl52['cy']))
+    else:
+        _panel_tap(b, _CLAIM_PICK_XY[0], _CLAIM_PICK_XY[1],
+                   'norm', log=log, what='领取(标定兜底)')
+        log.append({'explore': 'claim_step2_pick',
+                    'at': _CLAIM_PICK_XY, 'via': 'anchor',
+                    'note': '弹窗里没 OCR 到「领取」⇒ 标定坐标兜底 ✓'})
+        say('       · 弹窗「领取」没认到 ⇒ 标定坐标 (%d,%d) 兜底'
+            % _CLAIM_PICK_XY)
+    # ③ 等 **3.0s**（用户口径）⇒ 找/点奖励面板的「返回」
+    #   PC 踩点记录：「返回」**要等一会儿才出现** ✗
+    #     （3 秒后抓的那张里还没有它）⇒ 代码里也照这个顺序 ✓
+    #   用 `back_poll()`（两级：窄带 → 全屏 → 标定兜底 ✓）
+    time.sleep(_CLAIM_GAP_BACK)
+    _hb52 = back_poll(b, log=log, tag='claim_ret')
+    if _hb52:
+        _panel_tap(b, _hb52[0], _hb52[1], 'norm', log=log,
+                   what='返回(%s)' % ('窄带命中' if _hb52[2] == 'band'
+                                      else '全屏命中'))
+        log.append({'explore': 'claim_step3_back',
+                    'at': (_hb52[0], _hb52[1]), 'via': _hb52[2],
+                    'polls': _hb52[3]})
+        say('       · 奖励面板「返回」⇒ 点 (%d,%d)（%s，轮询 %d 次）✓'
+            % (_hb52[0], _hb52[1],
+               '窄带命中' if _hb52[2] == 'band' else '全屏命中',
+               _hb52[3]))
+    else:
+        _panel_tap(b, _CLAIM_BACK_XY[0], _CLAIM_BACK_XY[1],
+                   'norm', log=log, what='返回(标定兜底)')
+        log.append({'explore': 'claim_step3_back',
+                    'at': _CLAIM_BACK_XY, 'via': 'anchor',
+                    'note': '轮询 6s 没找到「返回」⇒ 标定坐标兜底 ✓'
+                            '（用户口径「返回在最下面」✓）'})
+        say('       · ⚠ 轮询 6s 没找到「返回」⇒ 标定 (%d,%d) 兜底'
+            % _CLAIM_BACK_XY)
+    # ④ **三步走完再复检**（自愈：以"有没有真领掉"为准 ✓）
+    #   PC `677d5d9`：领完复检，连续 3 次领不掉就停
+    #   ⛔⛔ v1.68 修：原来复检**又用了一次** `== '已完成'` 的 OCR 精确等值
+    #      ⇒ `_re48` 恒为 `[]`（不是 None）⇒ 走 `elif _re48 is not None:` 那支
+    #      ⇒ **每次都判「已领掉」** ⇒ `_CLAIM_FAIL_STREAK` **永远是 0**
+    #      ⇒ 自愈（连续 3 次领不掉就停）**从来没生效过** ✗✗ —— 同一个病根的第二处 ✗
+    #   ⇒ 复检也改成模板判据（**同一个判据**，不会再两边漂移 ✓）
+    time.sleep(0.8)
+    try:
+        b.snap('claim_re')
+        _re68 = find_claim_slots(b)
+    except Exception:       # noqa: BLE001
+        _re68 = None
+    if _re68 is None:
+        return None         # 判据不可用 ⇒ 不下结论（不误判失败、也不清零计数 ✓）
+    _still = [h for h in _re68
+              if abs(h[1] - cy) <= _CLAIM_ROW_DY and abs(h[0] - cx) <= _CLAIM_COL_DX]
+    if _still:
+        _CLAIM_FAIL_STREAK = int(_CLAIM_FAIL_STREAK or 0) + 1
+        log.append({'explore': 'claim_not_cleared',
+                    'streak': _CLAIM_FAIL_STREAK,
+                    'at': (cx, cy), 'score': _still[0][2],
+                    'note': '三步走完复检**同位置仍是「已完成」** ⇒ 判失败 ✗'})
+        say('       · 领完复检：那槽**还是「已完成」**⇒ 判失败（连续 %d 次）✗'
+            % _CLAIM_FAIL_STREAK)
+        return False
+    _CLAIM_FAIL_STREAK = 0
+    log.append({'explore': 'claim_cleared', 'at': (cx, cy)})
+    return True
+
 
 def explore_slots_free(items):
     """空闲探索槽 → (free | None, info)
@@ -7896,127 +8162,43 @@ def one_round(b, log, rnd, prefix, st):
                                         '（治"没完成还一直领" ✗）' % _cf48})
                     say('       · ⚠ 连续 %d 次「已完成」领不掉 ⇒ 停止自动领取 ✗' % _cf48)
             else:
-                _cd48 = [i for i in (items or [])
-                         if (i.get('text') or '').strip() == '已完成']
-                if _cd48:
-                    # 锚：同帧里其它槽位标签（「空闲」/ 倒计时）的 y
-                    _anchor48 = [i['cy'] for i in (items or [])
-                                 if ('空闲' in (i.get('text') or '')
-                                     or _EXPLORE_TIMER_RE.findall(
-                                         (i.get('text') or '').replace('：', ':')))]
-                    _tgt48 = None
-                    if _anchor48:
-                        _y48 = sorted(_anchor48)[len(_anchor48) // 2]     # 中位
-                        _cand48 = [i for i in _cd48
-                                   if abs(i['cy'] - _y48) <= _CLAIM_ROW_DY]
-                        if _cand48:
-                            _tgt48 = sorted(_cand48, key=lambda z: z['cy'])[0]
-                    if _tgt48 is None:
-                        log.append({'explore': 'claim_lonely',
-                                    'at': [(i['cx'], i['cy']) for i in _cd48[:3]],
-                                    'anchors': len(_anchor48),
-                                    'note': '有「已完成」但**不在槽位那一行**（或没有别的'
-                                            '槽位标签可当锚）⇒ **不点**（防点到棋盘格 ✗）'})
-                    else:
-                        _cx48, _cy48 = _tgt48['cx'], _tgt48['cy']
-                        # ⭐⭐⭐ v1.52【完整的**三步**领取流程】—— 抄 PC
-                        #   （`4ac67cf` 第一步 / `abd47f8` 第二步 / `15f59e3` 第三步）
-                        #   PC 用户口径（原话）：
-                        #     「**已完成和领取时间间隔 1s，领取和后面的返回间隔 3s**」
-                        #     「**返回在最下面**」
-                        #   ⚠⚠ 我 v1.48 **只做了第①步** ✗ —— 点完「已完成」就不管了。
-                        #     PC 第二步 commit 原话（不点「领取」的后果）：
-                        #     「**不点它的话：弹窗留着盖住棋盘 ⇒ 下一轮被判「棋盘被挡」✗**
-                        #       （正是老问题之一 ✓）」
-                        #     ⇒ 少两步 = **每领一次就把棋盘糊一次** ✗✗
-                        #   ① 槽位「已完成」 → ② 弹窗「领取」 → ③ 奖励面板「返回」
-                        _panel_tap(b, _cx48, _cy48, 'norm', log=log, what='已完成')
-                        log.append({'explore': 'claim_step1_slot',
-                                    'at': (_cx48, _cy48), 'anchor_y': _y48})
-                        say('       · 探索槽「已完成」⇒ 点它 (%d,%d) ✓'
-                            % (_cx48, _cy48))
-                        # ② 等 **1.0s**（用户口径）⇒ 点弹窗里的「领取」
-                        time.sleep(_CLAIM_GAP_PICK)
-                        _cl52 = None
-                        try:
-                            b.snap('claim_pick')
-                            # ⚠⚠ v1.52 真机日志实测：原来只在 (1050,1200) 这 **150px**
-                            #   窄带里找「领取」⇒ **一次都没命中** ✗（走了标定兜底）
-                            #   · 150px < `BAND_CROP_MIN`(520) ⇒ 本来就退化成整帧+过滤
-                            #     ⇒ **带宽没省下任何时间，却把范围限死了** ✗✗
-                            #   · 而且「领取」未必正好落在那个带里（弹窗文案/版式会变）
-                            # ⇒ 改成**整帧找**（这条路**每图只跑一次** ⇒ 成本可忽略 ✓）
-                            #   钱要花在"能认到"上，不是省这一次 OCR ✓
-                            _it52 = b.ocr(tag='claim_pick') or []
-                            _cl52 = (find_button(_it52, *L['claim'], maxlen=4)
-                                     or find_in(_it52, *L['claim']))
-                        except Exception:       # noqa: BLE001
-                            _cl52 = None
-                        if _cl52:
-                            _panel_tap(b, _cl52['cx'], _cl52['cy'], 'norm', log=log,
-                                       what='领取(弹窗·文字)')
-                            log.append({'explore': 'claim_step2_pick',
-                                        'at': (_cl52['cx'], _cl52['cy']),
-                                        'text': _cl52['text'], 'via': 'text'})
-                            say('       · 弹窗「领取」⇒ 点 (%d,%d)（文字命中 ✓）'
-                                % (_cl52['cx'], _cl52['cy']))
-                        else:
-                            _panel_tap(b, _CLAIM_PICK_XY[0], _CLAIM_PICK_XY[1],
-                                       'norm', log=log, what='领取(标定兜底)')
-                            log.append({'explore': 'claim_step2_pick',
-                                        'at': _CLAIM_PICK_XY, 'via': 'anchor',
-                                        'note': '弹窗里没 OCR 到「领取」⇒ 标定坐标兜底 ✓'})
-                            say('       · 弹窗「领取」没认到 ⇒ 标定坐标 (%d,%d) 兜底'
-                                % _CLAIM_PICK_XY)
-                        # ③ 等 **3.0s**（用户口径）⇒ 找/点奖励面板的「返回」
-                        #   PC 踩点记录：「返回」**要等一会儿才出现** ✗
-                        #     （3 秒后抓的那张里还没有它）⇒ 代码里也照这个顺序 ✓
-                        #   用 `back_poll()`（两级：窄带 → 全屏 → 标定兜底 ✓）
-                        time.sleep(_CLAIM_GAP_BACK)
-                        _hb52 = back_poll(b, log=log, tag='claim_ret')
-                        if _hb52:
-                            _panel_tap(b, _hb52[0], _hb52[1], 'norm', log=log,
-                                       what='返回(%s)'
-                                            % ('窄带命中' if _hb52[2] == 'band'
-                                               else '全屏命中'))
-                            log.append({'explore': 'claim_step3_back',
-                                        'at': (_hb52[0], _hb52[1]), 'via': _hb52[2],
-                                        'polls': _hb52[3]})
-                            say('       · 奖励面板「返回」⇒ 点 (%d,%d)（%s，轮询 %d 次）✓'
-                                % (_hb52[0], _hb52[1],
-                                   '窄带命中' if _hb52[2] == 'band' else '全屏命中',
-                                   _hb52[3]))
-                        else:
-                            _panel_tap(b, _CLAIM_BACK_XY[0], _CLAIM_BACK_XY[1],
-                                       'norm', log=log, what='返回(标定兜底)')
-                            log.append({'explore': 'claim_step3_back',
-                                        'at': _CLAIM_BACK_XY, 'via': 'anchor',
-                                        'note': '轮询 6s 没找到「返回」⇒ 标定坐标兜底 ✓'
-                                                '（用户口径「返回在最下面」✓）'})
-                            say('       · ⚠ 轮询 6s 没找到「返回」⇒ 标定 (%d,%d) 兜底'
-                                % _CLAIM_BACK_XY)
-                        # ④ **三步走完再复检**（自愈：以"有没有真领掉"为准 ✓）
-                        #   PC `677d5d9`：领完复检，连续 3 次领不掉就停
-                        time.sleep(0.8)
-                        try:
-                            b.snap('claim_re')
-                            _re48 = [i for i in (b.ocr(tag='claim_re') or [])
-                                     if (i.get('text') or '').strip() == '已完成'
-                                     and abs(i['cy'] - _cy48) <= _CLAIM_ROW_DY
-                                     and abs(i['cx'] - _cx48) <= _CLAIM_COL_DX]
-                        except Exception:       # noqa: BLE001
-                            _re48 = None
-                        if _re48:
-                            _CLAIM_FAIL_STREAK = int(_CLAIM_FAIL_STREAK or 0) + 1
-                            log.append({'explore': 'claim_not_cleared',
-                                        'streak': _CLAIM_FAIL_STREAK,
-                                        'at': (_cx48, _cy48),
-                                        'note': '三步走完复检**同位置仍是「已完成」** ⇒ 判失败 ✗'})
-                            say('       · 领完复检：那槽**还是「已完成」**⇒ 判失败（连续 %d 次）✗'
-                                % _CLAIM_FAIL_STREAK)
-                        elif _re48 is not None:
-                            _CLAIM_FAIL_STREAK = 0
-                            log.append({'explore': 'claim_cleared', 'at': (_cx48, _cy48)})
+                # ⭐⭐⭐ v1.68【判据换成**参考系模板快查**】—— 见 `find_claim_slots()` 上方长注
+                #   ⛔ 旧判据 `== '已完成'`（OCR 精确等值）**恒为空** ⇒ 整块静默跳过 ✗
+                #   ⛔ 旧行锚依赖「同帧还有「空闲」/倒计时」⇒ **三槽全「已完成」时锚为空**
+                #      ⇒ 一格都不领 ✗（真机帧 `_verify/fr1264_r0_board.png` 正是这种）
+                #   ✅ 新判据的搜索带 `y 880..1000` **上界 < 棋盘顶边 1002**
+                #      ⇒ 行锚的安全性**由几何保证**，不再依赖 OCR ✓
+                _hits68 = find_claim_slots(b)
+                if _hits68 is None:
+                    # ⚠ 模板缺失/取不到帧 ⇒ **不静默**，如实记一条（行为退回 v1.67 ✓）
+                    log.append({'explore': 'claim_tpl_unavailable',
+                                'tpl': _CLAIM_TPL,
+                                'note': '模板快查不可用（模板缺失或取不到帧）'
+                                        '⇒ 本轮不判「已完成」（**不静默** ✓）'})
+                elif not _hits68:
+                    # ⭐ v1.68：**没有「已完成」也要落一条**（旧代码此处完全静默 ✗）
+                    #   否则真机上"到底判没判"根本看不出来 —— 本轮排查就是被这个坑住的
+                    log.append({'explore': 'claim_none', 'band': _CLAIM_TPL_BAND,
+                                'thr': _CLAIM_TPL_THR,
+                                'note': '槽位行模板快查：**没有「已完成」** ✓'})
+                else:
+                    log.append({'explore': 'claim_found', 'n': len(_hits68),
+                                'hits': _hits68,
+                                'note': '槽位行模板快查命中「已完成」%d 个 ✓'
+                                        % len(_hits68)})
+                    say('       · 槽位行模板快查：**%d 个「已完成」** ✓' % len(_hits68))
+                    for _k68, (_cx48, _cy48, _sc68) in enumerate(
+                            _hits68[:_CLAIM_MAX_PER_MAP]):
+                        if _k68:
+                            time.sleep(1.0)      # 多槽之间留渲染时间（保守 ✓）
+                        say('       · [%d/%d] 槽 (%d,%d) 分数 %.3f'
+                            % (_k68 + 1, min(len(_hits68), _CLAIM_MAX_PER_MAP),
+                               _cx48, _cy48, _sc68))
+                        _r68 = claim_one_slot(b, log, _cx48, _cy48)
+                        if _r68 is False:
+                            say('       · ⚠ 该槽没领掉 ⇒ 余下 %d 个本轮不再试（防连点 ✗）'
+                                % (len(_hits68) - _k68 - 1))
+                            break
         _sf_now, _si = explore_slots_free(items)
         entry['slots'] = _si
         if _sf_now is not None:
@@ -10668,16 +10850,16 @@ def run_maps(a):
     else:
         _why0 = str(STATS.get('stopped') or '').strip()
         status('收工：一张都没跑完%s' % ('（%s）' % _why0 if _why0 else ''))
+    # ⭐⭐⭐ v1.68：**先把"收尾体力"记进账，再出统计**（顺序 bug 修复 —— 见 `sample_end_stamina`）
+    #   ⛔ 旧代码把这段放在 `say(summary_text())` / `dump_summary()` **之后**
+    #     ⇒ 最后一张图的 `_st_pre → 收尾` 那一整段**永远算不进去** ⇒
+    #     用户 2026-10-06 看到的 `平均每图 24.2 点/张`（< 进图 25，数学上不可能 ✗）
+    #   ⚠ 只有**至少跑完 1 张**才补这一笔：否则「进图前 1 个 + 收尾 1 个」能凑出一段
+    #     假的消耗，而 `_maps = max(1, …)` 会把它当 1 张图报出来 ✗（0 张就该显示 `—` ✓）
+    if STATS['maps']:
+        sample_end_stamina(b)
     say(summary_text())
     dump_summary()
-    # ⭐ 2026-09-27：收尾再读一次体力 ⇒ 最后一张图的"25 + 图内消耗"也能算出来 ✓
-    try:
-        _st_end = stamina(b.ocr(tag='end'))
-        if _st_end is not None:
-            STATS['stamina_entries'].append((_st_end, time.time()))
-            say('收尾体力 %d（已记入统计 ✓）' % _st_end)
-    except Exception:       # noqa: BLE001
-        pass
 
     if DUMP_AT_END:
         for e in log:

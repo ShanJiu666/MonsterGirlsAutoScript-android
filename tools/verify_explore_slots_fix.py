@@ -7542,6 +7542,444 @@ try:
 except Exception as _e66:       # noqa: BLE001
     check('v1.66 守门可运行（%r）' % (_e66,), False)
 
+# ══════════════════════════════════════════════════════════════════════════════
+print()
+print('=' * 78)
+print('⓯⭐⭐⭐⭐ v1.68 槽位「已完成」领取判据换模板 + 标记定点窗修正 + 收尾体力顺序')
+print('=' * 78)
+#   ## 起因（用户 2026-10-06 两条报障）
+#     ①「**现在问题是探索框里有两个已完成，但是不去领取**」
+#     ②「刚刚那把**没有识别到幸运草标志**」
+#   ## ① 的根因（**两条，都在同一族**）
+#     · PC 源码逐字写着（`mapbot_pc/explore_loop.py:9187-9191`）：
+#       「已完成」这三个字**正常 OCR 读不到**（真机实测必须放大 4 倍）
+#       ⇒ 手机端 `== '已完成'` 的 OCR 精确等值判据 **恒为空** ⇒ 整块**静默**跳过 ✗
+#     · 更隐蔽的第二条：旧的行锚 `_anchor48` 取自**别的槽位标签**
+#       （「空闲」/倒计时）⇒ **三槽全是「已完成」时锚集为空** ⇒ `claim_lonely`
+#       ⇒ **一格都不领** ✗（真机帧 `_verify/fr1264_r0_board.png` 正是这种）
+#     · 第三处：第 ④ 步"领完复检"**也用的那个死判据** ⇒ `_re48` 恒为 `[]`
+#       ⇒ 每次都判"领掉了" ⇒ `_CLAIM_FAIL_STREAK` **永远是 0**、自愈从没触发 ✗
+#   ## ② 的根因：v1.45 的定点窗口 `MARK_OFF_REF=(-36,-36)` 只盖住 2×2 图标块的
+#     **左上角那一个**（= boss）⇒ 幸运草/红装/大拇指**一律认不到** ✗
+#   ## 为什么本组必须有**执行级 + 对照项**
+#     判据换了、注释写了，**都不算数**：本项目已五次栽在"改了状态但决策处读另一份数据"
+#     ⇒ 本组直接喂真机帧跑**被测函数本身**，并配一个**必须判负**的对照帧 ✓
+try:
+    _PROJ68 = PROJ
+    _EL68P = os.path.join(_PROJ68, 'app', 'src', 'main', 'python', 'explore_loop.py')
+    _MK68P = os.path.join(_PROJ68, 'app', 'src', 'main', 'python', 'marks.py')
+    _el68 = open(_EL68P, encoding='utf-8').read()
+    _mk68 = open(_MK68P, encoding='utf-8').read()
+    import marks as _marks68m          # noqa: E402  ⚠ 取**模块真值**，别只 grep 源码
+    _VER68 = os.path.join(_PROJ68, '_verify')
+
+    def _slice68(_src, _a, _b, _tail=None):
+        """安全切片：找不到锚点返回 **None**（不是抛异常）
+
+        ⚠ 2026-10-06：第一版用 `_src.split(a)[1]` ⇒ 源码被 stash 回退时**抛
+          IndexError**，把本组后面 10 条断言**全吞掉**（牙齿测试只剩一条"守门可运行"
+          红，看不出细节 ✗）—— 与 v1.66 那次 `str.index()` 是**同一个坑**，
+          本文件已第二次踩到 ⇒ 一律用本函数 ✓
+        """
+        _i = _src.find(_a)
+        if _i < 0:
+            return None
+        _i += len(_a)
+        _j = _src.find(_b, _i) if _b else -1
+        if _b and _j < 0:
+            return None
+        _seg = _src[_i:_j] if _b else _src[_i:]
+        if _tail is not None:
+            _k = _seg.find(_tail)
+            if _k < 0:
+                return None
+            _seg = _seg[:_k]
+        return _seg
+
+    _FCS68 = _slice68(_el68, 'def find_claim_slots(b, img=None):', 'def claim_one_slot')
+    _COS68 = _slice68(_el68, 'def claim_one_slot(b, log, cx, cy, anchor_y=None):',
+                      'def explore_slots_free')
+
+    # ── A. ①【领取判据换模板】── 常量 / 资产 / 结构 ──────────────────────
+    check('v1.68 A① ⭐ 领取判据的**模板与阈值**在位，且搜索带**上界 < 棋盘顶边**'
+          '（`GRID.y0 = 1002` ⇒ 带内不可能是棋盘格 ⇒ 安全性**由几何保证**，'
+          '不再依赖"OCR 读得到行锚"那条已证伪的前提 ✓）',
+          "_CLAIM_TPL = 'slot_done.png'" in _el68
+          and '_CLAIM_TPL_THR = 0.70' in _el68
+          and '_CLAIM_TPL_BAND = (0, 880, 1080, 1000)' in _el68
+          and 1000 < int(EL.GRID['y0']),
+          'GRID.y0=%s（带上界 1000 必须 < 它）' % (EL.GRID['y0'],))
+    _TPL68 = os.path.join(_ASSETS, 'templates', 'ui', 'slot_done.png')
+    _tpl68_ok = os.path.exists(_TPL68)
+    check('v1.68 A② ⭐ 模板 `slot_done.png` 真的进了**本仓资源包**'
+          '（`assets/mapbot_pack/templates/ui/` —— 打包/热更都从这走 ✓）',
+          _tpl68_ok,
+          ('%s（%d 字节）' % (_TPL68, os.path.getsize(_TPL68))) if _tpl68_ok
+          else '模板缺失 ⇒ 判据恒不可用 ✗')
+    check('v1.68 A③ ⚠ 模板尺度 = **参考系原生**（不是从 PC 720 系缩来的）'
+          '—— 教训：`probe_tpl1080.py` 曾把 720 原生模板 ×k 再搜 1080 带，'
+          '得出"复现不了 ≤0.275"的**假结论** ✗；正确做法是在**裁剪它的帧系**里匹配',
+          _tpl68_ok and _cv2.imread(_TPL68, _cv2.IMREAD_COLOR).shape[:2] == (36, 116),
+          ('shape=%s（应 116×36 宽×高）' % ((_cv2.imread(_TPL68, _cv2.IMREAD_COLOR).shape[:2],)
+                                            if _tpl68_ok else None,)))
+    check('v1.68 A④ ⛔ **撤回守门**：领取判据**不许**再出现 OCR 精确等值 '
+          '`== \'已完成\'`（PC 逐字记着「正常 OCR 读不到」⇒ 恒为空 ⇒ 静默失效 ✗✗）'
+          '⚠ 先剥掉整行注释再查 —— 留档注释里**必然逐字引用**旧判据（v1.62c/v1.67 同一个坑）',
+          not any(("'已完成'" in _ln and '== ' in _ln)
+                  for _ln in _el68.splitlines()
+                  if not _ln.lstrip().startswith('#')))
+    check('v1.68 A⑤ ⭐ 新判据 `find_claim_slots` + `claim_one_slot` 都在，'
+          '且**调用点真的接了**（不是只定义不用 ✗）',
+          'def find_claim_slots(b, img=None):' in _el68
+          and 'def claim_one_slot(b, log, cx, cy, anchor_y=None):' in _el68
+          and '_hits68 = find_claim_slots(b)' in _el68
+          and '_r68 = claim_one_slot(b, log, _cx48, _cy48)' in _el68)
+    check('v1.68 A⑥ ⭐ `None` 与 `[]` **语义必须分开**'
+          '（`None` = 模板读不出/取不到帧 ⇒ 判据不可用；`[]` = 判据可用但没命中）'
+          '—— 混成一个值 ⇒ "模板没到"会被静默当成"没有已完成" ✗',
+          _FCS68 is not None and 'return None' in _FCS68 and 'return []' in _FCS68)
+    check('v1.68 A⑦ ⭐ **不再静默**：没有「已完成」时也要落一条日志'
+          '（旧代码 `if _cd48:` 为空 ⇒ **什么都不记** ⇒ 真机上"到底判没判"根本看不出来'
+          '—— 本轮排查就是被这个坑住的 ✗）',
+          "'claim_none'" in _el68 and "'claim_tpl_unavailable'" in _el68
+          and "'claim_found'" in _el68)
+    check('v1.68 A⑧ ⭐ 第 ④ 步"领完复检"也换成 `find_claim_slots`'
+          '（旧复检复用同一个死判据 ⇒ 恒判"已领掉" ⇒ 自愈 `_CLAIM_FAIL_STREAK` '
+          '**永远 0、一次都没触发过** ✗ —— 同一个病根的第二/三处）',
+          _COS68 is not None and 'find_claim_slots(b)' in _COS68)
+    _PKI68 = os.path.join(_PROJ68, 'app', 'src', 'main', 'java',
+                          'com', 'fantasy', 'autoexplore', 'PackInstaller.java')
+    _pki68 = open(_PKI68, encoding='utf-8').read() if os.path.exists(_PKI68) else ''
+    check('v1.68 A⑨ ⭐⭐ **部署陷阱守门**：模板查找必须走 `fixed_ref.tpl_dirs()`，'
+          '**不许只读资源包** —— `PackInstaller.ensure()` 是「**只在首启解一次**」'
+          '（标记文件在就直接 return）⇒ 已装过 v1.67 的真机**永远拿不到**新模板，'
+          '而代码不报错 ✗✗（"代码到了、图没到"家族）',
+          'fixed_ref as _fxr68' in _el68 and 'tpl_dirs()' in _el68
+          and 'MARK = ".pack_v4"' in _pki68,
+          'tpl_dirs=%s｜PackInstaller 标记=%s'
+          % ('fixed_ref as _fxr68' in _el68 and 'tpl_dirs()' in _el68,
+             ('".pack_v4"' if 'MARK = ".pack_v4"' in _pki68
+              else ('仍为 .pack_v3 ⇒ 新模板进不了已装机 ✗' if _pki68 else '读不到'))))
+    check('v1.68 A⑩ ⛔ 反向守门：`PackInstaller` 的标记**不许退回 `.pack_v3`**'
+          '（它从 v1.08 起就没动过，正是本轮新模板解不进去的**直接原因** ✗）'
+          '⚠ 先剥掉 `//`、`*`、`/*` 整行注释 —— 留档注释里**必然逐字引用**旧值'
+          '（v1.62c / v1.67 / 本组 A④ 都是同一个坑，已三次踩到 ✓）',
+          not any('.pack_v3' in _ln for _ln in _pki68.splitlines()
+                  if not _ln.lstrip().startswith(('//', '*', '/*'))))
+
+    # ── B. ①【执行级：真代码 + 真机帧】─────────────────────────────────
+    class _FB68(object):
+        """只喂一张帧的最小 bot（`find_claim_slots` 只用到 `b.img()` ✓）"""
+        def __init__(self, _im):
+            self._im = _im
+
+        def img(self):
+            return self._im
+
+    _FR68 = os.path.join(_VER68, 'fr1264_r0_board.png')       # 三槽全「已完成」✓
+    _NEG68 = (os.path.join(_VER68, 'dev_board_r0.png'),       # 三槽倒计时（白字）✓
+              os.path.join(_VER68, 'phone_settle_20261004.png'),   # 结算帧（绿像素爆表）✗
+              os.path.join(_VER68, 'phone_board_raw.png'))     # 全零帧 ✓
+    #   ⚠ 用 `getattr` 取被测函数：源码被 stash/回退时**不抛异常**，否则本组后面
+    #     全部断言被 except 吞掉、牙齿测试只剩一条"守门可运行"红（v1.66 踩过 ✗）
+    _fc68 = getattr(EL, 'find_claim_slots', None)
+    if _fc68 is None:
+        skip('v1.68 B①~B⑤ 领取判据执行级（`find_claim_slots` 不在 ⇒ 源码被回退）')
+    elif not os.path.exists(_FR68):
+        skip('v1.68 B①~B⑤ 领取判据执行级（缺 `_verify/fr1264_r0_board.png` 真机帧）')
+    else:
+        _im68 = _cv2.imread(_FR68, _cv2.IMREAD_COLOR)
+        _h68 = _fc68(_FB68(_im68))
+        check('v1.68 B① ⭐⭐ 执行级：真机帧（**三个「已完成」**）⇒ 恰好 3 个命中，'
+              '且 x 心与 `layout.REF[\'slots_x\']` **同源（±2px：模板里字形不是严格居中）**、'
+              'y = 文字行 940（证明**判据本身**在这帧上工作，不是"注释写了" ✓）',
+              _h68 is not None and len(_h68) == 3
+              and all(abs(h[0] - w) <= 2 for h, w in
+                      zip(_h68, EL.layout_mod.REF['slots_x']))
+              and all(abs(h[1] - 940) <= 6 for h in _h68),
+              'hits=%s（应 3 个、x≈(240,356,473)、y≈940）' % (_h68,))
+        check('v1.68 B② ⭐ **聚类去重**：同一个「已完成」只报 **1** 次'
+              '（`TM_CCOEFF_NORMED` 会在真峰周围给一整片高分 ⇒ 不聚类就会**连点同一个槽** ✗）',
+              _h68 is not None and len(_h68) == len(set(h[0] for h in _h68)) == 3,
+              'x 去重后 %s 个（应 3）' % (len(set(h[0] for h in _h68))
+                                         if _h68 else None,))
+        check('v1.68 B③ ⭐ 分数在**实测分离区间**内（正样本 0.906~1.000）',
+              _h68 is not None and all(h[2] >= 0.90 for h in _h68),
+              'scores=%s（门槛 %.2f）' % ([h[2] for h in _h68] if _h68 else None,
+                                         EL._CLAIM_TPL_THR))
+        # 对照项：**必须判负**的帧 —— 证明 B① 不是恒绿
+        _neg68, _negdet = [], []
+        for _p68 in _NEG68:
+            if not os.path.exists(_p68):
+                continue
+            _r68n = _fc68(_FB68(_cv2.imread(_p68, _cv2.IMREAD_COLOR)))
+            _neg68.append((os.path.basename(_p68), _r68n))
+            if _r68n:
+                _negdet.append('%s→%s' % (os.path.basename(_p68), _r68n))
+        check('v1.68 B④ ⭐⭐ **对照项（负样本）**：倒计时帧 / **结算帧** / 全零帧 ⇒ '
+              '一律 **0 命中**（⚠ 结算帧是**关键反例**：绿像素法在它上面爆表 '
+              '3633/5767/10899 ⇒ 会**在结算时点棋盘** ✗ ⇒ 这条钉住"为什么不用绿像素法"）',
+              bool(_neg68) and not _negdet,
+              '误报=%s（应无）｜已验 %d 帧' % (_negdet or '无', len(_neg68)))
+        check('v1.68 B⑤ ⭐ 判据**可判负也可判正**（对照项与 B① 结论相反 ⇒ 不是恒绿 ✓）',
+              _h68 is not None and len(_h68) == 3
+              and all(not r for _n, r in _neg68 if r is not None),
+              '正=3 负=0')
+
+    # ── C. ②【标记定点窗修正】────────────────────────────────────────────
+    check('v1.68 C① ⭐⭐ v1.45 的**错误窗偏移**已修：块心 `(-7,-7)` + 搜索半径 `32.0`'
+          '（旧值 `(-36,-36)`/`14.0` **只盖住 2×2 图标块的左上角** ⇒ '
+          '幸运草/红装/大拇指**一律认不到** ✗ —— 用户报障②的真根因）',
+          'MARK_OFF_REF = (-7, -7)' in _mk68 and 'FAST_SEARCH_R = 32.0' in _mk68,
+          'MARK_OFF_REF=%s FAST_SEARCH_R=%s'
+          % (getattr(_marks68m, 'MARK_OFF_REF', '?'),
+             getattr(_marks68m, 'FAST_SEARCH_R', '?')))
+    check('v1.68 C② ⚠ 尺度表**不许裁到 3 档**：`boss` 会在其中 3 帧上丢'
+          '（实测教训：为提速裁尺度 ⇒ **静默丢目标** ✗）',
+          'FAST_SCALES = (3.8, 4.1, 4.4, 4.7, 5.0)' in _mk68)
+    check('v1.68 C③ ⭐ `_jobs_of()` **按模板字节去重**'
+          '（`clover_live` 与 `clover` 是**逐字节相同**的同一张图 ⇒ 白算一遍 ✗；'
+          '实测 7 → 6 ✓）',
+          'np.ascontiguousarray(_t).tobytes()' in _mk68)
+
+    # ── D. ③【收尾体力顺序 bug】────────────────────────────────────────
+    _i68_s = _el68.find('sample_end_stamina(b)')
+    _i68_t = _el68.find('say(summary_text())')
+    check('v1.68 D① ⭐⭐ **收尾体力必须在 `summary_text()` 之前读**'
+          '（旧代码把 `stamina_entries.append` 放在出统计**之后** ⇒ 最后一张图'
+          '少算一段 ⇒ 「平均每图 24.2 < 进图 25」**算术上不可能** —— 就是这么发现的 ✓）',
+          _i68_s >= 0 and _i68_t >= 0 and _i68_s < _i68_t,
+          'sample_end_stamina idx=%s < say(summary_text) idx=%s' % (_i68_s, _i68_t))
+    check('v1.68 D② ⭐ `sample_end_stamina()` 真的把读数记进 `stamina_entries`'
+          '（只 `say` 不记账 = 没修 ✗）',
+          "def sample_end_stamina(b):" in _el68
+          and "STATS['stamina_entries'].append(" in
+          (_slice68(_el68, 'def sample_end_stamina(b):', 'def summary_text') or ''))
+    check('v1.68 D③ ⭐ `summary_text()` 的**分母用 `maps`**（不是 `len(entries)`）'
+          '—— 平均每图 = 总消耗 / 图数；用 entries 长度会在读数失败时把均值抬高 ✗',
+          "_maps = max(1, int(s['maps']))" in _el68)
+except Exception as _e68:       # noqa: BLE001
+    check('v1.68 守门可运行（%r）' % (_e68,), False)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v1.69 —— 启动器图标换成**机甲核心魔偶**的官方像素头像
+# ═══════════════════════════════════════════════════════════════════════════
+# 用户口径：「MGAS头像改成机甲核心魔偶的像素头像」＋提示「幻想少女公会那边有
+#   头像 head_atlas.png|json」⇒ **用官方图集，别手绘**。
+# 本组守四件事（每一件都是**踩过的坑**）：
+#   A. 头像来源**必须是官方图集那一格**，且源资产**入库**（容器根 `_icon_ref/`
+#      不在任何 git 仓里 ⇒ 丢了就再也画不出来 ✗）
+#   B. 头像**不许重采样**：30×30 官方格必须原生 1:1 贴上（缩放真像素画 = 丢真像素 ✗）
+#   C. 自适应图标**保证可见区是 66dp 圆**（半径 33dp）：头像最外不透明像素必须在
+#      圆内。⚠ 画布 40 格时是 37.1dp ⇒ **会被圆形启动器切掉**；48 格才 30.9dp ✓
+#      —— 这条是**算术判据**，不是"看着还行"（本项目反复栽在"看着还行"上）
+#   D. 接线在位：`AndroidManifest` 的 icon/roundIcon ＋ `mipmap-anydpi-v26` 两个
+#      adaptive-icon XML 指向 foreground/background ＋ 生成脚本**仓内自包含**
+#      ⚠ 图标在 `res/` 里 ⇒ **只能整包重装**才上真机（热更新永远带不到 ✗）
+try:
+    _PROJ69 = PROJ
+    _TOOLS69 = os.path.join(_PROJ69, 'tools')
+    _RES69 = os.path.join(_PROJ69, 'app', 'src', 'main', 'res')
+    _MKICON69 = os.path.join(_TOOLS69, 'make_app_icon.py')
+    _HEAD69 = os.path.join(_TOOLS69, 'icon', 'head_M31302_000.png')
+    _src69 = open(_MKICON69, encoding='utf-8').read() if os.path.exists(_MKICON69) else ''
+
+    # ── A. 头像来源 = 官方图集，且源资产入库 ────────────────────────────
+    #   真值量自官方图集索引 167（`M31302_000`）：30×30 RGBA、alpha≥100 共 436 px、
+    #   不透明包围盒 23×20（x 3..25 / y 3..22）。⚠ 别把这些数抄成"大概"——
+    #   它们是本组的**唯一基准**，头像换错格会当场红 ✓
+    _head_ok69 = False
+    _head_det69 = '文件不存在'
+    if os.path.exists(_HEAD69):
+        _h69 = _cv2.imread(_HEAD69, _cv2.IMREAD_UNCHANGED)
+        if _h69 is None or _h69.ndim != 3 or _h69.shape[2] != 4:
+            _head_det69 = '读不到或非 RGBA：%s' % (None if _h69 is None
+                                                  else _h69.shape,)
+        else:
+            _ys69h, _xs69h = _np.where(_h69[..., 3] >= 100)
+            _n69h = len(_ys69h)
+            _bw69h = int(_xs69h.max() - _xs69h.min() + 1)
+            _bh69h = int(_ys69h.max() - _ys69h.min() + 1)
+            _head_det69 = ('%dx%d 不透明 %d px 包围盒 %dx%d'
+                           % (_h69.shape[1], _h69.shape[0], _n69h,
+                              _bw69h, _bh69h))
+            _head_ok69 = (_h69.shape[0] == 30 and _h69.shape[1] == 30
+                          and _n69h == 436 and _bw69h == 23 and _bh69h == 20)
+    check('v1.69 A① ⭐⭐ 官方头像格**已入库且是那一格**：'
+          '`tools/icon/head_M31302_000.png` = 30×30 RGBA、不透明 **436 px**、'
+          '包围盒 **23×20**（量自官方图集索引 167）—— '
+          '⚠ 容器根 `_icon_ref/` **不在任何 git 仓里** ⇒ 只放那儿的话丢了就再也画不出来 ✗',
+          _head_ok69, _head_det69)
+    check('v1.69 A② ⭐ 生成脚本**仓内自包含**：自带 PNG 编解码、'
+          '**不 import 仓外模块**（旧版 `draw_mech_icon`/`make_icon` 都在 '
+          '`_icon_ref/` ⇒ 仓里跑不起来 ✗）',
+          bool(_src69) and 'def write_png(' in _src69 and 'def read_png(' in _src69
+          and 'from make_icon' not in _src69 and 'import draw_mech_icon' not in _src69
+          and 'import make_icon' not in _src69)
+    check('v1.69 A③ ⭐ 脚本**不许再手绘**（用户明确要"官方像素头像"）：'
+          '源码里不得出现调色板式手绘残留 `PAL`/`SRC_A`/`SRC_B`'
+          '（旧手绘版是 `make_icon.py` 的 `PAL` + `SRC_A/SRC_B`）',
+          bool(_src69) and 'PAL = {' not in _src69 and 'SRC_A' not in _src69
+          and 'SRC_B' not in _src69)
+
+    # ── B. 不重采样 + 安全圆（**算术判据**）────────────────────────────
+    check('v1.69 B① ⭐⭐ 官方格**原生 1:1**（`place_native` 直接摆，不缩放）'
+          '—— 缩放真像素画会丢真像素、发糊 ✗；且**必须有断言守着**'
+          '（`assert _dp <= 33.0`），不能只写在注释里',
+          bool(_src69) and 'def place_native(' in _src69
+          and 'assert _dp <= 33.0' in _src69)
+    check('v1.69 B② ⭐⭐ **安全圆算术判据**：画布 48 格 ⇒ 头像最外像素 30.9dp '
+          '≤ 33dp（自适应 66dp 保证可见半径）✓；'
+          '⚠ 旧 40 格画布是 **37.1dp ⇒ 会被圆形启动器切掉** ✗ —— '
+          '这正是本轮把画布从 40 改 48 的**唯一理由**（不是审美）',
+          bool(_src69) and 'LOGIC = 48' in _src69 and 'LOGIC = 40' not in _src69
+          and 'LOGIC = 30' not in _src69,
+          'LOGIC=%s' % ('48' if 'LOGIC = 48' in _src69 else '不是 48 ✗'))
+
+    # ── C. 执行级：真跑生成器 → 量发射出来的 PNG ──────────────────────
+    #   ⚠ 只 grep 源码不算数（本项目六次栽在"注释写了、代码没生效"）⇒ 直接读**发射后**
+    #     的 mipmap PNG，验：尺寸、前景头部在 108dp 安全圆内、方/圆图标不透明。
+    _em69 = {}
+    for _d69 in ('mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'):
+        for _n69 in ('ic_launcher', 'ic_launcher_round',
+                     'ic_launcher_foreground', 'ic_launcher_background'):
+            _p69 = os.path.join(_RES69, 'mipmap-'+_d69, _n69+'.png')
+            if os.path.exists(_p69):
+                _em69[(_d69, _n69)] = _p69
+    if len(_em69) != 20:
+        skip('v1.69 C①~C④ 图标发射级（应有 20 个 mipmap PNG，实到 %d）'
+             % len(_em69))
+    else:
+        _bad69 = []
+        for _d69, _s69 in (('mdpi', 48), ('hdpi', 72), ('xhdpi', 96),
+                           ('xxhdpi', 144), ('xxxhdpi', 192)):
+            _fs69 = int(round(_s69 * 108 / 48.0))
+            for _n69, _want69 in (('ic_launcher', _s69),
+                                  ('ic_launcher_round', _s69),
+                                  ('ic_launcher_foreground', _fs69),
+                                  ('ic_launcher_background', _fs69)):
+                _im69 = _cv2.imread(_em69[(_d69, _n69)], _cv2.IMREAD_UNCHANGED)
+                if _im69 is None or _im69.shape[0] != _want69 \
+                        or _im69.shape[1] != _want69:
+                    _bad69.append('%s/%s=%s(应 %d)'
+                                  % (_d69, _n69,
+                                     None if _im69 is None else _im69.shape[:2],
+                                     _want69))
+        check('v1.69 C① ⭐ **执行级**：5 密度 × 4 张 = 20 个 PNG 尺寸全对'
+              '（旧版 48/96/144/192px；自适应 108dp = 108/162/216/324/432px）'
+              '—— 直接读**发射后**的文件，不看源码注释',
+              not _bad69, '尺寸不符=%s' % (_bad69 or '无'))
+
+        # 自适应前景：**头部必须落在 66dp 安全圆内**（否则圆形启动器切脸）
+        _bad69b, _det69 = [], []
+        for _d69, _s69 in (('mdpi', 48), ('xxxhdpi', 192)):
+            _fs69 = int(round(_s69 * 108 / 48.0))
+            _p69 = _em69[(_d69, 'ic_launcher_foreground')]
+            _im69 = _cv2.imread(_p69, _cv2.IMREAD_UNCHANGED)
+            if _im69 is None or _im69.shape[2] != 4:
+                _bad69b.append('%s 无 alpha' % _d69)
+                continue
+            _al69 = _im69[..., 3]
+            _ys69, _xs69 = _np.where(_al69 >= 100)
+            if not len(_ys69):
+                _bad69b.append('%s 前景全透明 ✗' % _d69)
+                continue
+            # 108dp 画布中心 = fs/2 - 0.5；安全半径 = 33/108*fs
+            _c69 = _fs69 / 2.0 - 0.5
+            _safe69 = 33.0 / 108.0 * _fs69
+            _r69 = float(_np.max(_np.hypot(_xs69 - _c69, _ys69 - _c69)))
+            _det69.append('%s 最大半径 %.1fpx/安全 %.1fpx'
+                          % (_d69, _r69, _safe69))
+            if _r69 > _safe69:
+                _bad69b.append('%s 超出安全圆 %.1f > %.1f' % (_d69, _r69, _safe69))
+        check('v1.69 C② ⭐⭐ **执行级：自适应前景头部在 66dp 安全圆内**'
+              '（`mdpi` 与 `xxxhdpi` 两端各量一次）—— '
+              '⚠ 这是"圆形启动器会不会切脸"的**唯一硬判据**；'
+              '40 格画布在这里**必然红**（37.1dp > 33dp）✗',
+              not _bad69b, '越界=%s｜%s' % (_bad69b or '无', '；'.join(_det69)))
+
+        # 头像像素**没被重采样**：判据是**色集合包含**，不是"颜色数够少"。
+        #   ⚠⚠ v1.69 初版这里写的是 `_uniq69 <= 120` —— **太松，是个假绿**：
+        #      把发射器改成"每个像素与左邻居取平均"（模拟双线性）后，实测唯一色数
+        #      **18 → 89**，仍 ≤120 ⇒ **门禁照样绿** ✗（牙齿第 4 场景当场抓出）
+        #   ⇒ 正确判据：NEAREST 意味着**发射后的每个不透明像素颜色都必须恰好等于
+        #      官方 30×30 格里出现过的某个颜色** ⇒ 断言 `fg色集合 - 官方色集合 == ∅`。
+        #      实测：干净版多余色 **0**；模糊版多余色 **74** ⇒ 干净分离 ✓
+        _src69 = os.path.join(_PROJ69, 'tools', 'icon', 'head_M31302_000.png')
+        _im69 = _cv2.imread(_em69[('xxxhdpi', 'ic_launcher_foreground')],
+                            _cv2.IMREAD_UNCHANGED)
+        _sr69 = _cv2.imread(_src69, _cv2.IMREAD_UNCHANGED)
+        _uniq69, _extra69, _nset69 = 0, -1, 0
+        if _im69 is not None and _im69.shape[2] == 4 \
+                and _sr69 is not None and _sr69.shape[2] == 4:
+            _fg69 = _im69[_im69[..., 3] >= 100]
+            _fset69 = set(map(tuple, _fg69[:, :3].tolist()))
+            _s69set = set(map(tuple, _sr69[_sr69[..., 3] >= 1][:, :3].tolist()))
+            _uniq69 = len(_fset69)
+            _nset69 = len(_s69set)
+            _extra69 = len(_fset69 - _s69set)
+        check('v1.69 C③ ⭐⭐ **NEAREST 未被插值**：`xxxhdpi` 前景不透明像素的'
+              '**色集合 ⊆ 官方 30×30 格的色集合**（即"每个像素都还是原色"，'
+              '一个中间色都不许有）—— ⚠ 不能用"唯一色数 ≤ N"这种松阈值：'
+              '实测把它改成与左邻居取平均后唯一色数只从 18 涨到 89，'
+              '**≤120 照样绿 ⇒ 假绿** ✗；色集合包含才干净分离（干净 0 多余色／'
+              '模糊 74 多余色）',
+              _im69 is not None and _sr69 is not None
+              and _uniq69 > 0 and _extra69 == 0,
+              '唯一色数=%s／官方色数=%s／**多余色=%s**（应 0；-1 = 读不到）'
+              % (_uniq69, _nset69, _extra69))
+
+        # 旧版图标必须**不透明**（不能整张透掉 —— 那是发射器把 grid 传错的症状）
+        _bad69c = []
+        for _d69 in ('mdpi', 'xxxhdpi'):
+            for _n69 in ('ic_launcher', 'ic_launcher_round'):
+                _im69 = _cv2.imread(_em69[(_d69, _n69)], _cv2.IMREAD_UNCHANGED)
+                if _im69 is None or _im69.shape[2] != 4:
+                    _bad69c.append('%s/%s 无 alpha' % (_d69, _n69))
+                    continue
+                _n_op69 = int((_im69[..., 3] >= 100).sum())
+                _tot69 = _im69.shape[0] * _im69.shape[1]
+                if _n_op69 < _tot69 * 0.5:
+                    _bad69c.append('%s/%s 只有 %.0f%% 不透明'
+                                   % (_d69, _n69, 100.0*_n_op69/_tot69))
+        check('v1.69 C④ ⭐ 旧版方/圆图标**大面积不透明**（≥50%）—— '
+              '⚠ 若发射器把 `head_px`（只有头像、其余透明）误传给旧版图标，'
+              '整张会几乎全透、桌面上一片空白 ✗（v1.69 改画布时正好动过这条接线）',
+              not _bad69c, '异常=%s' % (_bad69c or '无'))
+
+    # ── D. 接线：Manifest ＋ adaptive-icon XML ────────────────────────
+    _man69 = os.path.join(_PROJ69, 'app', 'src', 'main', 'AndroidManifest.xml')
+    _mn69 = open(_man69, encoding='utf-8').read() if os.path.exists(_man69) else ''
+    check('v1.69 D① ⭐ `AndroidManifest` 必须同时声明 `android:icon` 与 '
+          '`android:roundIcon`（缺 roundIcon ⇒ 圆形启动器回退到方形图 ⇒ '
+          '桌面上出现方块 ✗）',
+          'android:icon="@mipmap/ic_launcher"' in _mn69
+          and 'android:roundIcon="@mipmap/ic_launcher_round"' in _mn69)
+    _any69 = os.path.join(_RES69, 'mipmap-anydpi-v26')
+    _x69 = {}
+    for _f69 in ('ic_launcher.xml', 'ic_launcher_round.xml'):
+        _p69 = os.path.join(_any69, _f69)
+        _x69[_f69] = open(_p69, encoding='utf-8').read() \
+            if os.path.exists(_p69) else ''
+    check('v1.69 D② ⭐ 两个 `mipmap-anydpi-v26` XML 都指向 '
+          '`@mipmap/ic_launcher_foreground` ＋ `@mipmap/ic_launcher_background`'
+          '（自适应图标 = 启动器拿两层自己蒙版；指错层 ⇒ 前景/背景错位 ✗）',
+          all('@mipmap/ic_launcher_foreground' in _v
+              and '@mipmap/ic_launcher_background' in _v for _v in _x69.values()),
+          '缺失=%s' % [k for k, v in _x69.items()
+                       if '@mipmap/ic_launcher_foreground' not in v
+                       or '@mipmap/ic_launcher_background' not in v])
+    check('v1.69 D③ ⭐ 留档注释写明来源 = **机甲核心魔偶 M31302_000（图集索引 167）**'
+          '—— ⚠ 上一版注释断言"图集那格是半身、烘了背景"⇒ **那句话是错的**，'
+          '正是它让手绘版看起来"有依据" ✗ ⇒ 注释必须能被追到官方资产',
+          all('M31302_000' in _v for _v in _x69.values()),
+          '注释=%s' % [('M31302_000' in v) for v in _x69.values()])
+    check('v1.69 D④ ⛔ **反向守门**：adaptive-icon XML 里**不许**再出现旧手绘版的'
+          '说法（`手绘` 只允许出现在"非手绘"这种否定句里）',
+          all(('手绘' not in _v) or ('非手绘' in _v) for _v in _x69.values()))
+except Exception as _e69:       # noqa: BLE001
+    check('v1.69 守门可运行（%r）' % (_e69,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

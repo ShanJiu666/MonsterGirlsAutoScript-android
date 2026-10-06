@@ -22,6 +22,10 @@ captures/
 # Python
 __pycache__/
 
+# 图标生成器的预览产物（tools/make_app_icon.py 每次跑都会重写；源资产是
+#   tools/icon/head_M31302_000.png，发射产物是 app/src/main/res/mipmap-*）
+tools/out/
+
 # ⚠ 发版令牌（Gitee）**永远不进仓** —— 放用户主目录 ~/.gitee_token（tools/release.py 会去读）。
 #   这条是防呆：万一有人在仓库根目录建了一个，别被 git add 进去。
 .gitee_token

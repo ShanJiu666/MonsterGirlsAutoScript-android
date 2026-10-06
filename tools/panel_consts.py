@@ -71,6 +71,14 @@ SCAN_SOURCES = {
         #     只要 `RefMapper` 归一化正确就成立 ✓）
         '_CLAIM_PICK_XY': ('xy', 'ref'),
         '_CLAIM_BACK_XY': ('xy', 'ref'),
+        # ⭐⭐ v1.68：「已完成」**模板快查搜索带**（`find_claim_slots()`）
+        #   kind=`band` —— 与 `buypanels.BAND` 同类：是**归一化帧里要看的矩形**，
+        #   不是点击坐标（点击坐标由模板命中点给出，天然自适应 ✓）
+        #   ⚠ 上界 1000 是**安全关键**：棋盘顶边 `GRID.y0 = 1002`
+        #     ⇒ 带内不可能是棋盘格 ⇒ 取代了 v1.48 那条"靠 OCR 行锚防点棋盘"的判据 ✓
+        #   ⚠ 用 `abs`（不是 `ref`）：它就是**参考系**的绝对值，换分辨率时由
+        #     `RefMapper` 归一化保证 —— 与 `BAND` 同一口径 ✓
+        '_CLAIM_TPL_BAND': ('band', 'abs'),
         # ⚠ 这两个真机实测在**弹性带内**（归一化帧看不见）⇒ 必须走弹窗系，已加 *_DLG
         'CLOSE_TR_PT': ('xy', 'abs'),
         'ITEM_TAB': ('xy', 'abs'),

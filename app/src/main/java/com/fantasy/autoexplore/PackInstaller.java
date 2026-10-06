@@ -15,7 +15,19 @@ import java.io.OutputStream;
  */
 public final class PackInstaller {
 
-    private static final String MARK = ".pack_v3";
+    /**
+     * ⭐⭐⭐ v1.68：标记名**必须随资源包内容变** —— 它是「已解包」的唯一判据。
+     *
+     * ⛔ 旧值 `.pack_v3` 从 v1.08 起没动过，而 `ensure()` 是「标记在就直接 return」
+     *   ⇒ **已装过旧版的真机永远拿不到新加的模板** ✗✗
+     *   本轮就撞上了：v1.68 新增 `templates/ui/slot_done.png`（槽位「已完成」领取判据），
+     *   而 v1.67 的机器上 `.pack_v3` 早就在 ⇒ 解包整段跳过 ⇒ 新模板**不存在**
+     *   ⇒ 判据在真机上**恒不可用**，而代码**不报错、不崩、门禁也可能全绿** ✗
+     *   —— 与 PC 端热更 T13j~T13n 那条（「代码到了、图没到」）是**同一族** bug ✓
+     * ⚠ **以后每次往 `assets/mapbot_pack/` 加/改资源，都要把这里的版本号 +1**
+     *   （门禁 `v1.68 A⑨` 守着这件事与 Python 侧的外置目录回退同时存在 ✓）
+     */
+    private static final String MARK = ".pack_v4";
 
     private PackInstaller() {
     }
