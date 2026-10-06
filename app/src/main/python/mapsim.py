@@ -711,6 +711,27 @@ class MapSim:
                     if cells[m].get('score') is not None]
             if _scs:
                 row['score'] = max(_scs)
+            # ⭐⭐⭐ v1.74【`floor_lit` 也要搬下来 —— 治"假亮格能隔空直接点"】
+            #   用户 2026-10-06 原话（真机 15:21 那把）：**「为什么能直接点 13？
+            #   13 没有紧挨着出生地啊」** ⇒ 用户看图，`(1,3)` 根本不挨着营地 ✓
+            #   ## 真机铁证（`board_r0_152127.png` 离线复算，逐格可查）
+            #     `(1,3)` = `S30001_016 黄金宝库`、`ratio 0.823`、**`floor_lit=False`**
+            #       · `ratio ≥ REVEAL_RATIO_MIN(0.80)` ⇒ 判 `revealed=True`
+            #         ⇒ `observed=True` ⇒ 进 `_build_cache.obs_lit` ⇒ `solve().visible()`
+            #         **直接放行**（`camp_nb=False / empty_adj=False` ⇒ 与"挨不挨着营地"无关）✗
+            #       · 而**地板法说它是雾**（`floor_lit=False`）—— 地板正是为治
+            #         "ratio 不可靠"而加的（v1.62）⇒ 两者冲突时**地板更可信** ✓
+            #     ⇒ 即"**一个被误判成亮的雾格，能隔着整个棋盘被直接点**" ✗✗
+            #   ## 为什么字段必须显式搬（本项目的老坑，v1.70 刚踩过一次）
+            #     `row` 是**从地块表单独构造**的 ⇒ 观测字段不搬就**到不了 `Block`**；
+            #     实测确认：`_cells_for_model` 的产物里 `floor_lit` **35 格全有**，
+            #     而 `Block.spot` 里**既没有 `floor` 也没有 `floor_lit`** ✗
+            #   ⚠ 取成员的**或**（任一成员地板判亮 ⇒ 整块算亮）——
+            #     与 `fog_object` 的 `any` 同口径；比"取最小值"更安全（宁可不点 ✗）
+            _fls = [bool((cells.get(m) or {}).get('floor_lit')) for m in members
+                    if (cells.get(m) or {}).get('floor_lit') is not None]
+            if _fls:
+                row['floor_lit'] = any(_fls)
             row['sid'] = sid
             row['name'] = head.get('name') or sid
             if 'target' in head:                       # ⭐ 目标白名单（targets_cfg）✓

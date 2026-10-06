@@ -8560,6 +8560,114 @@ try:
 except Exception as _e73:       # noqa: BLE001
     check('v1.73 守门可运行（%r）' % (_e73,), False)
 
+# ══════════════════════════════════════════════════════════════════════════
+# v1.74 假亮的格能**隔着整个棋盘被直接点**（用户：「为什么能直接点 13？13 没有
+#       紧挨着出生地啊」）
+#   真机铁证（`bagdbg/board_r0_152127.png`，15:21 那把；离线复算与真机逐字一致）：
+#     · `(1,3)` = `S30001_016 黄金宝库`、`ratio 0.823`（过 0.80 线 ⇒ 判 revealed）
+#       却 **`floor_lit=False`**（地板法说它还是雾）
+#     · ⇒ `observed=True` ⇒ 进 `_build_cache.obs_lit` ⇒ `solve().visible()` **直接放行**
+#       而 `camp_nb=False / empty_adj=False` ⇒ **与"挨不挨着营地"完全无关** ✗✗
+#     · 结果：计划第 1 步就是 `1,3`（隔着棋盘点宝库），真机点不动 → `give_up_step` ✗
+#   根因（**字段搬运断链**，与 v1.70 同一类）：
+#     `_cells_for_model` 的产物里 `floor_lit` **35 格全有**，
+#     但 `MapSim._from_anchors` 的 `row` 是**从地块表单独构造**的 ⇒ 不搬就**到不了 Block**
+#     实测：`Block.spot` 里**既没有 `floor` 也没有 `floor_lit`** ✗
+#   修法：① `mapsim` 把 `floor_lit` 按成员取**或**搬进 `row`
+#         ② `mapsolve._build_cache.obs_lit` 要求**地板也说亮**
+#            （`spot['floor_lit'] is False` ⇒ **不否决**？不 —— ⇒ **剔掉**；
+#             缺值 ⇒ 不否决，向后兼容 ✓）
+#   ⚠ 本判据刻意**只加否决、不删旧判据**（v1.62 那支有"只增不减"的历史包袱）✓
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _ms74 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'mapsim.py'), encoding='utf-8').read()
+    _mv74 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'mapsolve.py'), encoding='utf-8').read()
+    check('v1.74 A① ⭐⭐⭐ `mapsim` 把 `floor_lit` **按成员取或**搬进 `row`'
+          '（⚠ `row` 是从地块表单独构造的 ⇒ 不搬就到不了 `Block`；'
+          'v1.70 的 `score` 栽过同一个坑 ✗）',
+          "_fls = [bool((cells.get(m) or {}).get('floor_lit')) for m in members" in _ms74
+          and "row['floor_lit'] = any(_fls)" in _ms74,
+          '⚠ 缺这一行 ⇒ `Block.spot` 里没有 floor_lit ⇒ 下面那条永远不生效 ✗')
+    check('v1.74 A② ⭐⭐⭐ `obs_lit` 要求**地板也说亮**：`spot["floor_lit"] is False` '
+          '的块**不许**进"可点"掩码 —— ⚠⚠ 必须**从 `spot` 读**！'
+          '`Block` **没有** `floor_lit` 属性（观测字段一律存 `spot`）'
+          '⇒ `getattr(b, "floor_lit")` 恒 None ⇒ **白改** ✗（我第一版就写错了，'
+          '复算时发现"修复没生效"才查出来）',
+          "(prob.blocks[bi].spot or {}).get('floor_lit') is False" in _mv74
+          and "getattr(prob.blocks[bi], 'floor_lit'" not in _mv74,
+          '⚠ 从 spot 读 ⇒ 生效；从属性读 ⇒ 恒 None')
+    check('v1.74 A③ ⛔ **只加否决、不删旧判据**：`obs_lit` 里 '
+          '`if not getattr(prob.blocks[bi], "observed", False): continue` '
+          '**必须还在**（v1.62 抄 PC `19b4ed8` 那支有"只增不减"的历史包袱：'
+          '删了会掐死连锁推演 ⇒ 永远走不出营地 ✗）',
+          "if not getattr(prob.blocks[bi], 'observed', False):" in _mv74)
+
+    # ── B. 执行级：**用真机那一帧**跑真流水线，断言 `1,3` 被剔出去 ──────
+    _F74 = os.path.join(PROJ, '..', '_tmpman', 'frame74_board_r0_152127.png')
+    if not os.path.exists(_F74):
+        skip('v1.74 B①~B③ 执行级（缺 `_tmpman/frame74_board_r0_152127.png` '
+             '⇒ 没真验证；复现：`adb shell touch …/bagdbg/pubframe.flag` '
+             '后跑一张图，把 `board_r*.png` 拉回来）')
+    else:
+        import cv2 as _cv74
+        import numpy as _np74
+        import mapsim as _ms74m
+        import mapsolve as _mv74m
+        import spots as _sp74
+
+        _im74 = _cv74.imdecode(_np74.fromfile(_F74, dtype=_np74.uint8),
+                               _cv74.IMREAD_COLOR)
+        _st74 = _sp74.Board('S30001').state(_im74, thr=0.0)
+        _cp74 = EL.find_camp_cell(_st74)
+        _cells74 = EL._cells_for_model(
+            {'obs': _st74, 'spawn': _cp74, 'camp': _cp74, 'done': [], 'marks': {}},
+            {'st': _st74}, log=None, tag='v74', mark_revealed=False,
+            drop_done=False)
+        _sim74 = _ms74m.MapSim.from_observation(_cells74, _sp74.spot_rows())
+        _prob74 = _mv74m.Problem(_sim74)
+        _ch74 = _mv74m._build_cache(_prob74)
+        _bit74 = _ch74['bit']
+        _bi13 = _sim74.board[(1 - 1) * 7 + (3 - 1)]
+        _b13 = _bit74[_bi13]
+
+        # ① 前提：这一格确实是"假亮"——ratio 过线但地板说雾（否则本用例是空的）
+        _v13 = _cells74.get((1, 3)) or {}
+        check('v1.74 B① ⭐⭐ **执行级（真机帧）前提**：`(1,3)` 是**假亮** —— '
+              '`revealed=True`（ratio %.3f 过线）**但 `floor_lit=False`**（地板说雾）；'
+              '⚠ 这个前提不成立 ⇒ 下面两条测的就不是本 bug ✗'
+              % float(_v13.get('ratio') or 0),
+              bool(_v13.get('revealed')) and _v13.get('floor_lit') is False,
+              'revealed=%s floor_lit=%s ratio=%s'
+              % (_v13.get('revealed'), _v13.get('floor_lit'), _v13.get('ratio')))
+
+        # ② 本 bug：它**不许**再进 obs_lit；③ 对照：真亮的那 8 格**一格不少**
+        _lit_cells = set()
+        for _bb, _val in sorted(_sim74.blocks.items()):
+            if _ch74['obs_lit'] & _bit74[_bb]:
+                for _cc in (_val.cells or []):
+                    # ⚠ `Block.cells` 里是 **0 基格索引**（`mapsim.cell_of` 的产物）
+                    #   ⇒ 必须用 `rc_of` 转回 (r,c)；我第一版直接当 (r,c) 用 ⇒ 假红 ✗
+                    _lit_cells.add(_ms74m.rc_of(int(_cc)))
+        check('v1.74 B② ⭐⭐⭐ **执行级：本 bug 的正面证据** —— `(1,3)` '
+              '**必须从 `obs_lit` 里消失**（修复前 `camp_nb/empty_adj` 都是 False，'
+              '它**只**靠 `obs_lit` 就进了"可点" ⇒ 隔着棋盘被直接点 ✗）',
+              (1, 3) not in _lit_cells,
+              'obs_lit 里的格=%s' % sorted(_lit_cells))
+        # ⚠ **营地 (3,1) 除外** —— `obs_lit &= ~camp_mask` 按设计排除营地
+        #   （营地自己不可点）；我第一版把它算进"必须还在"⇒ 假红 ✗
+        _want_lit74 = {(2, 1), (3, 2), (4, 1), (4, 2), (4, 3), (5, 1), (5, 2)}
+        check('v1.74 B③ ⭐⭐ **执行级对照项（证明不是"一律剔除"的恒真判据）**：'
+              '**真亮**的那 7 格（`ratio 0.9~1.4` 且 `floor_lit=True`；'
+              '⚠ 营地 `(3,1)` 按设计被 `~camp_mask` 排除，不算）'
+              '**必须全都还在** `obs_lit` 里 —— ⚠ 没有这条的话，'
+              '把 `obs_lit` 整个清空也能让 B② 绿 ✗',
+              _want_lit74 <= _lit_cells,
+              '缺=%s' % sorted(_want_lit74 - _lit_cells))
+except Exception as _e74:       # noqa: BLE001
+    check('v1.74 守门可运行（%r）' % (_e74,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

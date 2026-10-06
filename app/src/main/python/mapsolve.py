@@ -653,8 +653,30 @@ def _build_cache(prob):
     #   ⚠ 拉黑块**不排除在这一支之外**也不行 —— 它在 `visible(m)` 里统一 `&= ~blocked_mask` ✓
     obs_lit = 0
     for bi in idxs:
-        if getattr(prob.blocks[bi], 'observed', False):
-            obs_lit |= bit[bi]
+        if not getattr(prob.blocks[bi], 'observed', False):
+            continue
+        # ⭐⭐⭐ v1.74【"观测里亮" **不够** —— 还要**地板也说亮**】
+        #   用户 2026-10-06 原话（真机 15:21 那把）：
+        #     **「为什么能直接点 13？13 没有紧挨着出生地啊」** ⇒ 看图确认 ✓
+        #   ## 真机铁证（`board_r0_152127.png` 离线复算）
+        #     `(1,3)` = 黄金宝库、`ratio 0.823`（过 0.80 线 ⇒ 判 revealed）
+        #     却 **`floor_lit=False`**（地板法说它还是雾）
+        #     ⇒ 就凭 `observed` 进了本掩码 ⇒ `visible()` 放行
+        #     ⇒ **一个假亮的雾格，隔着整个棋盘被直接点**（`camp_nb`/`empty_adj` 都是 False）✗✗
+        #   ## 判据为什么取"地板否决"而不是"要求挨着营地"
+        #     本帧实测分离度是**完美的**：
+        #       · `1,3`            ratio 0.823  floor_lit **False** ⇒ 唯一"假亮" ⇒ 该剔 ✗
+        #       · `2,1 3,1 3,2 4,1 4,2 4,3 5,1 5,2`  ratio 0.896~1.408 floor_lit **True**
+        #         ⇒ **一格不受影响** ✓
+        #     ⇒ 只剔假亮那一格，其余全留 ✓（`floor_lit` 缺值 ⇒ **不否决**，向后兼容 ✓）
+        #   ⚠⚠ 本支有历史包袱（v1.62 抄 PC `19b4ed8`，为治"亮着的 boss 打不到"）
+        #      ⇒ 所以**只加这一条否决**，**绝不删旧判据**（旧注释明写"只增不减"✓）
+        # ⚠⚠ 必须从 **`spot`** 读 —— `Block` **没有** `floor_lit` 属性，
+        #   观测字段一律存在 `Block.spot`（`getattr(b,'floor_lit')` 恒为 None ⇒ 白改 ✗；
+        #   我第一版就写错了，复算时发现"修复没生效"才查出来）
+        if (prob.blocks[bi].spot or {}).get('floor_lit') is False:
+            continue
+        obs_lit |= bit[bi]
     obs_lit &= ~camp_mask                 # ⚠ 营地自己**不可点**（与集合版同口径 ✓）
     return {'bit': bit, 'bits': [bit[bi] for bi in idxs],
             'blocked_mask': blocked_mask,
