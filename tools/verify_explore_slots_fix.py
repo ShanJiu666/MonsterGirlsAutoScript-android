@@ -8668,6 +8668,76 @@ try:
 except Exception as _e74:       # noqa: BLE001
     check('v1.74 守门可运行（%r）' % (_e74,), False)
 
+# ══════════════════════════════════════════════════════════════════════════
+# v1.75 `REWARD_X1` 560 太小 ⇒ **大拇指装备在第 3/4 格时必漏检**
+#   用户 2026-10-06 原话（真机结算面板上肉眼可见大拇指装备）：
+#     「**脚本没事别到大拇指装备，明明现在的界面上有大拇指装备**」
+#     ＋ 口径：「**大拇指在 1-4 格都有可能出现**」（不是固定某一格）
+#   真机铁证（`_verify/badge/phone_reward_4th_cell_ref.png`，1280×2772 按
+#             **RefMapper 真公式**归一化后的 1080×1920 参考帧）：
+#     · 真 box `(20,520,560,1020)` ⇒ 最高 **0.400**（< 0.70）⇒ **0 命中** ✗
+#     · 只把右边放到 950       ⇒ 最高 **0.917** @(763,936) ⇒ **1 命中** ✓
+#     ⇒ `763 > 560` ⇒ 第 3/4 格整个在框**右侧之外**，永远搜不到 ✗✗
+#   代价：真机日志 `{"dice":"done","rolls":3}` + `reward_mark_hits:0` ⇒
+#        **白摇 3 次色子**、最后只能 `reroll_cancel_tail` 放弃 ✗
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    import badge as _bg75
+    _F75 = os.path.join(PROJ, '_verify', 'badge',
+                        'phone_reward_4th_cell_ref.png')
+    _SRC75 = io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                     encoding='utf-8').read()
+    check('v1.75 A① ⭐ `REWARD_X1` **必须盖住第 4 格** —— 实测真标记在参考系 '
+          'x=**763**、图标半宽约 75 ⇒ 右界至少 840；现取值 **%d** ✓'
+          '（⚠ 旧值 560 是"只有 1~2 格有标记"年代的标定，用户明确 **1-4 格都可能** ✗）'
+          % EL.REWARD_X1,
+          int(EL.REWARD_X1) >= 840,
+          'REWARD_X1=%s（需要 ≥840）' % EL.REWARD_X1)
+    check('v1.75 A② ⚠ 右界**不许过头**：再往右是「查看/统计」按钮区（也带小图标），'
+          '扫进去会互相干扰 ⇒ 上限 1000',
+          int(EL.REWARD_X1) <= 1000, 'REWARD_X1=%s' % EL.REWARD_X1)
+    check('v1.75 A③ ⭐ 文字路径（找骰子按钮 `cx < sx(REWARD_X1)`）**不受影响** —— '
+          '骰子按钮在参考系 x≈114，离旧值 560 就很远 ⇒ 放宽到 950 不会误抓；'
+          '且那条路仍要求文字命中「骰/重投/命运」关键词 ✓（结构级：关键词还在）',
+          "'骰'" in _SRC75 and "REWARD_X1" in _SRC75
+          and int(EL.REWARD_X1) >= 840)
+
+    if not os.path.exists(_F75):
+        skip('v1.75 B①~B③ 执行级（缺 `_verify/badge/'
+             'phone_reward_4th_cell_ref.png` ⇒ 没真验证）')
+    else:
+        import cv2 as _cv75
+        import numpy as _np75
+        _ref75 = _cv75.imdecode(_np75.fromfile(_F75, dtype=_np75.uint8),
+                                _cv75.IMREAD_COLOR)
+        check('v1.75 B① 素材是**真参考帧** 1080×1920（RefMapper 两段映射的产物，'
+              '不是等比缩放 —— 我探针第一版就是栽在等比缩放上 ✗）',
+              _ref75 is not None and _ref75.shape[:2] == (1920, 1080),
+              'shape=%s' % (None if _ref75 is None else _ref75.shape[:2],))
+
+        # ★ 正面证据：用**当前** REWARD_X1 ⇒ 必须检出那个真标记
+        _hit75 = _bg75.find_reward_mark(
+            _ref75, box=(20, EL.REWARD_CLOSE_UP_MIN, EL.REWARD_X1,
+                         EL.REWARD_CLOSE_UP_MAX), top=4)
+        check('v1.75 B② ⭐⭐⭐ **执行级：当前取值下真标记必须被检出** —— '
+              '真机那张（肉眼可见大拇指装备）在参考系 (763,936) 得 **0.917**；'
+              '命中数必须 ≥1',
+              len(_hit75) >= 1,
+              '命中=%s' % (['%.3f@%d,%d' % (h[0], h[2], h[3]) for h in _hit75],))
+
+        # ★★ 对照项：**旧值 560 必须检不出** ⇒ 证明这个用例真的在测这个 bug
+        _old75 = _bg75.find_reward_mark(_ref75, box=(20, EL.REWARD_CLOSE_UP_MIN,
+                                                     560, EL.REWARD_CLOSE_UP_MAX),
+                                        top=4)
+        check('v1.75 B③ ⭐⭐ **对照项（证明不是恒真用例）**：把右界换回**旧值 560** ⇒ '
+              '同一张帧必须 **0 命中** —— ⚠ 没有这条的话，'
+              '哪怕模板/判据写坏了这组也可能绿 ✗',
+              len(_old75) == 0,
+              '旧值 560 命中=%s' % (['%.3f@%d,%d' % (h[0], h[2], h[3])
+                                    for h in _old75],))
+except Exception as _e75:       # noqa: BLE001
+    check('v1.75 守门可运行（%r）' % (_e75,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
