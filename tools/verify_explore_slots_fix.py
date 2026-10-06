@@ -8477,6 +8477,80 @@ try:
 except Exception as _e72:       # noqa: BLE001
     check('v1.72 守门可运行（%r）' % (_e72,), False)
 
+# ══════════════════════════════════════════════════════════════════════════
+# v1.73 探索槽读不到 ⇒ **假空闲 ⇒ 连派 7 轮**（用户报「**好像重复派遣了**」）
+#   真机铁证（`bagdbg/mgas_log.txt`，14:37 那把 map 0）：
+#     · 轮首读到 `{"free_txt": 0, "busy": 2, "busy_strict": 2}`（后来 3）
+#       —— 三个槽**全占满**，一个「空闲」都读不到
+#     · 可 `slots_free` **一直是 1** ⇒ 「有空闲槽就派遣」恒真
+#     · 于是 round 2~7 **连派 7 轮**（`busy` 2→3 = 小队**真的派出去了**），
+#       面板关不掉、整图 **59 秒白烧**、用户手动停止 ✗✗
+#   根因：`_sf_here is None` 时走 `st.get('slots_free', 1) or 0` ⇒
+#         `st` 里没这个键 ⇒ **默认 1** ⇒ 假空闲 ✗
+#   修法：⭐ 「**空闲**」两个字**只画在空闲槽上** ⇒ 一个都读不到 ⇒ 就没有空闲槽 ⇒
+#         `_slots_free = 0`，且**必须写回 `st`**（`popups` 的 ctx 读的是它 ✗）
+#   ⇒ 与用户 2026-10-06 口径一致：「遇到紫橙探索格子且**有空闲格子**才去探索」
+# ══════════════════════════════════════════════════════════════════════════
+try:
+    _el73 = open(os.path.join(PROJ, 'app', 'src', 'main', 'python',
+                              'explore_loop.py'), encoding='utf-8').read()
+    check('v1.73 A① ⭐⭐⭐ **三处同源**：读不到「空闲」⇒ 当作 **0 空闲** —— '
+          '① 判据处（`_slots_free = 0` + `st["slots_free"] = 0`）'
+          '② 落日志的 `entry["slots_free"] = 0`（⚠ 不许再是 `st.get("slots_free", 1)`）'
+          '③ **传给 `popups` 的 ctx**（`slots_free: st.get("slots_free", 0)`，默认值 '
+          '**不许是 1**）—— ⚠⚠ v1.73 第一版**只改了 ①**，而 `entry` 与 `ctx` 两处'
+          '**都在它之前**执行 ⇒ 真正做决策的 `popups` 拿到的还是"默认 1" ⇒ **白改** ✗ '
+          '（被本组 `A①` 当场抓出；本项目第五次同族：**在 A 处改状态、决策读 B 处**）',
+          "_slots_free = 0" in _el73
+          and "st['slots_free'] = 0" in _el73
+          and "entry['slots_free'] = 0" in _el73
+          and "'slots_free': st.get('slots_free', 1)" not in _el73
+          and "st.get('slots_free', 1) or 0" not in _el73,
+          '⚠ 三处缺一 ⇒ 决策点读到的还是旧值/默认 1')
+    check('v1.73 A② ⭐⭐ 仍保留**正面证据优先**：`_sf_here is not None` 时用实测值 '
+          '（不是一刀切 0）—— 否则 13:46 那把 `free_txt: 3` 的正常派遣也会被掐掉 ✗',
+          'if _sf_here is not None:' in _el73
+          and '_slots_free = _sf_here' in _el73
+          and '_saw_row = True' in _el73)
+    check('v1.73 A③ ⚠ **脱困只对"棋盘上的格"拉黑**：卡在**面板动作**上时'
+          '（`st["last"]` 是面板按钮坐标，如真机日志里的 `(275,736)`）⇒ '
+          '`cell_of` 会给出**盘外格** `(-1,2)` ⇒ **不许**塞进 `nogo_rc`（脏数据 ✗），'
+          '只记 `unstick: panel_action` ✓',
+          "if 1 <= _rc[0] <= 5 and 1 <= _rc[1] <= 7:" in _el73
+          and "'unstick': 'panel_action'" in _el73)
+
+    # ── B. 执行级：真跑 `explore_slots_free` + 那段判据 ────────────────────
+    def _rule73(_sf_here, _st):
+        """把源码里那段判据**照抄一遍**（读不到 ⇒ 0 且写回 st）"""
+        if _sf_here is not None:
+            return _sf_here
+        _st['slots_free'] = 0
+        return 0
+
+    _sf_none, _info_none = EL.explore_slots_free([])          # 真机那把：一个「空闲」都没有
+    _st73 = {}
+    _r73 = _rule73(_sf_none, _st73)
+    check('v1.73 B① ⭐⭐⭐ **执行级：真机那把的槽位状态**（`free_txt 0 / busy 3`，'
+          '即"一个「空闲」都读不到"）—— 真跑 `explore_slots_free([])` 必须返回 '
+          '`(None, …)`，再经新判据 ⇒ **0 空闲**且 `st["slots_free"]` 被写成 **0** '
+          '—— ⚠ 这正是"连派 7 轮"的堵口 ✓',
+          _sf_none is None and _r73 == 0 and _st73.get('slots_free') == 0,
+          'explore_slots_free([]) = %s ｜ 判据 = %s ｜ st = %s'
+          % (_sf_none, _r73, _st73))
+    _sf_pos, _info_pos = EL.explore_slots_free(
+        [{'text': '空闲', 'cx': 239, 'cy': 940},
+         {'text': '空闲', 'cx': 356, 'cy': 940},
+         {'text': '空闲', 'cx': 473, 'cy': 940}])
+    _st73b = {}
+    _r73b = _rule73(_sf_pos, _st73b)
+    check('v1.73 B② ⭐ **对照项（证明不是"一律 0"的恒真判据）**：真跑 '
+          '`explore_slots_free` 喂 **3 个「空闲」**（13:46 那把的正常值）⇒ '
+          '必须返回 **3**，新判据也必须给 **3**（不许也被压成 0 ✗）',
+          _sf_pos == 3 and _r73b == 3 and 'slots_free' not in _st73b,
+          'explore_slots_free(3×空闲) = %s ｜ 判据 = %s' % (_sf_pos, _r73b))
+except Exception as _e73:       # noqa: BLE001
+    check('v1.73 守门可运行（%r）' % (_e73,), False)
+
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

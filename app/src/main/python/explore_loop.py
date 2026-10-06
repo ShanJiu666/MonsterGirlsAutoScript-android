@@ -3833,12 +3833,25 @@ def force_unstick(b, log, why, ctx=None):
             #     · `done` 照旧（让 `_rest` 过滤）
             try:
                 _rc = cell_of(int(tp[0]), int(tp[1]))
-                fl.setdefault('nogo_rc', set()).add(_rc)
-                log.append({'unstick': 'nogo_tagged', 'cell': '%d,%d' % _rc,
-                            'why': why,
-                            'note': '脱困 ⇒ 这一格进**本图不碰**集合 ＋ 下一轮强制重算 '
-                                    '（⚠ 只写 `done` 会把 `plan_stuck` 清零、'
-                                    '让看门狗永不触发 ✗）'})
+                # ⚠⚠ v1.73【**只对"棋盘上的格"拉黑**】—— 真机 14:37 那把的教训：
+                #   卡住时 `st['last']` 可能是**面板按钮**坐标（如 (275,736) =
+                #   面板上的「探索」）⇒ `cell_of` 会给出**盘外格** `(-1,2)` ⇒
+                #   塞进 `nogo_rc` 是**脏数据**（虽然不匹配任何格，但会污染复盘）
+                #   ⇒ 只在 (1..5, 1..7) 内才拉黑 ✓
+                if 1 <= _rc[0] <= 5 and 1 <= _rc[1] <= 7:
+                    fl.setdefault('nogo_rc', set()).add(_rc)
+                    log.append({'unstick': 'nogo_tagged', 'cell': '%d,%d' % _rc,
+                                'why': why,
+                                'note': '脱困 ⇒ 这一格进**本图不碰**集合 ＋ 下一轮强制重算 '
+                                        '（⚠ 只写 `done` 会把 `plan_stuck` 清零、'
+                                        '让看门狗永不触发 ✗）'})
+                else:
+                    # 卡在**面板动作**上（不是棋盘格）⇒ 拉黑无从谈起，只记一笔 ✓
+                    log.append({'unstick': 'panel_action', 'at': (int(tp[0]), int(tp[1])),
+                                'why': why,
+                                'note': '⚠ 卡住的是**面板上的动作**（不是棋盘格）⇒ '
+                                        '不往 `nogo_rc` 塞盘外坐标；要靠"槽位读不到 ⇒ '
+                                        '0 空闲"那条（v1.73）把它挡住 ✓'})
             except Exception:           # noqa: BLE001
                 pass
             fl['force_replan'] = True
@@ -8301,8 +8314,20 @@ def one_round(b, log, rnd, prefix, st):
                 _PANEL_STUCK['expl'] = 0
                 log.append({'slots': 'free_again', 'free': _sf_now})
         else:
-            entry['slots_free'] = int(st.get('slots_free', 1) or 0)
-    act = popups(b, items, log, ctx={'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 1), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+            # ⭐⭐⭐ v1.73【**三处同源**：读不到「空闲」⇒ 0，并且**写入 `st`**】
+            #   真机 14:37 那把铁证（用户报「**好像重复派遣了**」，`mgas_log.txt` map 0）：
+            #     轮首 `{"free_txt": 0, "busy": 2}`（三槽全满，一个「空闲」都没有）
+            #     可 `slots_free` **一直是 1** ⇒「有空闲槽就派遣」恒真 ⇒ **连派 7 轮**
+            #     （`busy` 2→3 = 小队**真派出去了**）、面板关不掉、整图 59 秒白烧 ✗✗
+            #   根因：这里写 `st.get('slots_free', 1)` ⇒ **默认 1 = 假空闲** ✗
+            #   ⚠⚠ **v1.73 第一版只改了后面 L9182 那处 —— 是漏的**（门禁 `A①` 当场抓出）：
+            #     本行与下面传给 `popups` 的 ctx **都在 L9182 之前**执行 ⇒
+            #     真正做决策的 `popups` 拿到的还是"默认 1" ⇒ **白改** ✗
+            #     （本项目第五次同族：**在 A 处改状态、做决策的地方读 B 处**）
+            #   ⇒ 现在**三处同源**：①`st['slots_free'] = 0` ②`entry` ③下面 ctx 读 `st`
+            st['slots_free'] = 0
+            entry['slots_free'] = 0
+    act = popups(b, items, log, ctx={'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
                                      'tapped': st.get('last'),
                                      'force_fight': st.get('force_fight'),
                                      'road': st.get('road') or [],
@@ -8547,7 +8572,7 @@ def one_round(b, log, rnd, prefix, st):
         else:
             # 整盘暗格 ⇒ 多半盖着面板 ⇒ 这里补一次**全屏 OCR** 再关
             items = b.ocr(tag='round_full')
-            _hctx = {'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 1), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
+            _hctx = {'road': st.get('road') or [], 'plain_road': st.get('plain_road') or [], 'plan_road': st.get('plan_road') or [], 'flags': st, 'st': st.get('cells'), 'slots_free': st.get('slots_free', 0), 'ev_tiles': st.get('ev_tiles') or [], 'tapped_sid': st.get('tapped_sid') or '', 'marks': st.get('marks') or {},
                      'tapped': st.get('last'),
                      'force_fight': st.get('force_fight'),
                      'road': st.get('road') or [],
@@ -9155,8 +9180,22 @@ def one_round(b, log, rnd, prefix, st):
             _slots_free = _sf_here
             _saw_row = True
         else:
-            _slots_free = int(st.get('slots_free', 1) or 0)     # 认不到 ⇒ 保留旧值
+            # ⭐⭐⭐ v1.73【读不到「空闲」标签 ⇒ **当作没有空闲槽**（不再沿用旧值 / 默认 1）】
+            #   真机 14:37 那把铁证（`bagdbg/mgas_log.txt` map 0，用户报「**重复派遣**」）：
+            #     轮首读到 `{"free_txt": 0, "busy": 2, "busy_strict": 2}`（后来 3），
+            #     可 `slots_free` **一直是 1** ⇒「**有空闲槽就派遣**」那条恒真 ⇒
+            #     同一格**连派 7 轮**（`busy` 2→3 = 小队**真派出去了**）、面板关不掉、
+            #     整图 **59 秒白烧**、用户手动停止 ✗✗
+            #   为什么"读不到"本身就等于"没有空闲"：
+            #     ⭐ 「**空闲**」这两个字**只画在空闲槽上** ⇒ 一个都没读到 ⇒ 就没有空闲槽 ✓
+            #     （旧注释担心的是"假满"；而真机实测的坏方向是"**假空闲 ⇒ 死循环**" ✗）
+            #   ⇒ 与用户 2026-10-06 口径一致：「**遇到紫橙探索格子且有空闲格子才去探索**」
+            #     —— **证不出有空闲，就不探索** ✓
+            _slots_free = 0
             _saw_row = False
+            # ⚠ 必须**写回 `st`** —— `popups` 的 ctx 读的是 `st['slots_free']`
+            #   （只改本地变量 ⇒ 探索分支照样按旧值 1 进场 ⇒ 白改 ✗）
+            st['slots_free'] = 0
         entry['slots_free'] = _slots_free      # ⭐ 空闲探索槽个数（0 = 已填满 ✓）
         entry['slots_busy'] = _busy
         entry['slots_busy_strict'] = _si_here['busy_strict']
