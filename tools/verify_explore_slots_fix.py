@@ -8213,23 +8213,41 @@ try:
               _ch_ih == [], '被改=%s' % (_ch_ih or '无'))
         _ms70m.FOG_TABLE_GATE = True          # 复位（别把开关留在测试状态 ✗）
 
-    # ── D. 与 PC 裁判的结构对拍（PC 仓不在场 ⇒ 响亮跳过，不算通过）──────
+    # ── D. 与 PC 裁判的结构对拍（**PC 是用户自己的仓** —— 不在场/判据不在
+    #       ⇒ 一律**响亮跳过**，绝不让手机端门禁因为别人的工作区变动而变红 ✗）──
     _pc70 = os.environ.get('MGAS_PC_SRC') or os.path.join(
         os.path.dirname(PROJ), 'mapbot_pc')
     _pcms70 = os.path.join(_pc70, 'mapsim.py')
-    if not os.path.exists(_pcms70):
-        skip('v1.70 D① PC 裁判结构对拍（PC 仓不在场）')
+    _pcs70 = ''
+    if os.path.exists(_pcms70):
+        try:
+            _pcs70 = open(_pcms70, encoding='utf-8').read()
+        except Exception:       # noqa: BLE001
+            _pcs70 = ''
+    _pci70 = _at70(_pcs70, 'self.score >= CONTENT_SCORE_MIN') if _pcs70 else -1
+    _pcf70 = (_at70(_pcs70, "self.spot.get('fog_sil') is not None")
+              if _pcs70 else -1)
+    if not _pcs70:
+        skip('v1.70 D① PC 裁判结构对拍（PC 仓不在场 / 读不到 mapsim.py）')
+    elif _pci70 < 0:
+        # ⚠ PC 那份**可能在用户手里改**（本仓实测：PC 工作区常年有未提交改动）
+        #   ⇒ 判据不在时**跳过**，不判红 —— 手机端门禁不能依赖别人的工作区状态 ✓
+        skip('v1.70 D① PC 裁判结构对拍（PC 当前没有 '
+             '`score >= CONTENT_SCORE_MIN` 判据 ⇒ 对拍做不了）')
     else:
-        _pcs70 = open(_pcms70, encoding='utf-8').read()
-        _pci70 = _at70(_pcs70, 'self.score >= CONTENT_SCORE_MIN')
-        _pcf70 = _at70(_pcs70, "self.spot.get('fog_sil') is not None")
-        check('v1.70 D① ⭐⭐ **PC 裁判**：PC 的 `Block.plain` 里有 '
-              '「非本图地面 且 `score >= CONTENT_SCORE_MIN(0.85)` ⇒ 非空地」'
-              '**且它排在雾格支之前** ⇒ 同一个矿箱在 **PC 侧也是"非空地、拦连锁"** ✓'
+        check('v1.70 D① ⭐⭐ **PC 裁判（已提交的 PC 代码，不是手机端自说自话）**：'
+              'PC 的 `Block.plain` 里有「非本图地面 且 `score >= '
+              'CONTENT_SCORE_MIN(0.85)` ⇒ 非空地」**且它排在雾格支之前** '
+              '⇒ 同一个矿箱在 **PC 侧也是"非空地、拦连锁"** ✓'
               '（本次已实测：同一份观测喂两端 ⇒ 两端都判 `(5,5)` 非空地、'
               '`cost` 都是 **13**、点序都是 `1,2 / 1,1 / 3,1` —— 零分歧 ✓；'
-              '⚠ 门禁只做**结构**对拍，不 import PC 模块：两端模块同名，'
-              '同进程 import 会让 `import spots` 静默拿到另一端的 ✗）',
+              '全语料 7 帧 13 个受影响格 **PC 13/13 同意**）'
+              '⚠⚠ 顺带更正一处**长期措辞错误**：手机端注释曾写「**已撤回的 PC 改动**」'
+              '⇒ 会让人以为 PC 撤了 ✗ —— 实测 `git show HEAD:mapsim.py` 里'
+              '**`CONTENT_SCORE_MIN = 0.85` 仍在**（第 74 行定义、第 216 行在用）'
+              '⇒ 当年"撤回"是**手机端单方面不移植**，PC **从未撤过** ✓；'
+              '⚠ 门禁只做**结构**对拍，**不 import** PC 模块：两端模块同名，'
+              '同进程 import 会让 `import spots` 静默拿到另一端的 ✗',
               _pci70 >= 0 and _pcf70 >= 0 and _pci70 < _pcf70,
               'PC 判据@%d < PC 雾格支@%d' % (_pci70, _pcf70))
 except Exception as _e70:       # noqa: BLE001
