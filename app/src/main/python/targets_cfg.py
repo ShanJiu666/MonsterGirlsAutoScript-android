@@ -294,6 +294,13 @@ def is_explore_tile(sid):
 #:       —— 老调用点不传 score ⇒ 行为与修前**完全一致** ✓
 NAME_SCORE_MIN = 0.85
 
+#: !! v2.82 **探索格（sid 后缀 221/321/331）的最低匹配置信度**
+#:   来源：NAME_SCORE_MIN 注释里实测的探索格分数区间 **0.39~0.73** => 取下界作地板
+#:   低于它只能是**暗格瞎猜**（2026-10-28 实测 0.095 / 0.12 / 0.181）
+#:   !! 别套 0.85（那是「靠名字」的门槛）—— 会把**真探索格**全废掉 X
+#:   !! fail-open：score 为 None => 不拦（老调用点行为一字不变）
+EXPLORE_SCORE_MIN = 0.39
+
 def is_target(name, sid, marks=None, cfg=None, score=None):
     """⭐ 该格是不是「当前配置下要拿的目标」
 
@@ -314,6 +321,24 @@ def is_target(name, sid, marks=None, cfg=None, score=None):
             if m in MARK_KEYS and enabled(PSEUDO_MARK, d):
                 return True
     if is_explore_tile(sid) and enabled(PSEUDO_EXPLORE, d):
+        # !! v2.82【探索格也要一道**分数下限**】—— 2026-10-28 真机事故
+        #   病：本支只看 **sid 后缀**（221/321/331），**完全不看分数** =>
+        #     分类器在暗格上乱猜出的 S00003_331（score 0.095/0.12/0.181）
+        #     照样被判成「紫橙探索格」=> 5 个 target 里 3 个假目标
+        #     => 求解器状态空间爆炸 => pushed 60001 撞上限 => no_plan
+        #     => order 空 => targets_unreachable => **还有目标就退图**
+        #     （用户原话：「这么还有两个目标呢就退图了」）X
+        #   真机铁证（21:37 那把；离线同帧复现完全一致）：
+        #     report={pushed:60001, expanded:12263, reason:max_states}
+        #   为什么不能套 0.85：注释实测探索格 score 是 **0.39~0.73**（靠后缀不靠名），
+        #     套 0.85 会把**真探索格全废掉** X；而 0.095 连 0.39 都不到
+        #     => 那是**暗格瞎猜**，不是探索格 O
+        if score is not None:
+            try:
+                if float(score) < EXPLORE_SCORE_MIN:
+                    return False
+            except (TypeError, ValueError):
+                pass
         return True
     if name and enabled(name, d):
         # ⭐⭐⭐ v1.78 **名字可信度门槛**（从 PC 移植；只挡「靠名字」这一支 ✓）

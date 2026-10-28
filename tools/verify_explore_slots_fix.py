@@ -10795,6 +10795,124 @@ try:
 except Exception as _e81:       # noqa: BLE001
     check('v2.81 守门可运行（%r）' % (_e81,), False)
 print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.82【「还有两个目标就退图」—— 低分误报被当成探索格 => 求解器爆炸 => no_plan】
+#
+#   ---- 用户原话（2026-10-28）----
+#     「？？这么还有两个目标呢就退图了」
+#   ---- 真机铁证（21:37 那把，且离线**同帧复现完全一致**）----
+#     {'solver': 'no_plan', 'cost': None, 'reason': 'max_states', 'expanded': 12503}
+#     {'finish': 'targets_unreachable'}
+#   离线同帧复跑：report={'pushed': 60001, 'expanded': 12263, 'reason': 'max_states'}  <- 撞上限
+#
+#   ---- 病 ----
+#     求解器拿到 **5 个 target**，其中 3 个是分类器在**暗格**上瞎猜出来的 S00003_331「海边小屋」：
+#       (1,7) score=0.095  (4,1) score=0.181  (4,7) score=0.12   （全 revealed=False）
+#     为什么低分也能成 target：`is_target()` 里「靠名字」那支有 NAME_SCORE_MIN=0.85 门槛，
+#     但它**前面**还有一支 `is_explore_tile(sid)` —— **只看 sid 后缀**（221/321/331），
+#     **完全不看分数** => 后缀 331 直接 return True，门槛被绕过 X
+#     => 5 个目标（含 3 个假目标）=> 24 块 x 5 目标的状态空间爆炸
+#     => pushed 60001 撞上限 => no_plan => order 空 => cands 空 => targets_unreachable
+#     => **明明还有目标就退图** X
+#
+#   ---- 口径（为什么地板是 0.39 而不是 0.85）----
+#     本仓 NAME_SCORE_MIN 那段注释**实测**探索格 score 是 **0.39~0.73**
+#     （探索格靠**后缀**判定、不靠名字 => 低分是正常的）
+#     => 套 0.85 会把**真探索格全废掉** X
+#     => 取实测下界 **0.39** 作地板：低于它只能是暗格瞎猜（实测 0.095/0.12/0.181）O
+#     => fail-open：score 为 None => 不拦（老调用点行为一字不变）
+#
+#   ---- 修复效果（同帧实测）----
+#     修复前：targets=5  pushed=60001  reason=max_states  => 退图
+#     修复后：targets=2  pushed=2075   reason=ok          => 4 步计划（首步就是黄金宝库）
+try:
+    import targets_cfg as _tc82
+    import spots as _sp82
+
+    _TC82 = io.open(os.path.join(MAPBOT, 'targets_cfg.py'), encoding='utf-8').read()
+
+    # ── A 执行级：读**真常量**、真调 is_target（不是搜字符串 —— v1.42(2) 盯着这条）──
+    _floor82 = getattr(_tc82, "EXPLORE_SCORE_MIN", None)
+    check("v2.82 A(1) `EXPLORE_SCORE_MIN` 真值 == 0.39（探索格实测区间 0.39~0.73 的下界）· %r"
+          % (_floor82,), _floor82 == 0.39)
+    check("v2.82 A(2) 地板 ≠ 名字门槛 0.85（套 0.85 会把真探索格全废掉 X）· floor=%r name_min=%r"
+          % (_floor82, getattr(_tc82, "NAME_SCORE_MIN", None)),
+          _floor82 != getattr(_tc82, "NAME_SCORE_MIN", None))
+    # 真调一轮：以地板为界，两侧行为必须不同（这是 A(3)/A(4) 的执行级形态）
+    _below = _tc82.is_target("海边小屋", "S00003_331", score=_floor82 - 0.01)
+    _above = _tc82.is_target("海边小屋", "S00003_331", score=_floor82 + 0.01)
+    check("v2.82 A(3) 执行级：地板**下方**判不是目标 / 地板**上方**判是目标（%.2f vs %.2f）"
+          % (_floor82 - 0.01, _floor82 + 0.01),
+          _below is False and _above is True)
+    check("v2.82 A(4) 执行级：**fail-open** —— score=None 时照旧算目标（老调用点行为不变）· %r"
+          % (_tc82.is_target("海边小屋", "S00003_331", score=None),),
+          _tc82.is_target("海边小屋", "S00003_331", score=None) is True)
+    # ── B 执行级 ──
+    _cases82 = [
+        # (说明, sid, score, 期望 is_target)
+        ('暗格瞎猜 331（事故那三个）', 'S00003_331', 0.095, False),
+        ('暗格瞎猜 331', 'S00003_331', 0.181, False),
+        ('暗格瞎猜 331', 'S00003_331', 0.12, False),
+        ('真探索格 331（实测区间下界附近）', 'S00003_331', 0.45, True),
+        ('真探索格 221', 'S00001_221', 0.60, True),
+        ('真探索格 321', 'S00001_321', 0.73, True),
+        ('对照·score=None（fail-open 必须不拦）', 'S00003_331', None, True),
+        ('边界·score 恰好等于地板 0.39（>= 语义，应算目标）', 'S00003_331', 0.39, True),
+        ('边界·score 略低于地板 0.38（不算目标）', 'S00003_331', 0.38, False),
+    ]
+    for _r in range(len(_cases82)):
+        _nm, _sid, _sc, _want = _cases82[_r]
+        _got = _tc82.is_target('海边小屋', _sid, score=_sc)
+        check('v2.82 B(1) 执行级[%s] sid=%s score=%s => is_target=%s（期望 %s）'
+              % (_nm, _sid, _sc, _got, _want), _got is _want)
+
+    # ── B(2) 关键回归：真机那帧上，假目标必须消失、求解器必须解得出来 ──
+    _png82 = os.path.join(PROJ, '..', '_tmpman', 'run2', 'fail_frame.png')
+    if not os.path.exists(_png82):
+        skip('v2.82 B(2) 真机帧回归（缺 %s；复现：从设备 run-as 取 files/runs/r_213709_0.png）'
+             % _png82)
+    else:
+        import cv2 as _cv82
+        import mapsim as _ms82
+        import mapsolve as _mv82
+        import spots as _sp82
+        _img82 = _cv82.imread(_png82)
+        _c82 = EL.cells_of(_img82, '夏日海滩', None)
+        _m82 = EL._cells_for_model({'obs': {}, 'marks': {(1, 2): {'marks': ['boss']}}},
+                                   _c82, log=[], tag='s82', mark_revealed=False)
+        _sim82 = _ms82.MapSim.from_observation(_m82, _sp82.spot_rows())
+        _prob82 = _mv82.Problem(_sim82)
+        _rep82 = {}
+        _cost82, _plan82 = _mv82.solve(_prob82, max_states=60000, max_secs=8,
+                                       report=_rep82)
+        _tnames82 = [_sim82.blocks[t].name for t in _prob82.targets]
+        # 逐个 target 用**真判据**复核一遍（不是比字符串）—— 元门禁 v1.42(2) 盯着这条
+        _bad82 = []
+        _ts82 = sorted(_prob82.targets)
+        for _r in range(len(_ts82)):
+            _bb82 = _sim82.blocks[_ts82[_r]]
+            if str(getattr(_bb82, 'name', '')) == '海边小屋':
+                _bad82.append(_ts82[_r])
+        check('v2.82 B(2) 真机帧回归：**假目标「海边小屋」全消失**（事故里是 3 个）· 现 targets=%s'
+              % (_tnames82,), '海边小屋' not in _tnames82)
+        check('v2.82 B(2) 真机帧回归：求解器**解得出来**（事故是 max_states）'
+              '（reason=%s pushed=%s targets=%d）'
+              % (_rep82.get('reason'), _rep82.get('pushed'), len(_prob82.targets)),
+              _rep82.get('reason') == 'ok' and bool(_plan82))
+        check('v2.82 B(2) 真机帧回归：pushed 从 60001 降到合理范围（< 10000）· %s'
+              % (_rep82.get('pushed'),), int(_rep82.get('pushed') or 0) < 10000)
+
+        # 逐个 plan 步真读 block —— 顺带钉住「首步就是黄金宝库」这个用户口径
+        _pl82 = []
+        for _r in range(len(_plan82 or [])):
+            _bi82 = _plan82[_r][0]
+            _pl82.append(str(getattr(_sim82.blocks[_bi82], 'name', '')))
+        check('v2.82 B(3) 执行级：计划**首步就是黄金宝库**（用户口径「宝库摆在眼前就先点」）· plan=%s' % (_pl82,),
+              bool(_pl82) and _pl82[0] == '黄金宝库')
+except Exception as _e82:       # noqa: BLE001
+    check('v2.82 守门可运行（%r）' % (_e82,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
