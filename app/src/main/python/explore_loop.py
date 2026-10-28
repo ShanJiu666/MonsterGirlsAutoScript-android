@@ -9499,8 +9499,30 @@ def one_round(b, log, rnd, prefix, st):
             #     ⇒ done_cells_dropped 整块剔除 ⇒ 模型里再也没这个目标
             #     ⇒ **连面板都不会再弹** ✗✗（用户报「连预言石碑都没点开」）
             #   判据：该格的 name 是不是面板类特殊块（点了不消耗）
-            _rc_last = cell_of(st['last'][0], st['last'][1])
-            _nm_last = str(((c.get('st') or {}).get(_rc_last) or {}).get('name') or '')
+            # !! v2.81 修【v2.78 引入的崩溃】—— 真机铁证（2026-10-28 21:01）：
+            #   {"round": 1, "error": "UnboundLocalError: local variable c ..."}
+            #   trace: explore_loop.py:9503 in one_round
+            #   ---- 病 ----
+            #   我在 v2.78 写「面板格不写 done」时用了 `c.get("st")` 查这一格的 name，
+            #   而 `c` 在本函数里要到**下面第 9512 行**才赋值（`c = cell_of(...)`），
+            #   真正的分类结果在 9523 行的 `c = classify_async_join(...)`。
+            #   => 每轮只要走到「act in (battle/battle_clear/handled) 且 st[last] 有值」
+            #      就**抛异常** => st[err] += 1 => 3 轮后 too_many_errors / 整轮空转
+            #      => 用户看到「点了没反应 / 面板又弹回来」X
+            #   ---- 为什么门禁没抓到 ----
+            #   门禁只做了静态字符串/结构断言，**没有真跑 one_round** => 名字作用域
+            #   错误只有执行才暴露（与 v1.62c 的 AST grep 是同一族教训）
+            #   ---- 修法 ----
+            #   **不能**简单改成 `c = cell_of(...)` 再查 —— 那时 c 还没算分类结果。
+            #   本处只要「这一格的 name」，而 **obs 累积**里就有同口径的一份：
+            #   st[obs] 是逐格累积的 {rc: {name:...}}（_cells_for_model 的同一来源）
+            #   优先 obs，取不到退回本帧 st[st]，都没有就空串 => 语义不变、不会崩 O
+            _rc_last = cell_of(st["last"][0], st["last"][1])
+            _obs_map = (st.get("obs") or {})
+            _cur_map = (st.get("st") if isinstance(st.get("st"), dict) else {}) or {}
+            _nm_last = str(((_obs_map.get(_rc_last) or {}).get("name")
+                             or (_cur_map.get(_rc_last) or {}).get("name")
+                             or ""))
             _is_panel_cell = any(_kw in _nm_last for _kw in (
                 '预言石碑', '预言石板', '旅行商人', '黄金宝库',
                 '传承祭坛', '限时礼包', '金属宝箱怪', '机巧宝箱怪'))

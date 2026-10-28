@@ -10680,6 +10680,121 @@ try:
 except Exception as _e80:       # noqa: BLE001
     check('v2.80 守门可运行（%r）' % (_e80,), False)
 print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.81【`one_round` 每轮必崩：v2.78 引入的 UnboundLocalError（`c` 先用后赋值）】
+#
+#   ---- 用户原话（2026-10-28）----
+#     「黄金宝库无法正常点击」＋「选中奖励后直接关闭宝库页面了，然后又立即打开了宝库页面」
+#   ---- 真机铁证（logcat，21:01:04 连续 5 条）----
+#     {'round': 1, 'error': 'UnboundLocalError("local variable c ...")'}
+#     trace: explore_loop.py:9503 in one_round
+#   ---- 病 ----
+#     v2.78 写「面板格不写 done」时用了 `c.get('st')` 查这一格的 name，
+#     而 `c` 在本函数里要到**下面**才赋值（`c = cell_of(...)`），
+#     真正的分类结果在更后面的 `c = classify_async_join(...)`。
+#     => 每轮只要走到「act in (battle/battle_clear/handled) 且 st[last] 有值」就抛异常
+#     => st[err] += 1 => 这张图一格都走不下去
+#     => 面板处理完 return 'handled' 但 done 没写 => 下一轮同一个宝库格**又进目标列表**
+#     => 再点开、再崩 => 用户看到的就是「关了又开」的死循环 X
+#   ---- 为什么门禁没抓到（本组要补的正是这个）----
+#     门禁对本处只做了**静态字符串/结构**断言（「有没有那几句」），
+#     **没有真跑 one_round** => 名字作用域这类错误只有执行才暴露。
+#     !! 同一个坑本项目踩过：v1.62c 的 AST-grep 只证明「代码在」、证不了「能跑」。
+#   ---- 修法 ----
+#     不能简单改成先 `c = cell_of(...)` —— 那时 c 还没算分类结果。
+#     本处只要「这一格的 name」，而 **st[obs] 累积**里就有同口径的一份：
+#     优先 obs、取不到退回本帧 st[st]、都没有就空串 => 语义不变且不会崩 O
+try:
+    import ast as _ast81
+    import textwrap as _tw81
+
+    _EL81 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _L81 = _EL81.split(chr(10))
+
+    # ── A 结构级：不允许再出现 `c.get(` 在学习这段之前（撤回守门）──
+    _i81 = _EL81.find("if st['last']:")
+    _seg81 = _EL81[_i81:_i81 + 1800] if _i81 >= 0 else ''
+    _seg81_code = chr(10).join(_ln81 for _ln81 in _seg81.split(chr(10))
+                               if not _ln81.strip().startswith('#'))
+    check('v2.81 A(1) 撤回守门：`st[last]` 那段**代码里**没有 `c.get(`（注释里可以有）'
+          '（v2.78 就是写了 `c.get("st")` 而 c 还没赋值 => 每轮 UnboundLocalError X） · %s'
+          % ('干净 OK' if 'c.get(' not in _seg81_code else '仍有 c.get('),
+          'c.get(' not in _seg81_code)
+
+    check('v2.81 A(2) 那段用了 st[obs] / st[st] 取 name（不再依赖未定义变量）· %s'
+          % ('有 OK' if ('_obs_map' in _seg81_code and '_cur_map' in _seg81_code)
+                          else '缺'),
+          '_obs_map' in _seg81_code and '_cur_map' in _seg81_code)
+
+    check('v2.81 A(3) `_rc_last` 在那段里**有赋值**（我第一版补丁把它顶掉了 => NameError）· %s'
+          % ('有 OK' if '_rc_last = cell_of(' in _seg81_code else '缺'),
+          '_rc_last = cell_of(' in _seg81_code)
+
+    # ── B 执行级：**真跑那段代码**（这是唯一能抓住名字作用域错误的方式）──
+    #   把 `if st['last']:` 整块抠出来 exec，喂四种夹具
+    try:
+        _st81 = next(_k81 for _k81 in range(9000, len(_L81))
+                     if _L81[_k81].strip() == "if st['last']:")
+        _en81 = next(_k81 for _k81 in range(_st81 + 1, _st81 + 120)
+                     if _L81[_k81].strip().startswith('log.append(entry)'))
+        _blk81 = _tw81.dedent(chr(10).join(_L81[_st81:_en81]))
+    except StopIteration:
+        _blk81 = ''
+    check('v2.81 B(0) 能定位到 `st[last]` 那段代码块（%d 行）' % _blk81.count(chr(10)),
+          bool(_blk81))
+
+    if _blk81:
+        _cell81 = EL.cell_center(2, 6)
+        _rc81 = EL.cell_of(_cell81[0], _cell81[1])
+
+        def _run81(_st, _done, _log):
+            _g = {'st': _st, 'done': _done, 'log': _log, 'cell_of': EL.cell_of}
+            try:
+                exec(compile(_blk81, '<blk81>', 'exec'), _g)
+                return None
+            except Exception as _ee:       # noqa: BLE001
+                return repr(_ee)
+
+        _cases81 = [
+            ('面板格 黄金宝库（来自 obs）', {'obs': {_rc81: {'name': '黄金宝库'}}, 'st': {}}, False),
+            ('普通格 草地（来自 obs）', {'obs': {_rc81: {'name': '草地'}}, 'st': {}}, True),
+            ('面板格 黄金宝库（来自本帧 st）', {'obs': {}, 'st': {_rc81: {'name': '黄金宝库'}}}, False),
+            ('obs/st 都空（**旧代码必崩**的那个场景）', {'obs': {}, 'st': {}}, True),
+        ]
+        for _r in range(len(_cases81)):
+            _nm, _maps, _want_done = _cases81[_r]
+            _done81, _log81 = set(), []
+            _st81x = {'last': _cell81, 'marks': {}}
+            _st81x.update(_maps)
+            _err81 = _run81(_st81x, _done81, _log81)
+            check('v2.81 B(1) 执行级[%s] 不抛异常=%s / done=%s（期望 %s）'
+                  % (_nm, _err81 is None, bool(_done81), _want_done),
+                  _err81 is None and bool(_done81) == _want_done)
+
+        # ── 对照项：**把旧代码塞回去**，执行会抛 UnboundLocalError（证明 B(1) 不是恒真）──
+        _bad81 = _blk81.replace(
+            chr(10).join([
+                '    _obs_map = (st.get("obs") or {})',
+                '    _cur_map = (st.get("st") if isinstance(st.get("st"), dict) else {}) or {}',
+            ]),
+            '')
+        _bad81 = ('_nm_last = str(((c.get("st") or {}).get(_rc81 or (2, 6)) or {})'
+                  '.get("name") or "")')
+        _g81 = {'st': {'last': _cell81, 'obs': {}, 'st': {}, 'marks': {}},
+                'done': set(), 'log': [], 'cell_of': EL.cell_of}
+        _boom81 = None
+        try:
+            exec(compile(_bad81, '<bad81>', 'exec'), _g81)
+        except Exception as _e81b:       # noqa: BLE001
+            _boom81 = _e81b
+        check('v2.81 B(2) 对照项：**旧写法**（`c.get(...)` 且 c 未赋值）执行必抛异常'
+              '（没这条的话，B(1) 用什么代码都能绿 X） · %s'
+              % (type(_boom81).__name__ if _boom81 else '没抛!!',),
+              isinstance(_boom81, (UnboundLocalError, NameError)))
+except Exception as _e81:       # noqa: BLE001
+    check('v2.81 守门可运行（%r）' % (_e81,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
