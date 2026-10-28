@@ -76,6 +76,26 @@ public final class FrameStore {
     }
 
     /**
+     * ⭐ 2026-10-08：「涂平**之前**的实测记账」改成**按需**（默认不记）。
+     *
+     * 记账本身要逐像素 {@code getPixel}（真机悬浮条矩形 1138×115、步长 2 ⇒ 约 3.3 万次/帧），
+     * 画面在动时按刷新率出帧 ⇒ 约 200 万次/秒，**恒定燃烧**。
+     * 而它的消费者只有两个 dev 口子 —— {@code DeviceApi.maskCheck()}（广播 mask_check）
+     * 与 {@code OverlayService.dumpText()}（广播 overlay_dump）——
+     * **脚本热路径一次都没读过**（已全仓核对）⇒ 没布防时白记等于纯浪费。
+     *
+     * ⚠ 涂平本身（{@code drawRect}）**不受影响**，仍然每帧照做；这里只关掉"记账"。
+     * ⚠ 关掉后 {@link #lastMaskInfo()} 会停在**上一次布防时**记下的那条（或初值），
+     *   不会变成 null ⇒ 消费方照旧能读能打印，不会崩、不会输出异常。
+     */
+    private static volatile boolean maskDiagArmed = false;
+
+    /** 布防：让**下一帧**涂平时记一次「涂平前实测」（供 mask_check 取证据） */
+    static void armMaskDiag() {
+        maskDiagArmed = true;
+    }
+
+    /**
      * 把悬浮条占的设备像素矩形涂平（无悬浮条 ⇒ 原样返回）。
      * ⚠ 直接在原 Bitmap 上画（截图线程的那张本来就是拷贝，没有别处再引用）。
      */
@@ -99,8 +119,13 @@ public final class FrameStore {
                 return bmp;
             }
             // ⭐ 涂平**之前**先量：这一块的亮度极差就是「涂平到底有没有起作用」的判据
-            lastMaskInfo = sample(bmp, l, t, rr, b)
-                    + " rect=" + l + "," + t + "-" + rr + "," + b;
+            //   ⚠ 只在布防时记一次（见 {@link #maskDiagArmed}）—— 记账逐像素 getPixel，
+            //     放进每帧热路径是恒定浪费，而脚本从不读它。
+            if (maskDiagArmed) {
+                maskDiagArmed = false;
+                lastMaskInfo = sample(bmp, l, t, rr, b)
+                        + " rect=" + l + "," + t + "-" + rr + "," + b;
+            }
             Canvas c = new Canvas(bmp);
             Paint p = new Paint();
             p.setColor(MASK_COLOR);

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      方案 A（深空玻璃）主题。
+
+      ⚠ 为什么必须自定义：原来用的是 @android:style/Theme.DeviceDefault —— 它**自带 ActionBar**，
+        会在内容区上方压出一条系统标题栏（深棕底 + "MGAS" 字样）。而新的 buildUi() 是
+        "从 y=0 开始画整页深空渐变"的自绘布局 ⇒ 那条标题栏把整页往下顶，而且配色完全冲突
+        （真机实拍：顶部一条棕色横条，见 v2.02 首装截图）。
+
+      ⇒ windowActionBar/windowNoTitle 全关，状态栏透明（内容延伸到状态栏下方，
+        再由 MainActivity.applySystemInsets() 用 padding 让开）。
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

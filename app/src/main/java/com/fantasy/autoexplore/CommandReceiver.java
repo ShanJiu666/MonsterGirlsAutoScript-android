@@ -182,7 +182,16 @@ public class CommandReceiver extends BroadcastReceiver {
                             intent.getIntExtra("bag_every", 0),
                             intent.getBooleanExtra("save_first", true),
                             intent.getBooleanExtra("stop_at_5am", false),
-                            intent.getBooleanExtra("auto_supply", false));
+                            intent.getBooleanExtra("auto_supply", false),
+                            // ⭐ v1.78：收工日常五颗勾选（`--ez guild_tasks true` 之类 ✓）
+                            //   ⚠ 只能往后追加（中间插会让所有老广播静默错位 ✗）
+                            intent.getBooleanExtra("guild_tasks", false),
+                            intent.getBooleanExtra("guild_alchemy", false),
+                            intent.getBooleanExtra("guild_intel", false),
+                            intent.getBooleanExtra("recruit_free", false),
+                            intent.getBooleanExtra("ad_free", false),
+                            // ⭐ v1.91：日常前置（`--ez daily_first true`）
+                            intent.getBooleanExtra("daily_first", false));
                     AppLog.i("[explore] " + r);
                     break;
                 }
@@ -235,6 +244,11 @@ public class CommandReceiver extends BroadcastReceiver {
                     // dev 验证钩子：强制状态灯颜色（零体力看"变绿 + 不收起"）
                     //   --es state run|idle|err|lock|auto
                     OverlayService.forceState(intent.getStringExtra("state"));
+                    break;
+                case "overlay_expand":
+                    // dev 验证钩子：强制展开/收起（绕过 adb 无法注入悬浮窗点击的限制）
+                    //   --es on true|false
+                    OverlayService.forceExpand("true".equals(intent.getStringExtra("on")));
                     break;
                 case "overlay_roll":
                     // dev 验证钩子：注入一条合成日志 + 连打 4 次 logRoll（证明"整行上下滚动"）

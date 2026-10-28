@@ -67,10 +67,13 @@ public final class AutoPilot {
             return java.util.Collections.emptyList();
         }
         ensureOcr(ctx);
-        Bitmap rawCopy = raw.copy(Bitmap.Config.ARGB_8888, false);
-        Bitmap ref = RefMapper.toRef(rawCopy);
+        // ⚠ 以前这里先把 raw 整帧拷一份、再 toRef(拷贝)、dump 也存那份拷贝。
+        //   那次拷贝**没有可观察效果**：toRef 只读 screen，savePng 只是 bmp.compress(...)
+        //   （同样只读）⇒ 两者用 raw 与用 raw 的拷贝**逐位一致**。
+        //   而 raw 是 FrameStore.get() 那张整帧（截图线程每帧新建、无人就地改写）⇒ 安全。
+        Bitmap ref = RefMapper.toRef(raw);
         if (dump) {
-            savePng(ctx, rawCopy, "raw.png");
+            savePng(ctx, raw, "raw.png");
             savePng(ctx, ref, "ref.png");
         }
         long t0 = System.currentTimeMillis();

@@ -138,6 +138,16 @@ public final class DeviceApi {
         int y0 = Math.max(0, r[1]);
         int x1 = Math.min(raw.getWidth() - 1, r[2] - 1);
         int y1 = Math.min(raw.getHeight() - 1, r[3] - 1);
+        // ⚠⭐ 2026-10-08：涂平时的「涂平前实测」改成**按需记账**（FrameStore.maskDiagArmed）——
+        //   它逐像素 getPixel，放进每帧热路径是恒定浪费（约 200 万次/秒），
+        //   而脚本从不读它。这里布防后等一帧新的帧产生，记账才落到**当前画面**上
+        //   ⇒ 本方法给出的证据口径与以前完全一致（一字不少）。
+        FrameStore.armMaskDiag();
+        try {
+            Thread.sleep(120);                      // 真机 ~30fps ⇒ 120ms 内必定出新帧
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
         String before = "① 涂平时记账：" + FrameStore.lastMaskInfo();
         if (x1 <= x0 || y1 <= y0) {
             return before + "\n② 矩形越界：rect=" + r[0] + "," + r[1] + "-" + r[2] + "," + r[3]
@@ -278,7 +288,13 @@ public final class DeviceApi {
             return null;
         }
         try {
-            Bitmap ref = RefMapper.toRef(raw.copy(Bitmap.Config.ARGB_8888, false));
+            // ⚠ 以前这里是 `RefMapper.toRef(raw.copy(ARGB_8888, false))`。
+            //   那次整帧拷贝**没有可观察效果**：`toRef` 只读 screen（new Canvas(out) +
+            //   drawColor + drawBitmap），**从不改它**；而 FrameStore.get() 返回的是
+            //   截图线程每帧 Bitmap.createBitmap 新建的整帧（见 CaptureService），
+            //   不会被就地改写。真机 1280×2772 = 每次 14.19MB 分配 + 14.19MB 拷贝，
+            //   而它每次点击都会走一次 ⇒ 删掉是**逐位等价**的。
+            Bitmap ref = RefMapper.toRef(raw);
             AutoPilot.ensureOcr(appCtx);
             List<OcrItem> items = AutoPilot.ocr().recognizeBand(ref, y0, y1, minConf);
             return itemsJson(items);

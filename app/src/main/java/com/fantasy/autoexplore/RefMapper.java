@@ -72,10 +72,25 @@ public final class RefMapper {
     private RefMapper() {
     }
 
+    /** ⭐ v2.56：设备真实屏幕尺寸（**不被参考帧尺寸污染** ⇒ 见 setScreen 的保护） */
+    private static int devScreenW = 0;
+    private static int devScreenH = 0;
+
     public static void setScreen(int w, int h) {
         if (w <= 0 || h <= 0) {
             return;
         }
+        // ⭐⭐⭐ v2.56【**拒绝参考帧尺寸**】（用户 2026-10-26「画面认不出」的真根因）
+        //   1080×1920 是**参考帧**尺寸，**不是设备屏幕尺寸**。
+        //   一旦被写进全局映射 ⇒ kx=1 / shift=0 ⇒ anchored 仍在，但
+        //   dialogShift() = 960 + (0-960)/1 = **0** ⇒ **整个「弹窗系」机制全废**
+        //   （战斗/宝库/商人/勇者之墓面板**全都认不出**，且 C 被 Python 侧永久缓存成 0）
+        //   ⇒ 设备尺寸已知时，**忽略**参考帧尺寸 ✓
+        if (w == REF_W && h == REF_H && devScreenW > 0) {
+            return;
+        }
+        devScreenW = w;
+        devScreenH = h;
         // ⭐ 2026-09-29 晚：参数没变就别打日志——setScreen 每帧/每次点击都被调，
         //   这一行把 logcat 环形缓冲几秒刷一屏，几十分钟前的日志全被冲掉（排查色子/宝库时受害）
         boolean changed = (w != screenW || h != screenH);

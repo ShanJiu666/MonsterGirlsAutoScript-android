@@ -27,7 +27,7 @@ public final class PackInstaller {
      * ⚠ **以后每次往 `assets/mapbot_pack/` 加/改资源，都要把这里的版本号 +1**
      *   （门禁 `v1.68 A⑨` 守着这件事与 Python 侧的外置目录回退同时存在 ✓）
      */
-    private static final String MARK = ".pack_v4";
+    private static final String MARK = ".pack_v10";
 
     private PackInstaller() {
     }

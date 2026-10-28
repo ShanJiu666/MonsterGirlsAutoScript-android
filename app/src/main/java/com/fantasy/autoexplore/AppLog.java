@@ -21,6 +21,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class AppLog {
 
+    /** 布局诊断开关（排查日志文字宽度用；正式版 false） */
+    public static final boolean DEBUG_LAYOUT = true;
+
     private static final String TAG = "AutoExplore";
     private static final List<String> lines = new ArrayList<>();
     private static final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();

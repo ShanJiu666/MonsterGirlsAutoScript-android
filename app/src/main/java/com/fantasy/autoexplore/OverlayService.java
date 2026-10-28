@@ -107,9 +107,36 @@ public class OverlayService extends Service {
     private static final int MAPS_CONTINUOUS = 999;
     /** 每张图的进图体力（与 PC 口径一致） */
     private static final int STAMINA_PER_MAP = 25;
-    /** 按钮底色 / 点击瞬间的高亮 */
-    private static final int CHIP_BG = 0xD9303030;
-    private static final int CHIP_BG_TAP = 0xFF3D6FB4;
+    // ══ 方案 A（深空玻璃）令牌 —— 与 MainActivity / docs/ui_design/scheme_a.py 同源 ══
+    //  ⚠ 悬浮条**比应用内更不透明**：它压在明亮的游戏美术上，α 太低会糊成一片
+    private static final int BAR_BG = 0xF50A0E15;
+    private static final int BAR_LINE = 0x3822D3EE;
+    private static final int BAR_HAIR = 0x1CFFFFFF;
+    /** 普通按钮：白 α9 / 描边 α18 */
+    private static final int CHIP_BG = 0x17FFFFFF;
+    private static final int CHIP_LINE = 0x2EFFFFFF;
+    /** 点击瞬间高亮（青） */
+    private static final int CHIP_BG_TAP = 0x5522D3EE;
+    /** 危险（停止） */
+    private static final int CHIP_DANGER_BG = 0xF07C2A34;
+    private static final int CHIP_DANGER_LINE = 0x6EF87171;
+    /** 警示（反馈） */
+    private static final int CHIP_WARN_BG = 0x22FBBF24;
+    private static final int CHIP_WARN_LINE = 0x82FBBF24;
+    /** 主按钮（启动）：青→蓝渐变 */
+    private static final int BTN_TOP = 0xFF40E2F6;
+    private static final int BTN_BOTTOM = 0xFF247AE2;
+    /** 文字色 */
+    private static final int TXT_LOG = 0xFFDEEAF7;
+    private static final int TXT_CHIP = 0xFFB0C2D6;
+    private static final int TXT_CHIP_DIM = 0xFF78849A;
+    private static final int TXT_DANGER = 0xFFFFD6D6;
+    private static final int TXT_WARN = 0xFFFFD98A;
+    private static final int TXT_PRIMARY = 0xFF05121E;
+    /** 状态色 */
+    private static final int C_IDLE = 0xFF8894A4;
+    private static final int C_RUN = 0xFF34D399;
+    private static final int C_LOCK = 0xFFF87171;
 
     /** 日志行保留多少条（往回翻最多翻这么多） */
     private static final int LOG_KEEP = 60;
@@ -120,17 +147,37 @@ public class OverlayService extends Service {
      *  高度预算：底边钉 1816、顶边必须 ≥ 1722 ⇒ 总共只能有 **94 参考 px**。
      *  这里用 34（日志）+ 56（按钮）= **90** ⇒ 顶边 1726，留 4px 余量 ✓
      *  （2026-09-29 用户又要求「字放大一点，黑体」：日志 22→28 px + 加粗）*/
-    private static final int LOG_ROW_H_REF = 34;
+    // ⚠⚠⚠ v2.27 用户反馈「启动后显示的日志文字会被遮挡 / 显示不全」
+    //   实测：行高 34 参考(=40 设备) vs 字号 28 参考(=33 设备)，
+    //   而文字实际占高 ≈ 字号×1.2 = 40 ⇒ **富余 0px** ⇒ 字形下半被 View 边界裁掉 ✗
+    //   ⇒ 34 → 44（设备 52），给文字留 12px 余量 ✓
+    //   ⚠ 总高预算（34+56=90）会变成 44+56=100，仍 < 94 的旧预算…
+    //     但用户已定「位置自己拖、锁顶边（方案 A）」，高度不再受 1722 硬约束限制，
+    //     条子向下长即可 ⇒ 安全。
+    private static final int LOG_ROW_H_REF = 44;
     /** 日志字号（参考系像素） */
     private static final float LOG_TEXT_REF = 28f;
-    /** 日志行**黑字**（用户口径）——必须配浅底才看得见，见 {@link #LOG_BG_COLOR} */
-    private static final int LOG_TEXT_COLOR = 0xFF000000;
-    /** 日志行**浅色底**：把这一行和身后的游戏/App 文字分开，一眼看清"按钮上方那行是我的" */
-    private static final int LOG_BG_COLOR = 0xFFF2F4F7;
+    /** 日志行文字色（方案 A：深底浅字，与 App 内一致） */
+    private static final int LOG_TEXT_COLOR = TXT_LOG;
+    /** 日志行底色：**不再单独铺浅底** —— 整条已有一块深空玻璃底板，
+     *  再叠一块浅色会把条子切成两截（旧版浅底是为了"黑字看得见"，
+     *  现在字变浅了，那个理由不成立） */
+    private static final int LOG_BG_COLOR = 0x00000000;
     /** 按钮字号（参考系像素）。⚠ 两行后必须压小：原来 15sp(45px) 会把总高顶到 100+ ⇒ 越过 1722 */
     private static final float CHIP_TEXT_REF = 34f;
     /** 按钮竖向内边距（参考系像素）——和字号一起决定按钮行高度 */
     private static final int CHIP_PAD_V_REF = 8;
+    /**
+     * 允许条子**向下**多让出的参考 px（给手势条留位，但绝不向上越棋盘）。
+     *
+     * <p>棋盘下沿 = 1722，参考底边 = 1816 ⇒ 中间本来就有 94px 的夹缝。
+     * 手势条（约 44 参考 px）应该塞进这 94px 里，而不是把条子整体往上顶。
+     */
+    private static final int REF_BUDGET_SLACK = 44;
+
+    /** 棋盘方块底边占屏高的比例（1280×2772 实测 2570/2772 ≈ 0.9272；无帧兜底用） */
+    private static final float BOARD_BOTTOM_RATIO = 0.9272f;
+
     /** 底边固定在参考系 y=1816（收/展都钉这里） */
     private static final int BAR_BOTTOM_REF = 1816;
     /** 棋盘下沿（参考 y）——顶边绝不允许越过它，见硬约束① */
@@ -228,6 +275,26 @@ public class OverlayService extends Service {
     }
 
     /** 广播入口：设/取消强制状态并立刻重画一次 */
+    /**
+     * dev 验证钩子：强制展开/收起。
+     *
+     * <p>为什么要它：悬浮窗带 {@code FLAG_NOT_FOCUSABLE}，{@code adb shell input tap}
+     * 注入不进去 ⇒ 展开态**只能手点**，自动化验证做不到。这个口让
+     * {@code adb am broadcast --es cmd overlay_expand --es on true} 能触发同一条路径，
+     * 便于量几何（顶边是否贴限制线）。
+     */
+    static void forceExpand(boolean ex) {
+        final OverlayService o = INSTANCE;
+        if (o == null) {
+            AppLog.i("[overlay_expand] 悬浮条没开");
+            return;
+        }
+        o.ui.post(() -> {
+            o.setExpanded(ex);
+            AppLog.i("[overlay_expand] 强制 " + (ex ? "展开" : "收起"));
+        });
+    }
+
     static void forceState(String name) {
         OverlayService s = INSTANCE;
         if (s == null) {
@@ -327,7 +394,39 @@ public class OverlayService extends Service {
                     s = "";
                 }
                 final String st = s;
-                ui.post(() -> paint(st));
+                ui.post(() -> {
+                    paint(st);
+                    // ⭐ v2.09：棋盘底边检测需要一张**当前截图**，而悬浮条创建时
+                    //   往往还没帧（人在 App 里 / 刚切游戏还没出图）。
+                    //   ⇒ 每个 poll 周期若还没测到，就再试一次 —— 一旦有帧就自动生效，
+                    //     并把条子重新贴到实测位置。
+                    // ⭐⭐⭐ v2.34【用户口径 2026-10-26】：「每次启动第一张图进去后
+                    //   会自动把悬浮窗顶边对齐棋盘底边」
+                    //   ⇒ 每个 poll 周期检查一次：若能测到棋盘底边，且与当前顶边差 >3px，
+                    //     就自动对齐一次（然后写入记忆，不再反复调整）。
+                    if (!autoAlignedOnce) {
+                        int board = measuredBoardBottom();
+                        if (board > 0) {
+                            autoAlignedOnce = true;
+                            int curTop = 0;
+                            int[] lc = new int[2];
+                            try {
+                                bar.getLocationOnScreen(lc);
+                                curTop = lc[1];
+                            } catch (Throwable ignored) {
+                            }
+                            if (curTop > 0 && Math.abs(curTop - board) > 3) {
+                                AppLog.i("[ovl] 自动对齐：当前顶=" + curTop
+                                        + " 棋盘底边=" + board + " ⇒ 对齐");
+                                Prefs.setOverlayTop(OverlayService.this, board);
+                                settlePosition();
+                            } else {
+                                AppLog.i("[ovl] 自动对齐：已在位（顶=" + curTop
+                                        + " 棋盘底=" + board + "）");
+                            }
+                        }
+                    }
+                });
             }, "ovl-poll").start();
             ui.postDelayed(this, 2500);
         }
@@ -484,29 +583,80 @@ public class OverlayService extends Service {
                 getResources().getDisplayMetrics()));
     }
 
-    /** 一枚圆角小按钮（**只放符号/ASCII**，见类注释）；底色 drawable 存在 tag 里，方便改色 */
+    /**
+     * 一枚圆角小按钮（**只放符号/ASCII**，见类注释）；底色 drawable 存在 tag 里，方便改色。
+     *
+     * <p>方案 A 起支持四种样式；样式只影响**观感**，点击行为仍由调用点决定：
+     * <ul>
+     *   <li>{@link #S_NORMAL} 白 α9 —— 张数、✕</li>
+     *   <li>{@link #S_PRIMARY} 青蓝渐变 —— 全条唯一的"现在该按这个"（启动）</li>
+     *   <li>{@link #S_DANGER} 暗红 —— 停止</li>
+     *   <li>{@link #S_WARN} 琥珀 —— 反馈</li>
+     * </ul>
+     *
+     * <p>⚠ 字号走**参考系像素**（不是 sp）：两行布局后按钮行高度必须精确可控，
+     * 否则换个密度就顶穿 1722（见 LOG_ROW_H_REF 的高度预算）。
+     */
+    /** 给 chip 的 tag 第二槽用的 key（避免用 R.id —— 本项目没有 ViewBinding/R 生成 id 的约定） */
+    private static final int TAG_STYLE = 0x7F0A0001;
+
+    private static final int S_NORMAL = 0;
+    private static final int S_PRIMARY = 1;
+    private static final int S_DANGER = 2;
+    private static final int S_WARN = 3;
+
     private TextView chip(String text, int color) {
+        return chipStyle(text, color, S_NORMAL);
+    }
+
+    private TextView chipStyle(String text, int color, int style) {
         TextView t = new TextView(this);
         t.setText(text);
-        // ⚠ 字号走**参考系像素**（不是 sp）：两行布局后按钮行高度必须精确可控，
-        //   否则换个密度就顶穿 1722（见 LOG_ROW_H_REF 的高度预算）
         t.setTextSize(TypedValue.COMPLEX_UNIT_PX, RefMapper.devLen(CHIP_TEXT_REF));
         t.setTextColor(color);
         t.setIncludeFontPadding(false);              // 去掉字体内边距（省高度）
-        // ⚠ 按钮**不加粗**：用户 2026-09-29 明确「字大一点/黑体说的是**日志**的字体」⇒
-        //   按钮保持原样（34 参考 px、常规字重），别顺手改
-        int ph = dp(9), pv = RefMapper.devLen(CHIP_PAD_V_REF);
+        t.setGravity(android.view.Gravity.CENTER);
+        t.setIncludeFontPadding(false);
+        // ⚠ 按钮**不加粗**：用户 2026-09-29 明确「字大一点/黑体说的是**日志**的字体」
+        // ⚠ 竖向 padding = 0：行高已由 btnRow 的 LayoutParams 钉死 56 参考 px，
+        //   再给 padding 就会把 chip 撑出边界（v2.02 实测条高 75 > 预算）
+        // ⚠⚠ 量纲必须统一：字号是**参考系像素**（devLen），内边距也必须用 devLen。
+        //   v2.02 实测：这里用 dp(11)（= 屏幕密度 dp，在 480dpi 上 ≈33px），
+        //   而字只有 34 参考 px ⇒ 左右各白塞 33px ⇒ 胶囊**空出一大截**，
+        //   看起来就是"文字显示不全 / 右边缺一块"。
+        int ph = RefMapper.devLen(11), pv = 0;
         t.setPadding(ph, pv, ph, pv);
         t.setSingleLine(true);
         GradientDrawable g = new GradientDrawable();
-        g.setColor(CHIP_BG);
-        g.setCornerRadius(dp(14));
-        g.setStroke(dp(1), 0x66FFFFFF);
+        switch (style) {
+            case S_PRIMARY:
+                g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[]{BTN_TOP, BTN_BOTTOM});
+                g.setCornerRadius(RefMapper.devLen(20));
+                g.setStroke(dp(1), 0x5A78E6FF);
+                break;
+            case S_DANGER:
+                g.setColor(CHIP_DANGER_BG);
+                g.setCornerRadius(RefMapper.devLen(20));
+                g.setStroke(dp(1), CHIP_DANGER_LINE);
+                break;
+            case S_WARN:
+                g.setColor(CHIP_WARN_BG);
+                g.setCornerRadius(RefMapper.devLen(20));
+                g.setStroke(dp(1), CHIP_WARN_LINE);
+                break;
+            default:
+                g.setColor(CHIP_BG);
+                g.setCornerRadius(RefMapper.devLen(20));
+                g.setStroke(dp(1), CHIP_LINE);
+                break;
+        }
         t.setBackground(g);
         t.setTag(g);
+        t.setTag(TAG_STYLE, style);                 // flash 恢复底色时要用
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        p.rightMargin = dp(6);
+        p.rightMargin = RefMapper.devLen(5);
         t.setLayoutParams(p);
         return t;
     }
@@ -522,6 +672,13 @@ public class OverlayService extends Service {
         if (g == null) {
             return;
         }
+        Object st = v.getTag(TAG_STYLE);
+        if (st instanceof Integer && (Integer) st == S_PRIMARY) {
+            // 渐变按钮改不了 setColor（会盖掉 shader）⇒ 闪一下描边
+            g.setStroke(dp(2), 0xCCFFFFFF);
+            ui.postDelayed(() -> applyBaseBg(v), 180);
+            return;
+        }
         g.setColor(CHIP_BG_TAP);
         ui.postDelayed(() -> applyBaseBg(v), 180);
     }
@@ -531,13 +688,44 @@ public class OverlayService extends Service {
                 ? (GradientDrawable) v.getTag() : null;
     }
 
-    /** 恢复该按钮的常态底色 */
+    /** 恢复该按钮的常态底色（按 style 分派，别一律刷成白 α9） */
     private void applyBaseBg(TextView v) {
         GradientDrawable g = bgOf(v);
         if (g == null) {
             return;
         }
-        g.setColor(CHIP_BG);
+        Object st = v.getTag(TAG_STYLE);
+        int style = (st instanceof Integer) ? (Integer) st : S_NORMAL;
+        switch (style) {
+            case S_PRIMARY:
+                g.setStroke(dp(1), 0x5A78E6FF);
+                break;
+            case S_DANGER:
+                g.setColor(CHIP_DANGER_BG);
+                break;
+            case S_WARN:
+                g.setColor(CHIP_WARN_BG);
+                break;
+            default:
+                g.setColor(CHIP_BG);
+                break;
+        }
+    }
+
+    /** 条底板：深空玻璃 + 青描边（方案 A 令牌）。收起态变**胶囊**形 */
+    private void applyBarBg() {
+        if (bar == null) {
+            return;
+        }
+
+        // ⚠ 收起/展开**都保留深空玻璃底板**（用户 2026-10-19 澄清：
+        //   「为啥改成透明？按之前的限制出现位置就行啊」——
+        //   他要的是**位置回到原约束**，不是去掉底板）。
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(BAR_BG);
+        g.setCornerRadius(expanded ? dp(16) : dp(22));
+        g.setStroke(dp(1), BAR_LINE);
+        bar.setBackground(g);
     }
 
     private void buildView() {
@@ -557,49 +745,60 @@ public class OverlayService extends Service {
         bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
         bar.setGravity(Gravity.START);
+        // ⭐ 方案 A：整条一块深空玻璃面板（旧版是两个各自为政的方块）
+        //   ⚠⚠ 真机铁证（v2.02 首装）：竖向 padding 会把 90 的预算撑成 97+
+        //     ⇒ 顶边从 1726 掉到 1598，**越过棋盘下沿 1722 达 124px** ⇒ 会盖住最低一行格子
+        //     （识别错 + 那几格点不动，见类注释硬约束①）。
+        //   ⇒ **只加横向 padding**，纵向一点都不加（高度必须原封不动按 34+56 走）。
+        // 收起/展开都需要左右内边距（里面都是胶囊，文字不能贴边）
+        bar.setPadding(RefMapper.devLen(10), 0, RefMapper.devLen(10), 0);
+        applyBarBg();
 
         // 下行：按钮（气泡 / 张数 / ▶ / ■ / ✕）
         btnRow = new LinearLayout(this);
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
         btnRow.setGravity(Gravity.CENTER_VERTICAL);
-        bar.addView(btnRow);
+        // ⚠ 按钮行高度**钉死**（不靠 chip 的 padding 撑）——
+        //   旧实现靠 padding 隐式撑高，一改样式就悄悄变高 ⇒ 顶边越过棋盘（v2.02 实测 75）。
+        //   展开态 56（日志 34 + 按钮 56 = 90 预算）；收起态 44（只剩一枚胶囊）。
+        addBtnRow();
 
-        bubble = chip("● MGAS", 0xFFAAAAAA);
+        // ⭐ 方案 A：气泡 → **状态胶囊**（色点由 paint() 换色，文案直接写状态）
+        //   旧版只有 "● MGAS" 一个符号，用户要回 App 才知道是"跑图中"还是"红装锁"
+        bubble = chipStyle("MGAS", TXT_CHIP, S_NORMAL);
+        bubbleOriginText = "MGAS";
+
         bubble.setOnClickListener(v -> {
             flash(bubble);
             AppLog.i("[ovl] 点气泡 → " + (expanded ? "收起" : "展开"));
             setExpanded(!expanded);
         });
+        // ⭐ 精简后长按 = **低频操作入口**（张数 / 反馈 / 日志行），不再挤在按钮行
         bubble.setOnLongClickListener(v -> {
             flash(bubble);
-            // ⭐ 三态循环：自动(null) → 强制显示(TRUE) → 强制隐藏(FALSE) → 自动…
-            //   ⚠ 以前写成 `(logForce != null && logForce) ? FALSE : TRUE` ⇒ 在 TRUE/FALSE 之间
-            //   来回翻，**永远回不到"自动"**（和注释"再长按恢复自动"不符，2026-09-29 实测踩到）
-            logForce = (logForce == null) ? Boolean.TRUE
-                    : (logForce ? Boolean.FALSE : null);
-            AppLog.i("[ovl] 长按气泡 ⇒ 日志行 " + (logForce == null ? "恢复自动（跟随运行状态）"
-                    : (logForce ? "强制显示" : "强制隐藏")));
-            applyMode();
             keepAlive();
+            showMoreMenu();
             return true;
         });
         installDrag(bubble);
         btnRow.addView(bubble);
 
-        btnCount = chip(MAP_LABELS[choiceIdx], 0xFFB0E0FF);
+        // ⭐ 2026-10-19 用户口径「悬浮窗太臃肿了，简洁一些」⇒ 做减法：
+        //   张数切换从**独立按钮**降级为**长按气泡弹出**（它一天改一次，不该常驻占位）
+        btnCount = chip(MAP_LABELS[choiceIdx], TXT_CHIP);
         btnCount.setOnClickListener(v -> {
             flash(btnCount);
             keepAlive();
             choiceIdx = (choiceIdx + 1) % MAP_LABELS.length;
             btnCount.setText(MAP_LABELS[choiceIdx]);
-            Prefs.setMapsChoice(this, choiceIdx);       // 界面/下次启动都读同一份 ✓
-            AppLog.i("[ovl] 点张数 ⇒ " + MAP_LABELS[choiceIdx]
+            Prefs.setMapsChoice(this, choiceIdx);
+            AppLog.i("[ovl] 张数 ⇒ " + MAP_LABELS[choiceIdx]
                     + (choiceIdx == 0 ? "（约 " + STAMINA_PER_MAP + " 体力）"
                                       : "（一直刷到体力不够进图为止）"));
         });
-        btnRow.addView(btnCount);
+        // ⚠ 不 addView ⇒ 不进按钮行（仍保留对象，供长按菜单 toggle 文案）
 
-        btnStart = chip("▶", 0xFF8CFF9E);
+        btnStart = chipStyle("▶ 启动", TXT_PRIMARY, S_PRIMARY);
         btnStart.setOnClickListener(v -> {
             flash(btnStart);
             keepAlive();
@@ -607,8 +806,10 @@ public class OverlayService extends Service {
             onStart();
         });
         btnRow.addView(btnStart);
+        // ⚠ 精简：btnStart 与 btnStop 在 applyMode() 里**互斥显示**（同一位置换身），
+        //   所以按钮行任意时刻最多 = 状态胶囊 + 1 个主按钮
 
-        btnStop = chip("■", 0xFFFF9E9E);
+        btnStop = chipStyle("■ 停止", TXT_DANGER, S_DANGER);
         btnStop.setOnClickListener(v -> {
             flash(btnStop);
             keepAlive();
@@ -617,19 +818,21 @@ public class OverlayService extends Service {
         });
         btnRow.addView(btnStop);
 
-        btnClose = chip("✕", 0xFFFFFFFF);
+        // ⭐ 精简：✕ 不再常驻 —— 点气泡本身就能收起（这是更自然的交互），
+        //   而且旧版 ✕ 挨着停止键，误触一次就把条子收了找不到启动。
+        btnClose = chip("✕", TXT_CHIP_DIM);
         btnClose.setOnClickListener(v -> {
             flash(btnClose);
             AppLog.i("[ovl] 点 ✕ ⇒ 收起");
             setExpanded(false);
         });
-        btnRow.addView(btnClose);
+        // ⚠ 不 addView ⇒ 不进按钮行
 
         // ⭐⭐⭐ 2026-10-01 v1.14【反馈】用户口径：「能不能加个按钮能更方便让朋友发他的问题给我」
         //   一点 = 把 日志 + 机型信息 + 现场帧 打成 zip 并**弹系统分享面板**（微信/QQ 直接发）✓
         //   ⚠ 按钮文案走 `sanitize()`：本工程的 OCR 关键词表里没有「反馈」⇒ 不会被糊成 ▓ ✓
         //   ⚠ 放最右下（✕ 之后）：不容易误触（它只多打一个包，不改变任何运行状态 ✓）
-        btnFb = chip("反馈", 0xFFFFD79E);
+        btnFb = chipStyle("反馈", TXT_WARN, S_WARN);
         btnFb.setOnClickListener(v -> {
             flash(btnFb);
             keepAlive();
@@ -643,17 +846,25 @@ public class OverlayService extends Service {
                 }
             }, "ovl-feedback").start();
         });
-        btnRow.addView(btnFb);
+        // ⭐ 精简：反馈也收进长按菜单（它是低频操作；常驻会跟"停止"抢注意力）
+        // ⚠ 不 addView ⇒ 不进按钮行
 
         // ── ② 日志行（**在按钮上面**，整行全宽、自己画、上下滚动）──
         //    ⭐ 2026-09-29 用户口径：「要在按钮上面啊，并且是**黑色字**」
         //    ⇒ 给日志行铺一块**浅色底 + 黑字**：① 黑字必须配浅底才看得见（游戏底是深色）
         //      ② 浅底把这一行和身后的游戏/App 文字**分开**，一眼就是"按钮上方那一行是我的"
         tvLog = new MarqueeView(this);
+        // ⚠⚠ 宽度问题三轮踩了三次，结论钉死在这里：
+        //   ① MATCH_PARENT + 外层 WRAP_CONTENT ⇒ 解析成 0 宽（父看子、子看父，无解）
+        //   ② 固定像素宽 ⇒ MarqueeView.onMeasure 的 fill 分支失效
+        //      （它按 p.width == MATCH_PARENT 判断"铺满"）⇒ 又缩成文字宽
+        //      ⇒ 文字被自己的宽度截断（用户看到的"日志显示不全"）
+        //   ③ 正解：MATCH_PARENT + **给父级 bar 一个确定宽度**（见 buildView 末尾）。
+        //      父级有确定宽 ⇒ MATCH_PARENT 有解 ⇒ fill 分支成立 ⇒ 按可用宽省略
         LinearLayout.LayoutParams lpl = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, RefMapper.devLen(LOG_ROW_H_REF));
-        lpl.leftMargin = dp(2);
         tvLog.setLayoutParams(lpl);
+        // 方案 A：不再单铺浅底（整条已有玻璃底板）—— LOG_BG_COLOR 是透明的
         GradientDrawable lg = new GradientDrawable();
         lg.setColor(LOG_BG_COLOR);
         lg.setCornerRadius(dp(6));
@@ -666,7 +877,20 @@ public class OverlayService extends Service {
             keepAlive();
             return true;
         });
-        bar.addView(tvLog, 0);          // ⭐ 插到第 0 行 ⇒ 日志在按钮**上方**
+        // ⭐⭐⭐ v2.41【用户拍板 2026-10-26】：「日志是显示不全，上边被遮挡了」
+        //   根因：日志行在**第 0 行（上方）**，而悬浮条顶边贴住棋盘底边
+        //   ⇒ 日志行那一块正好压在棋盘最后一行格子上 ⇒ 上半截被盖 ✗
+        //   ⇒ 改成 **按钮在上、日志在下**：
+        //       [MGAS ▶启动]     ← 贴着棋盘底边
+        //       [第1张图·准备进图] ← 在最下面，永远不会被上方内容遮挡 ✓
+        //   addBtnRow() 会 removeView(btnRow) 再加回末尾 ⇒ 只要保持"日志先 add"，
+
+        // v2.45 修（上一版把这行误删了）：
+        //   诊断实证 tvLog 状态: idx=-1 n=1 => tvLog 根本不在 bar 里，
+        //   所以 getWidth() 恒为 0、什么都画不出来。
+        //   必须显式 addView 才进布局树。
+        bar.addView(tvLog, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, RefMapper.devLen(LOG_ROW_H_REF)));
 
         lp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -682,10 +906,34 @@ public class OverlayService extends Service {
         // ⚠ Gravity.BOTTOM：lp.y 变成「离屏幕底的距离」⇒ 底边**恒定**，只横向生长
         lp.gravity = Gravity.BOTTOM | Gravity.START;
         lp.setTitle("MGAS");                         // 便于 `dumpsys window` 里认人
-        lp.x = RefMapper.devX(20);
-        lp.y = RefMapper.devY(BAR_BOTTOM_OFFSET_REF);
-        AppLog.i("悬浮条底边钉在 参考 y=" + BAR_BOTTOM_REF + " ⇒ 设备偏移 (" + lp.x + "," + lp.y
-                + ")  k=" + RefMapper.k() + "（两行/高度恒定 84，不碰棋盘与采样带）");
+        // v2.21：左边距同样记住用户拖的位置
+        int savedX = Prefs.overlayX(getApplicationContext());
+        lp.x = (savedX >= 0) ? savedX : RefMapper.devX(20);
+        // ⚠⚠ 真机 bug（v2.02，用户原话「悬浮窗还是低了，显示不全」）：
+        //   Gravity.BOTTOM 下 lp.y 是**离屏幕底**的距离，而屏幕底包含系统手势条区。
+        //   参考 y=1816 是「1080×1920 无手势条」时代的口径 ⇒ 映射到 1280×2772 后
+        //   底边正好压进手势条里，最后一行文字被系统条盖住 / 被裁掉。
+        //   ⇒ 额外让出导航栏高度（读系统 insets，拿不到就用 48dp 兜底）。
+        // ⚠⚠ v2.02 二次实测：直接加 navInset 会把**底边从 1722 抬到 1678**
+        //   ⇒ 顶边跟着进到棋盘区（1722 以上），盖住最低一行格子 ✗
+        //   正确做法：底边**不许越过棋盘下沿**（1722），
+        //   让出的手势条空间从「条子内部」省 —— 见 BAR_BOTTOM_REF 的收紧。
+        // ⭐ 位置回到**最初的硬约束**（OverlayService 类注释硬约束①）：
+        //   底边钉死 参考 y=1816，展开态 90 高 ⇒ 顶边 1726 ≥ 棋盘下沿 1722 ✓。
+        //   ⚠ 我中途试过 +手势条偏移、锚棋盘下沿两种改法，都会让位置漂走
+        //     （用户 2026-10-19：「按之前的限制出现位置就行啊」）⇒ 回退到原口径。
+        navInset = navBarHeight();
+        // ⚠⚠⚠ Gravity.BOTTOM 的基准不是"物理屏高"，而是**窗口可用区高度**
+        //   （dumpsys 实测 parent=[0,0][1280,2720]，比物理 2772 少 52px 手势条）
+        //   ⇒ 用物理屏高算 lp.y 会整体偏低 52px（真机实测 frame 落在 2545~2597，
+        //     而目标是底边 2649 ⇒ 差 52）。
+        int[] rs0 = realScreen();
+        int physical = rs0[1];
+        int usable = physical - nav();   // = 父窗口高度
+        lp.y = anchorY(usable);
+        AppLog.i("悬浮条定位：展开=" + expanded + " ⇒ lp.y=" + lp.y
+                + "（可用区 " + usable + " = 物理 " + physical + " − 手势条 " + nav() + "）"
+                + "  " + (expanded ? "顶边贴限制线 1722" : "底边钉 1816"));
 
         // ⭐ 先按「收起态」摆好，**再** addView：
         //    这样窗口的第一次测量拿到的就是气泡宽度，不依赖"加窗后再 relayout"这件事
@@ -709,7 +957,14 @@ public class OverlayService extends Service {
         try {
             wm.addView(bar, lp);
             AppLog.i("✓ 悬浮条已显示：左下角小气泡，点它展开 → ▶ 开始 / ■ 停止（可拖动）");
-            bar.post(this::afterLayout);
+            // ⭐ 加窗后**必须再定位一次**：addView 之前 bar.getHeight() 还是 0，
+            //   anchorY() 只能用默认值估算 ⇒ 首帧位置会差一截（用户看到"没贴住"）。
+            //   这里等布局完成再按真实高度钉一次顶边。
+            bar.post(() -> {
+                settleRetried = false;
+                settlePosition();
+                afterLayout();
+            });
         } catch (Throwable t) {
             AppLog.i("⚠ 悬浮窗添加失败：" + t);
         }
@@ -744,26 +999,71 @@ public class OverlayService extends Service {
         //   —— 收起态 bh=56 时夹在 lp.y≤142（顶边正好 1722），可**一展开** bh 变 84
         //   ⇒ 顶边掉到 1694，又把棋盘最低一行盖住（涂平抹掉 ⇒ 识别错 + 点不动）。
         //   所以这里不依赖"拖动时算对"：只要顶边越界就改 lp.y 把它推回去（幂等，改完再走一次）。
-        int bottomPx = sh - lp.y;
-        if (bottomPx - bar.getHeight() < RefMapper.devY(BOARD_Y1_REF)) {
-            int fixed = Math.max(0, sh - bar.getHeight() - RefMapper.devY(BOARD_Y1_REF));
-            if (lp.y != fixed) {
-                lp.y = fixed;
-                AppLog.i("[ovl] 顶边越界 ⇒ 自愈回推：离底 " + fixed
-                        + "（顶边钉回 参考 y=" + BOARD_Y1_REF + "）");
-                try {
-                    wm.updateViewLayout(bar, lp);
-                } catch (Throwable ignored) {
+        // ⚠⚠⚠ v2.02 定位（用户连报三次「位置不对」，这里是真凶）：
+        //   原逻辑 = 「顶边越界 ⇒ 把顶边钉回 1722」。
+        //   但条子**高度是变的**（收起 52 / 展开 106 设备px）⇒ 钉顶边等于**改底边**：
+        //     展开态：顶边钉 1722 ⇒ 底边 = 1722 + 106 = 1828，可屏幕只到 2772，
+        //             换算回参考就成了 1615~1705（实测值）⇒ 位置整体上移、且再无定数 ✗
+        //   而用户的约束是「**底边**钉 1816、**顶边**别越过 1722」——
+        //   正确做法是**底边优先**：底边永远钉 1816，高度变了就让顶边自己动。
+        //   只有一种情况要干预：底边太靠下、导致顶边仍然越过 1722 ⇒ **那说明高度超预算**，
+        //   这时该压的是**内容高度**（由 addBtnRow 的 44/50/56 保证），不是平移整条。
+        //   ⇒ 本段只做**校验与告警**，不再改 lp.y（改了就永远定不住）。
+        // ⚠⚠ 基准必须用**可用区高度**，不是物理屏高：
+        //   Gravity.BOTTOM 下 lp.y 是"离窗口可用区底边"的距离，
+        //   而可用区 = 物理屏 − 手势条（实测 2772−52=2720）。
+        //   v2.02 用物理屏算 ⇒ 位置偏 52px，日志也一起报错。
+        int usableH = sh - nav();
+        int bottomPx = usableH - lp.y;
+        int topPx = bottomPx - bar.getHeight();
+        // ⭐ 诊断：把"窗口底边 / 顶边"用**设备坐标**直接打出来，
+        //   避免 refY() 的分段反算把结论带偏（v2.02 实测过：日志报 1728~1772
+        //   而真实 frame 是 2597~2649，两者对不上，排查时会误判）。
+        // ⚠ v2.06：snapTopToLimit() 已**停用**。
+        //   它是"按真实顶边反推 lp.y"的自校正，在有记忆位置后只会和用户拖的位置打架
+        //   （实测：用户拖到 y=329，被 snap 改回 562 并写进了记忆 ⇒ 位置漂移 233px）。
+        //   现在位置权威 = 用户拖到哪就是哪（Prefs.overlayY），不再自动纠正。
+        if (tvLog != null) {
+            android.view.ViewGroup.LayoutParams tlp0 = tvLog.getLayoutParams();
+            AppLog.i("[ovl] tvLog 状态: vis=" + tvLog.getVisibility()
+                    + " w=" + tvLog.getWidth() + " h=" + tvLog.getHeight()
+                    + " lp=" + (tlp0 == null ? "null"
+                        : (tlp0.width + "x" + tlp0.height))
+                    + " barW=" + (bar != null ? bar.getWidth() : -1)
+                    + " idx=" + childIndexOf(bar, tvLog)
+                    + " n=" + (bar != null ? bar.getChildCount() : -1));
+        }
+        AppLog.i("[ovl] 几何：设备 顶=" + topPx + " 底=" + bottomPx
+                + " 高=" + bar.getHeight() + " lp.y=" + lp.y
+                + " 物理屏=" + sh + " 展开=" + expanded);
+        // 顶边越界的**唯一正确修法**：压内容高度（日志行），绝不平移整条。
+        // 底边钉 1816 是硬约束，一平移就漂（v2.02 连错三次都是因为这个）。
+        int overDev = RefMapper.devY(BOARD_Y1_REF) - topPx;
+        if (overDev > 0 && expanded && logMode && tvLog != null) {
+            int curH = tvLog.getHeight();
+            if (curH > 0) {
+                int newH = Math.max(RefMapper.devLen(20), curH - overDev);
+                if (newH < curH) {
+                    android.view.ViewGroup.LayoutParams vlp = tvLog.getLayoutParams();
+                    vlp.height = newH;
+                    tvLog.setLayoutParams(vlp);
+                    AppLog.i("[ovl] 顶边越界 " + overDev + "px => 压日志行 "
+                            + curH + "->" + newH + "（不动整条位置）");
                 }
-                // ⚠ **不能 return**：下面那段才是发"涂平矩形"的地方，直接走会把 BLANK_RECT
-                //   停在旧几何（收起 209x56）⇒ 悬浮条右半边和下沿漏进截图被识别
-                //   （2026-09-29 实测：自愈后 blankRect=[20,1722][229,1778]，而条子实际 960x84）
             }
         }
+        if (topPx < RefMapper.devY(BOARD_Y1_REF)) {
+            AppLog.i("[ovl] ⚠ 顶边(参考 " + Math.round(RefMapper.refY(topPx))
+                    + ") 越过棋盘下沿 " + BOARD_Y1_REF + " 共 "
+                    + Math.round(BOARD_Y1_REF - RefMapper.refY(topPx))
+                    + "px ⇒ 条子太高，请压 addBtnRow 的高度，不要平移整条");
+        }
+        // ⭐⭐ 涂平矩形 & 几何自检**一律以 getLocationOnScreen 为准**。
+        //   v2.02 教训：自己按 lp.y 推算，连基准（物理屏 vs 可用区）都会搞错，
+        //   而错了的后果是"抹掉棋盘一行格子"——用户只看到点不动，根本查不到这儿。
         int l = Math.max(0, lp.x);
         int r = Math.min(sw, lp.x + bar.getWidth());
-        // ⚠ Gravity.BOTTOM ⇒ lp.y 是「离**真实屏幕**底边的距离」（真机实测 2772−120=2652 = 条子底边）
-        int b = Math.min(sh, sh - lp.y);
+        int b = Math.min(sh, usableH - lp.y);          // 先用公式兜底
         int t = Math.max(0, b - bar.getHeight());
         // ⭐ 再加一道**实测复核**（2026-09-30）：窗口坐标万一和"我算的"不一致（改 gravity / 加 flag /
         //   系统改导航栏策略都可能），涂平就会静默偏 —— 而它偏的后果是「抹掉棋盘一行格子」，
@@ -800,7 +1100,8 @@ public class OverlayService extends Service {
         //   那 3px 是最后一行的描边，格子中心/模板都不在那儿）。以前这里每展开一次就刷一条
         //   「会盖住最低一行格子」的红色警告 ⇒ 真出事时反而没人当回事（狼来了）。
         //   ⇒ 只有**真的**越过 10px（说明预算被改坏了）才报。
-        if (topRef < BOARD_Y1_REF - 10) {
+        // ⚠ 阈值收到 4px：预算只余 4（1726-1722），超过就该响 —— 旧值 10 会放过 5~9px 的越界
+        if (topRef < BOARD_Y1_REF - 4) {
             AppLog.i("⚠⚠ 悬浮条顶边 参考 y=" + Math.round(topRef) + " 越过了棋盘下沿 "
                     + BOARD_Y1_REF + " 足 " + Math.round(BOARD_Y1_REF - topRef)
                     + "px ⇒ 会盖住最低一行格子（识别错 + 那几格点不动）！"
@@ -840,6 +1141,448 @@ public class OverlayService extends Service {
     }
 
     /** 按「运行状态 + 手动覆盖」决定这一排显示什么 */
+    /**
+     * 长按气泡弹出的**低频操作菜单**（精简后这些都不常驻）。
+     *
+     * <p>⚠ 用 {@link PopupWindow} 而不是 Dialog：本服务跑在悬浮窗里，
+     * Dialog 需要 Activity 上下文，会抛 BadTokenException。
+     * <p>⚠ 必须 setOutsideTouchable(true) + 可点背景在**菜单格子**上，
+     * 否则点了外面不消失、挡住游戏。
+     */
+    /**
+     * 按**当前实际高度**把条子底边钉回参考 y=BAR_BOTTOM_REF（1816）。
+     *
+     * <p>展开（89）与收起（56）高度不同，而 {@code lp.y}（Gravity.BOTTOM 下 = 离屏幕底）
+     * 必须跟着变；只靠 afterLayout 的自愈会让顶边先越界一帧 ——
+     * 那一帧恰好把棋盘最低一行抹平（真机 v2.02 实测抓到）。
+     */
+    /**
+     * 系统导航栏 / 手势条高度（px）。
+     *
+     * <p>⚠ 悬浮窗用 {@code Gravity.BOTTOM} 时，{@code lp.y} 的距离基准是**屏幕物理底边**，
+     * 而手势条就压在那一段上 ⇒ 不主动让开就会被盖住（真机 v2.02 实测：
+     * 最后一行日志被裁掉一半）。这里读真实 insets，拿不到用 48dp 兜底。
+     */
+    private int navBarHeight() {
+        try {
+            int[] rs = realScreen();
+            int bottom = 0;
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowManager w = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                if (w != null) {
+                    android.view.WindowInsets ins = w.getCurrentWindowMetrics().getWindowInsets();
+                    android.graphics.Insets bar = ins.getInsets(
+                            android.view.WindowInsets.Type.navigationBars());
+                    bottom = bar.bottom;
+                }
+            }
+            if (bottom <= 0) {
+                // 兜底：真实屏高与"可用内容高"的差（老 ROM 没有 getCurrentWindowMetrics 时的近似）
+                int dmH = getResources().getDisplayMetrics().heightPixels;
+                bottom = Math.max(0, rs[1] - dmH);
+            }
+            if (bottom <= 0) {
+                bottom = dp(48);
+            }
+            return bottom;
+        } catch (Throwable t) {
+            return dp(48);
+        }
+    }
+
+    /**
+     * 缓存的手势条高度。**-1 = 还没算过**（绝不能把 0 当成"没有手势条"）。
+     *
+     * <p>v2.02 真机 bug（用户原话「启动后会自动往下位移」）：
+     * buildView 给 navInset 赋了值，但 settlePosition 可能在赋值前后各跑一次，
+     * 初始值 0 时 usable 会算成物理屏 2772（当成没手势条）
+     * 导致 lp.y 从正确的 71 漂到 129，条子整体下移 58px。
+     *
+     * <p>修改方法：统一走 nav() 取值，没算过就现算，任何调用点都拿不到 0。
+     */
+    private int navInset = -1;
+    /** 校准迭代计数（每次布局回调走一步，最多 6 步） */
+    private int settleTries = 0;
+    /** settlePosition 的一次性重试标记（展开瞬间高度可能还是旧值） */
+    private boolean settleRetried = false;
+    /** 「进图后自动对齐棋盘底边」是否已执行过（每次拉起悬浮条只做一次） */
+    private boolean autoAlignedOnce = false;
+
+    private int nav() {
+        if (navInset < 0) {
+            navInset = navBarHeight();
+            AppLog.i("[ovl] 手势条高度 = " + navInset + "px");
+        }
+        return navInset;
+    }
+
+    /**
+     * 计算 {@code lp.y}（Gravity.BOTTOM ⇒ 离可用区底边的距离）。
+     *
+     * <p>两套锚点（用户 2026-10-19 明确）：
+     * <ul>
+     *   <li><b>收起态</b>：底边钉 参考 1816（沿用它一直以来的口径）</li>
+     *   <li><b>展开态（启动后）</b>：<b>顶边</b>紧贴限制线 参考 1722 —— 用户原话
+     *       「悬浮条启动位置就要紧贴限制线最上面」</li>
+     * </ul>
+     * <p>⚠ 两种模式都**不许越过 1722**，这是硬约束①（盖住棋盘 ⇒ 识别错 + 点不动）。
+     */
+    /**
+     * 主动测量条子高度（不依赖 {@code getHeight()} 的时序）。
+     *
+     * <p>⚠ {@code updateViewLayout} 之后布局还没跑完，{@code bar.getHeight()} 返回上一帧的值，
+     * 按旧高度算锚点会差一个"新高度 − 旧高度"。这里显式 measure 一次。
+     */
+    private int measureBarHeight() {
+        if (bar == null) {
+            return RefMapper.devLen(44);
+        }
+        int have = bar.getHeight();
+        try {
+            int wSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    Math.max(1, bar.getWidth()), android.view.View.MeasureSpec.EXACTLY);
+            int hSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    0, android.view.View.MeasureSpec.UNSPECIFIED);
+            bar.measure(wSpec, hSpec);
+            have = Math.max(have, bar.getMeasuredHeight());
+        } catch (Throwable ignored) {
+        }
+        return have > 0 ? have : RefMapper.devLen(44);
+    }
+
+    /**
+     * 悬浮条**顶边**应该落在的设备 y 坐标。
+     *
+     * <p>优先用实测棋盘底边（{@link BoardEdge}），失败退回常量换算。
+     * 这是"绝对目标"，与 lp.y 的基准无关。
+     */
+    private int targetTopY() {
+        int board = measuredBoardBottom();
+        if (board > 0) {
+            return board + 2;                 // 紧贴棋盘方块底部
+        }
+        return RefMapper.devY(BOARD_Y1_REF); // 兜底（历史常量）
+    }
+
+    /** 缓存的实测棋盘底边（-1 = 还没测过 / 测不到） */
+    private int boardBottomCache = -1;
+    /** 上次测量的时间 */
+    private long boardBottomAt = 0L;
+
+    /**
+     * 实测棋盘底边（设备像素）。带 8 秒缓存 —— 全屏扫描是 O(w×h)，不能每个 tick 都跑。
+     */
+    private int measuredBoardBottom() {
+        long now = System.currentTimeMillis();
+        if (boardBottomCache > 0 && now - boardBottomAt < 2000L) {
+            return boardBottomCache;
+        }
+        boardBottomAt = now;
+        try {
+            android.graphics.Bitmap f = FrameStore.get();
+            if (f == null) {
+                return boardBottomCache;      // 没有帧 ⇒ 沿用上次结果
+            }
+            int y = BoardEdge.detectBottom(f);
+            if (y > 0) {
+                if (y != boardBottomCache) {
+                    AppLog.i("[ovl] 实测棋盘底边 = " + y + "px"
+                            + "（常量 devY(1722)=" + RefMapper.devY(BOARD_Y1_REF) + "）");
+                }
+                boardBottomCache = y;
+                return y;
+            }
+        } catch (Throwable t) {
+            AppLog.i("[ovl] 棋盘底边检测失败：" + t);
+        }
+        return boardBottomCache;
+    }
+
+    /**
+     * 棋盘方块**真实底边**（设备像素）。
+     *
+     * <p>⚠⚠⚠ v2.31（用户 2026-10-26「上限定的太低了」「挡住棋盘看不到东西」）：
+     * 常量 {@code BOARD_Y1_REF=1722} 在这台机上换算成 **2537**，
+     * 而实测棋盘方块底边是 **2570** —— 常量比真实棋盘**还高 33px**，
+     * 于是既留了空隙、又允许盖住棋盘，两个毛病同时存在 ✗
+     *
+     * <p>取值优先级：
+     * <ol>
+     *   <li>{@link BoardEdge} 实测（有截图帧时最准）</li>
+     *   <li>实测比例兜底 {@link #BOARD_BOTTOM_RATIO}（无帧时也不会错太多）</li>
+     * </ol>
+     */
+    private int boardBottomY() {
+        // ⭐⭐⭐ v2.33【用户 2026-10-26 核对标注图后确认】：
+        //   「棋盘底边位置对的啊，为什么悬浮窗顶边不棋盘底边对齐？」
+        //
+        //   实测（1280×2772 探索地图，网格线检测验证）：
+        //     棋盘 5 行的 6 条横线 = 1683 / 1854 / 2025 / 2195 / 2366 / **2537**
+        //     间距 171 完全均匀 ⇒ **棋盘底边 = 2537**
+        //   而 devY(1722) 恰好 = 2537 ✓ 常量是对的，别再用 0.9289 那个错比例。
+        //
+        //   ⇒ 顶边对齐棋盘底边 2537。
+        //   ⭐ v2.34：**优先用 BoardEdge 实测**（进图第一张后自动对齐），
+        //      拿不到帧才退回 devY(1722) 常量。
+        int measured = measuredBoardBottom();
+        if (measured > 0) {
+            return measured;
+        }
+        return RefMapper.devY(BOARD_Y1_REF);
+    }
+
+    private int anchorY(int usableH) {
+        // v2.36 用户决定 2026-10-26：「记忆位置也没用了吧」
+        //   ⇒ 对，有自动对齐后**记忆位置失效**（每次进图都会被拉回棋盘底边）。
+        //   ⇒ 删掉记忆分支，永远顶边锚定棋盘底边：
+        //      顶边 = boardBottomY()（BoardEdge 实测 / devY(1722) 兜底）
+        //      展开时高度往下长，顶边不动 ✓
+        int h = measureBarHeight();
+        int topY = boardBottomY();
+        return Math.max(0, usableH - (topY + h));
+    }
+
+    /** View 在父容器里的下标（-1 = 不在） */
+    private int childIndexOf(android.view.ViewGroup g, android.view.View v) {
+        if (g == null || v == null) {
+            return -1;
+        }
+        for (int i = 0; i < g.getChildCount(); i++) {
+            if (g.getChildAt(i) == v) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void settlePosition() {
+        if (bar == null || lp == null) {
+            return;
+        }
+        // ⭐ v2.13：**撤掉闭环校准**（用户 2026-10-26 定案方案 A）。
+        //   校准会自我振荡：lp.y 一变 → 窗口 parent 高度在 2720/2772 间切换
+        //   → 读到的真实坐标跟着跳 → 又改 lp.y …… 日志实证在 2499/2575 之间反复横跳 ✗
+        //   ⇒ 回到最朴素的做法：按固定锚点摆一次就完事，不再追问真实坐标。
+        int[] rs = realScreen();
+        int sh = rs[1];
+        int offY = anchorY(sh - nav());
+        if (lp.y != offY) {
+            lp.y = offY;
+            try {
+                wm.updateViewLayout(bar, lp);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void showMoreMenu() {
+        try {
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            GradientDrawable g = new GradientDrawable();
+            g.setColor(BAR_BG);
+            g.setCornerRadius(dp(14));
+            g.setStroke(dp(1), BAR_LINE);
+            box.setBackground(g);
+            box.setPadding(dp(6), dp(6), dp(6), dp(6));
+
+            box.addView(menuItem("张数：" + MAP_LABELS[choiceIdx], () -> {
+                choiceIdx = (choiceIdx + 1) % MAP_LABELS.length;
+                Prefs.setMapsChoice(this, choiceIdx);
+                AppLog.i("[ovl] 张数 ⇒ " + MAP_LABELS[choiceIdx]);
+                if (btnCount != null) {
+                    btnCount.setText(MAP_LABELS[choiceIdx]);
+                }
+            }));
+            String logLabel = (logForce == null) ? "日志行：自动"
+                    : (logForce ? "日志行：强制开" : "日志行：强制关");
+            box.addView(menuItem(logLabel, () -> {
+                logForce = (logForce == null) ? Boolean.TRUE
+                        : (logForce ? Boolean.FALSE : null);
+                AppLog.i("[ovl] 日志行 " + (logForce == null ? "恢复自动"
+                        : (logForce ? "强制显示" : "强制隐藏")));
+                applyMode();
+            }));
+            box.addView(menuItem("重新对齐棋盘底边", () -> {
+                // v2.36：记忆已废弃 ⇒ 这个菜单项改成"立刻强制对齐一次"
+                boardBottomCache = -1;          // 清缓存，强制重新检测
+                boardBottomAt = 0L;
+                autoAlignedOnce = false;
+                settlePosition();
+                AppLog.i("[ovl] 手动重新对齐 ⇒ 棋盘底边=" + boardBottomY());
+            }));
+            box.addView(menuItem("反馈（打包日志）", () -> {
+                AppLog.i("[ovl] 反馈 ⇒ 打包日志 + 机型信息 + 现场帧");
+                final Context cc = getApplicationContext();
+                new Thread(() -> {
+                    try {
+                        Feedback.collectAndShare(cc);
+                    } catch (Throwable t) {
+                        AppLog.i("[ovl] 反馈异常：" + t);
+                    }
+                }, "ovl-feedback").start();
+            }));
+            box.addView(menuItem("收起", () -> setExpanded(false)));
+
+            final android.widget.PopupWindow pw = new android.widget.PopupWindow(box,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT, true);
+            pw.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x00000000));
+            pw.setOutsideTouchable(true);
+            pw.setClippingEnabled(true);
+            // 菜单挂在气泡**上方**（条子在屏幕底部，往下弹会被切掉）
+            MENU_REF = pw;
+            pw.showAsDropDown(bubble, 0, -bubble.getHeight() - dp(190));
+            AppLog.i("[ovl] 长按 ⇒ 展开更多菜单");
+        } catch (Throwable t) {
+            AppLog.i("[ovl] 菜单弹出失败：" + t);
+        }
+    }
+
+    /** 菜单里的一行（高 40dp）；点击后由调用方关闭菜单 */
+    private TextView menuItem(String label, Runnable action) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextColor(TXT_CHIP);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_PX, RefMapper.devLen(30));
+        t.setIncludeFontPadding(false);
+        t.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        t.setPadding(dp(16), 0, dp(20), 0);
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(0x00000000);
+        g.setCornerRadius(dp(10));
+        t.setBackground(g);
+        t.setMinimumHeight(dp(40));
+        t.setOnClickListener(v -> {
+            try {
+                action.run();
+            } finally {
+                android.widget.PopupWindow pw = MENU_REF;
+                if (pw != null) {
+                    pw.dismiss();
+                    MENU_REF = null;
+                }
+                keepAlive();
+            }
+        });
+        return t;
+    }
+
+    /** 当前打开的菜单（点了任意一项后关闭；静态引用避免层层传参） */
+    private static android.widget.PopupWindow MENU_REF;
+
+    /**
+     * 按当前状态重设按钮行高度。
+     *
+     * <p>展开 + 有日志行 ⇒ 56（日志 34 + 按钮 56 = 90 预算）
+     * <p>其余（收起 / 空闲不露日志）⇒ 44（只剩一枚胶囊的高度）
+     *
+     * <p>⚠ 高度必须**显式给**：靠 chip 的 padding 隐式撑会随样式漂移，
+     * v2.02 首装就因此把条子撑到 97、顶边越过棋盘 124px。
+     */
+    private void addBtnRow() {
+        if (bar == null || btnRow == null) {
+            return;
+        }
+        try {
+            bar.removeView(btnRow);
+        } catch (Throwable ignored) {
+        }
+        // ⚠⚠⚠ v2.28 找到「行与行重叠」的根因：
+        //   日志行高 = LOG_ROW_H_REF(44) 参考 px，按钮行高 = 56 参考 px，
+        //   两者相加 100 参考 px；而 bar 的**实测高度只有 90 设备 px**（≈76 参考）。
+        //   ⇒ 内容比窗口高 ⇒ LinearLayout 把两行压扁、互相重叠 ✗
+        //   修：bar 的高度必须显式包含两行之和（日志行 + 按钮行），别只给按钮行。
+        int btnH = (expanded && logMode) ? 56 : (expanded ? 50 : 44);
+        int logH = (expanded && logMode) ? LOG_ROW_H_REF : 0;
+        boolean wide = expanded;
+        int w = wide
+                ? Math.max(1, realScreen()[0] - RefMapper.devX(40))
+                : LinearLayout.LayoutParams.WRAP_CONTENT;
+
+        // ⭐ 关键：**父级 bar 也要有确定宽度**，否则里面 MATCH_PARENT 的日志行无解（=0 宽）。
+        bar.setPadding(RefMapper.devLen(10), 0, RefMapper.devLen(10), 0);
+        LinearLayout.LayoutParams blp = wide
+                ? new LinearLayout.LayoutParams(w, LinearLayout.LayoutParams.WRAP_CONTENT)
+                : new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        bar.setLayoutParams(blp);
+
+        // ⭐ v2.41 按钮行插到**第 0 行**（上方），日志行在下面
+        bar.addView(btnRow, new LinearLayout.LayoutParams(
+                wide ? LinearLayout.LayoutParams.MATCH_PARENT : w, RefMapper.devLen(btnH)));
+        try {
+            bar.removeView(btnRow);
+            bar.addView(btnRow, 0, new LinearLayout.LayoutParams(
+                    wide ? LinearLayout.LayoutParams.MATCH_PARENT : w, RefMapper.devLen(btnH)));
+        } catch (Throwable ignored) {
+        }
+
+        // ⭐ 关键：**bar 高度 = 日志行 + 按钮行**（展开态两行都要算进去）
+        if (wide) {
+            blp.height = RefMapper.devLen(logH + btnH);
+            bar.setLayoutParams(blp);
+        }
+
+        // ⚠⚠⚠ v2.43 真机 bug（用户 2026-10-26「又完全不显示日志了」）：
+        //   窗口宽已修到 1233，但 tvLog.getWidth() 仍是 **0** ✗
+        //   —— MATCH_PARENT 在这个「先加日志、后插按钮到第0行」的顺序下没被解析。
+        //   ⇒ 直接给 tvLog 一个**明确宽度**（等于 bar 内容宽），不依赖 MATCH_PARENT。
+        if (tvLog != null) {
+            LinearLayout.LayoutParams tlp = (LinearLayout.LayoutParams) tvLog.getLayoutParams();
+            if (tlp == null) {
+                tlp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, RefMapper.devLen(LOG_ROW_H_REF));
+            }
+            if (wide) {
+                tlp.width = Math.max(1, w - RefMapper.devLen(20));   // 扣 bar 的左右 padding
+                tlp.height = RefMapper.devLen(LOG_ROW_H_REF);
+            }
+            tvLog.setLayoutParams(tlp);
+        }
+
+        // ⚠⚠⚠ v2.39 修崩溃（NPE，AndroidRuntime FATAL）：
+        //   v2.37 在这里直接读 `lp.height`，但 addBtnRow() 在 **buildView 阶段**
+        //   （bar 还没 addView）就被调用 ⇒ 那时 bar.getLayoutParams() 是 null
+        //   ⇒ `line 1491: Attempt to read from field LayoutParams.height on a null object`
+        //   ⇒ **整个 OverlayService 起不来**（悬浮条彻底消失）✗✗
+        //
+        //   修：① lp 可能为 null ⇒ 判空；② bar 还没布局完 ⇒ 只设 View 的 LayoutParams，
+        //       窗口高度留给 afterLayout（那时 lp 一定在）。
+        // v2.42 真机 bug（用户 2026-10-26「又完全不显示日志了」）：
+        //   诊断实证：宽=0 视口=1234 原文px=642 字=23/23
+        //   —— 文字有（642px/23 字），但 tvLog.getWidth()=0 => 画不出来。
+        //   根因：窗口 lp.width 从没设过（一直 WRAP_CONTENT），
+        //         按钮行插到第 0 行后窗口宽度由按钮行决定（实测 351px），
+        //         日志行 MATCH_PARENT 拿不到确定宽度 => 塌成 0。
+        //   修：同时把窗口 lp.width 设成确定值（与 bar 同宽）。
+        try {
+            if (lp != null && bar.getParent() != null) {
+                int wantH = RefMapper.devLen(logH + btnH);
+                // ⚠⚠ v2.47 真机 bug（用户 2026-10-26「收起后多余的条没隐藏」）：
+                //   旧写法只在 wide 时设 lp.width = 1233，**收起时没恢复**
+                //   ⇒ 窗口宽度一直 1233，收起后仍留一条横幅 ✗
+                //   ⇒ 收起必须把 lp.width / lp.height 都恢复成 WRAP_CONTENT。
+                int wantW2 = wide ? w : LinearLayout.LayoutParams.WRAP_CONTENT;
+                int wantH2 = wide ? wantH : LinearLayout.LayoutParams.WRAP_CONTENT;
+                boolean changed = false;
+                if (lp.height != wantH2) {
+                    lp.height = wantH2;
+                    changed = true;
+                }
+                if (lp.width != wantW2) {
+                    lp.width = wantW2;
+                    changed = true;
+                }
+                if (changed) {
+                    wm.updateViewLayout(bar, lp);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void applyMode() {
         if (bar == null) {
             return;
@@ -855,25 +1598,63 @@ public class OverlayService extends Service {
         // ⚠ 判据必须是 isRunningState() 而不是「wantLog」：跑起来才把 ▶ 收掉（跑着也不能重复启动）。
         // ⚠ 「准备启动」提醒挂起时（hintUntilStart）**强制**露日志行 —— 那句提醒就是「点 ▶ 启动」，
         //   要是被收起态/强制隐藏吃掉，用户就找不到下一步了。
-        boolean showLog = hintUntilStart || ((logForce != null) ? logForce : expanded);
+        // ⚠ 用户口径（2026-10-19）：「悬浮窗太窄了，看不到完整文字了，日志也看不到」
+        //   ⇒ **展开态 = 全宽 + 日志行常驻**（上一轮为了"简洁"把它藏了，结果看不到日志 ✗）
+        //   简洁要做在**按钮数量**上（6 个 → 1 个主按钮 + 1 个胶囊），不是砍掉日志行。
+        boolean showLog = hintUntilStart
+                || ((logForce != null) ? logForce : expanded);
         logMode = showLog;
         int vis = expanded ? View.VISIBLE : View.GONE;
         // 上行：日志行（展开时默认露脸；收起态只留气泡，条子最矮）
         tvLog.setVisibility(showLog ? View.VISIBLE : View.GONE);
-        // 下行：张数/▶ 空闲就有；跑起来让位给 ■/✕
-        int startVis = (expanded && !isRunningState()) ? View.VISIBLE : View.GONE;
-        btnCount.setVisibility(startVis);
-        btnStart.setVisibility(startVis);
-        btnStop.setVisibility(vis);
-        btnClose.setVisibility(vis);
+        // ⭐ 收起态：气泡退化成**一颗纯色小圆点**（无文字、无背景框）。
+        //   ⚠ 用户口径（2026-10-19）：「收起后 MGAS 文字显示不全」「收起后不要有黑框」
+        //   ⇒ 收起时根本不该有文字：一颗 18dp 的圆点 + 状态色，
+        //     点它展开、拖它移动 —— 功能一点没少，视觉噪音归零。
+        // ⚠ 收起/展开都显示 "MGAS" 胶囊 —— 收起态也是它，只是不带按钮
+        bubble.setText(bubbleOriginText);
+        bubble.setPadding(RefMapper.devLen(11), 0, RefMapper.devLen(13), 0);
+        bubble.setBackground(UiKitPill());
+        bubble.setCompoundDrawablesWithIntrinsicBounds(
+                dotDrawable(RefMapper.devLen(7)), null, null, null);
+        bubble.setCompoundDrawablePadding(RefMapper.devLen(6));
+        // ⭐ 精简版：下行只有【状态胶囊 + 一个主按钮】
+        //   待机 ⇒ 启动（青蓝渐变）；跑起来 ⇒ 停止（红）
+        //   张数/反馈/✕ 都收进长按菜单，不再常驻
+        boolean idle = !isRunningState();
+        btnStart.setVisibility(expanded && idle ? View.VISIBLE : View.GONE);
+        btnStop.setVisibility(expanded && !idle ? View.VISIBLE : View.GONE);
+        btnCount.setVisibility(View.GONE);
+        btnClose.setVisibility(View.GONE);
         // ⭐⭐ 2026-10-04 用户口径：「悬浮窗的反馈按钮只有展开的时候才能看到，和启动停止那些类似，
         //   **不要关闭了也能看到**」⇒ 反馈与 ■/✕ **同类**：只在展开态露出。
         //   ⚠ 原来 `btnFb` 建好之后**从没调过 setVisibility** ⇒ 收起态也一直露着（用户看到的 bug）✗
-        btnFb.setVisibility(vis);
-        if (!showLog && expanded) {
+        btnFb.setVisibility(View.GONE);
+        if (!showLog) {
+            // ⚠⚠ v2.12：收起时**彻底停掉跑马灯并清空绘制内容**。
+            //   旧版只 setVisibility(GONE)，但 MarqueeView 自己的 postDelayed(step)
+            //   还在跑（它只判 isShown()，而窗口缩小那一刻 isShown 仍为 true）
+            //   ⇒ 最后一帧的文字被画进窗口缓冲、随窗口缩小时**留在屏幕上**——
+            //     用户看到的就是「收起后还有日志文字残留」✗
+            tvLog.stopAndClear();
+        } else if (expanded && !logMode) {
             tvLog.showActionOnly();
         }
+        if (btnClose != null) {
+            // 展开时 ✕ = 收起按钮；日志行隐藏时它同时兼任"显示日志"
+            btnClose.setText(expanded ? "✕" : "✕");
+        }
+        applyBarBg();
+        addBtnRow();
+        // v2.40 补：applyLogText() 是唯一往 tvLog 写文字的入口，
+        //   但它不在 applyMode 的调用链里，只在 onLog/paint 等事件时叫。
+        //   结果：展开时日志行可见、有高度、但 text 为空 => 什么都看不见。
+        //   诊断日志实证 原文px=0。这里补一次。
+        if (showLog) {
+            applyLogText();
+        }
         bar.post(this::afterLayout);
+        bar.post(this::settlePosition);
     }
 
     private void setExpanded(boolean ex) {
@@ -886,8 +1667,28 @@ public class OverlayService extends Service {
         expanded = ex;
         if (!ex) {
             ui.removeCallbacks(collapseIdle);
+            // ⚠⚠⚠ v2.14 真机 bug（用户 2026-10-26「收起还是有日志的字」）：
+            //   showLog = hintUntilStart || (logForce ?? expanded)
+            //   而「准备启动」的提示会把 hintUntilStart 置 true ⇒ **收起也被强制露出日志行**
+            //   ⇒ 屏幕上留着一截「已就…」的字 ✗
+            //   用户口径：**主动收起就是彻底收起**，提示语不该把条子撑开。
+            //   ⇒ 收起时一并撤掉提示（下次展开/启动会重新给）。
+            hintUntilStart = false;
+            hintText = null;
         }
+        // ⚠⚠⚠ 顺序很关键（v2.02 实测「启动后往下位移」就是这个）：
+        //   settlePosition() 要按**新的高度**算锚点，而新高度要等 applyMode() 改完
+        //   布局之后才有 ⇒ 必须 **先 applyMode，再在布局回调里 settlePosition**。
+        //   旧顺序（先 settle）拿到的是收起态的高度，算出来永远差一截。
         applyMode();
+        if (bar != null) {
+            // 双保险：立刻定一次（用旧高度也能先摆对）＋ 布局完成后再定一次（用真高度）
+            settlePosition();
+            bar.post(() -> {
+                settlePosition();
+                bar.post(this::settlePosition);
+            });
+        }
         if (ex) {
             AppLog.i("[ovl] 展开（两行：上行=当前行动，下行=按钮）");
             keepAlive();
@@ -1011,9 +1812,15 @@ public class OverlayService extends Service {
         //   立刻看到"跑起来的样子"（条子展开 + 切日志行 + 状态灯），失败原因写在日志行里。
         //   否则点了 ▶ 条子没反应 ⇒ 用户以为按钮坏了（2026-09-29 用户原话：
         //   "运行后图标变绿也要能看到，现在直接收起看不到了"）。
-        setExpanded(true);
+        // ⚠⚠⚠ v2.29 修「启动后日志行变小/被遮挡」：
+        //   旧顺序是 setExpanded(true) → logForce=null → applyMode()。
+        //   但 setExpanded 内部**已经调过一次 applyMode()**，那时 logForce 还是旧值
+        //   （可能是 FALSE）⇒ showLog=false ⇒ logMode=false ⇒ addBtnRow 按"无日志行"算高度
+        //   （logH=0）⇒ bar 只给按钮行高度 ⇒ **日志行被压成 0 高/重叠** ✗
+        //   ⇒ 必须**先清 logForce，再 setExpanded**，让那次 applyMode 就算对。
         logForce = null;                 // 交回自动：运行中必然显示日志
-        applyMode();
+        setExpanded(true);
+        applyMode();                     // 已展开时 setExpanded 会 early-return，这里补一次
         keepAlive();
         if (!FrameStore.has()) {
             AppLog.i("还没有截图权限 ⇒ 拉起授权界面，授完再点 ▶");
@@ -1044,6 +1851,14 @@ public class OverlayService extends Service {
         final int maps = (choiceIdx == 1) ? MAPS_CONTINUOUS : 1;
         final int bagEvery = Prefs.bagEvery(this);
         final boolean autoSupply = Prefs.autoSupply(this);
+        // ⭐ v1.78：收工日常五颗勾选（= PC 窗口上那一排，语义与默认值都对齐 ✓）
+        //   ⚠ 全部从 Prefs 读 ⇒ 界面上勾了这里就生效（不会「勾了没反应」✗）
+        final boolean guildTasks = Prefs.guildTasks(this);
+        final boolean guildAlchemy = Prefs.guildAlchemy(this);
+        final boolean guildIntel = Prefs.guildIntel(this);
+        final boolean recruitFree = Prefs.recruitFree(this);
+        final boolean adFree = Prefs.adFree(this);
+        final boolean dailyFirst = Prefs.dailyFirst(this);   // ⭐ v1.91 日常前置
         // ⭐⭐ 2026-10-01 修（用户报「体力不够 50 怎么还去点进入地图」）：
         //   **进图体力下限原来写死 25** ⇒ 连刷模式下也是 25 ⇒ 29 体力照样进图 ✗
         //   （真机实证：`进图前体力 29` → 进图扣 25；而日志还写着「连刷下限」✗）
@@ -1054,17 +1869,39 @@ public class OverlayService extends Service {
                 + "（maps=" + maps + "，进图 " + STAMINA_PER_MAP + " 体力/张，"
                 + "体力下限 " + minStamina + "）"
                 + "  自动补给=" + autoSupply + "  升星=每 " + bagEvery + " 张");
+        // ⭐ v1.78：把五颗勾选也打进启动日志 —— 以后一眼能看到「这次做不做日常」✓
+        AppLog.i("   收工日常：派遣=" + guildTasks + " 炼金=" + guildAlchemy
+                + " 情报=" + guildIntel + " 免费招募=" + recruitFree
+                + " 免广告=" + adFree + " 日常前置=" + dailyFirst);
         new Thread(() -> {
             // ⭐ v0.26（用户口径）：**悬浮条 ▶ 不再自动切游戏前台**。
             //   正常流程 = 在 MGAS 点「▶ 准备启动」（那里负责切游戏 + 提醒）→ 人在游戏选图
             //   界面 → 点悬浮条 ▶ 开跑；此时再切一次纯属多余。
             //   若人不在游戏（比如停在 MGAS 界面）⇒ Python `self_ui_hits()` 防护会判出
             //   "画面是 MGAS 自己" 并明确报错（不会乱点）⇒ 切回游戏再点 ▶ 即可。
-            // ⚠ 参数顺序必须与 explore_android.start 的形参一致（**10 个位置参数**）：
+            // ⚠ 参数顺序必须与 explore_android.start 的形参一致（**15 个位置参数**）：
             //   maps, max_round, deadline, min_stamina, tag, opt_solver,
-            //   bag_every, save_first, stop_at_5am, auto_supply
+            //   bag_every, save_first, stop_at_5am, auto_supply,
+            //   guild_tasks, guild_alchemy, guild_intel, recruit_free, ad_free
+            //   ⚠ **只能往后追加**（中间插一个会让所有老调用点静默错位 ✗ ——
+            //     本项目历史上踩过一次：`start(**kw)` 收不到位置参数）
+            // ⚠ v1.91 追加第 16 个位置参数 `dailyFirst`（**只能往后追加**）
+            // ⭐⭐⭐ v2.26 用户反馈（2026-10-26）：「怎么启动不会自动回到游戏了？」
+            //   根因：onStart() 只在**权限缺失**时 startActivity 跳设置页，
+            //   正常启动路径**从来没调用过 bringGameFront()** ✗
+            //   ⇒ 点完 ▶ 人还停在 MGAS 界面，脚本却在对着 App 截图（会把
+            //     「开始冒险/进入地图」这些文字当成游戏面板去点）。
+            //   ⇒ 真启动前**先切回游戏**，与 MainActivity.pyExploreStart 同一口径 ✓
+            String front = bringGameFront();
+            AppLog.i("[ovl] 启动前切游戏：" + front);
+            try {
+                Thread.sleep(600);          // 给系统一点时间把游戏拉到前台
+            } catch (InterruptedException ignored) {
+            }
             String r = PyBridge.call("start", maps, 45, 900, minStamina, "", true,
-                    bagEvery, true, false, autoSupply);
+                    bagEvery, true, false, autoSupply,
+                    guildTasks, guildAlchemy, guildIntel, recruitFree, adFree,
+                    dailyFirst);
             AppLog.i("▶ " + r);
         }, "ovl-start").start();
     }
@@ -1074,6 +1911,8 @@ public class OverlayService extends Service {
      * ⚠ `Gravity.BOTTOM` ⇒ `lp.y` 是**离屏幕底的距离**：手指往下 `dy>0` ⇒ y **变小**。
      */
     private void installDrag(View handle) {
+        final android.os.Handler handleH = new android.os.Handler(getMainLooper());
+        final View handleView = handle;
         handle.setOnTouchListener(new View.OnTouchListener() {
             private int downX, downY;
             private float rawX, rawY;
@@ -1088,7 +1927,15 @@ public class OverlayService extends Service {
                         rawX = e.getRawX();
                         rawY = e.getRawY();
                         moved = false;
-                        return false;       // 交回 click（可点视图自己会吃掉 DOWN ⇒ 后续 MOVE 照样送到这）
+                        // ⚠⚠ 必须**吃掉 DOWN**（return true）。
+                        //   旧写法 return false 把事件交回 View ⇒ View 自己的长按检测接管
+                        //   ⇒ 想拖动时稍慢一点就弹「更多菜单」（真机实测：一次 swipe 直接弹菜单，
+                        //     条子没动）✗
+                        //   ⇒ 改成自己管：DOWN 吃掉 → MOVE 拖 → UP 未移动则当点击 →
+                        //     长按用 postDelayed 自己实现（500ms 未移动才弹菜单）。
+                        handleView.postDelayed(longPress, android.view.ViewConfiguration
+                                .getLongPressTimeout());
+                        return true;
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - rawX);
                         int dy = (int) (e.getRawY() - rawY);
@@ -1096,16 +1943,29 @@ public class OverlayService extends Service {
                             moved = true;
                         }
                         if (moved) {
-                            int sw = RefMapper.screenW(), sh = RefMapper.screenH();
+                            int sw = RefMapper.screenW();
+                            // ⚠⚠⚠ 基准必须是**可用区高**（物理屏 − 手势条），不是物理屏！
+                            //   Gravity.BOTTOM 下 lp.y 是"离窗口可用区底边"的距离，
+                            //   本机实测 parent 高 2720（物理 2772 − 手势条 52）。
+                            //   v2.05 这里用了 RefMapper.screenH()=2772 ⇒ 上限多给 52px
+                            //   ⇒ **能把它往上托 52px、越过限制线盖住棋盘**（用户原话
+                            //   「我开启悬浮条后，还能往上托悬浮条」就是这个）。
+                            int sh = Math.max(1, RefMapper.screenH() - nav());
                             int bw = Math.max(barMaxW, bar != null ? bar.getWidth() : 0);
                             if (bw <= 0) {
                                 bw = dp(64);
                             }
-                            // ⚠ 竖直用**见过的高度的最大值**（不是当前高度）：收起态 56 时若按 56 夹，
-                            //   一展开成 84 顶边就掉到 1694（afterLayout 里还有一道自愈兜底）
-                            int bh = Math.max(barMaxH, bar != null ? bar.getHeight() : 0);
+                            // ⚠ 竖直夹取用**当前高度**（不是"见过的最大高度"）。
+                            //   旧写法用 barMaxH 是怕"收起时按 56 夹、一展开顶边就掉"，
+                            //   但现在展开有 settlePosition 重新锚顶（见 anchorY），那个担心已不成立；
+                            //   反过来用 barMaxH 会让收起态一拖动就往下跳（bh=106 却只有 52 高）。
+                            // ⚠⚠ 这里**必须用设备像素**，不能用 dp()！
+                            //   本机 520dpi ⇒ dp(44) = 143px，比条子本身（52px）还大 3 倍
+                            //   ⇒ safeBottom 被压成 40 ⇒ 一拖动就把条子往下挤 91px（实测）✗
+                            int bh = (bar != null && bar.getHeight() > 0)
+                                    ? bar.getHeight() : RefMapper.devLen(44);
                             if (bh <= 0) {
-                                bh = dp(64);
+                                bh = RefMapper.devLen(44);
                             }
                             lp.x = Math.max(0, Math.min(Math.max(0, sw - bw), downX + dx));
                             // ⭐⭐ 竖直方向**夹住**：顶边绝不允许高过棋盘下沿（BOARD_Y1_REF）
@@ -1113,7 +1973,20 @@ public class OverlayService extends Service {
                             //   也点不动（2026-09-29 实测被拖到参考 y 422~499，整段画面被抹掉）。
                             //   水平方向不限制（在底部那条空档里左右挪是安全的）。
                             //   `Gravity.BOTTOM` ⇒ lp.y 是"离底距离"：top = sh − lp.y − bh ≥ devY(1722)
-                            int safeBottom = Math.max(0, sh - bh - RefMapper.devY(BOARD_Y1_REF));
+                            // ⭐ 恢复硬约束①：顶边**不许高过** devY(1722)（棋盘下沿）。
+                            //   v2.07 回退——上一版放开后条子能被推到棋盘上，
+                            //   涂平会把那几格抹成纯色 ⇒ 既识别不到也点不动。
+                            // ⭐⭐⭐ v2.30【用户口径 2026-10-26】：「悬浮窗还是不能乱动啊，
+                            //   挡住棋盘就看不到很多东西了」
+                            //   ⇒ **恢复硬约束**：顶边不许高过棋盘下沿 devY(1722)。
+                            //
+                            //   为什么必须限：涂平会把悬浮条那块**抹成纯色**（见 FrameStore.maskOverlay），
+                            //   盖住棋盘 ⇒ 那几格既识别不到、也点不动。
+                            //   用户能在底部空白区自由左右/上下微调，但不能上到棋盘里 ✓
+                            // 上限 = 实测棋盘底边（再往上就盖住棋盘了）
+                            // v2.36：**放开上限**（有自动对齐兜底，不必靠限制防永久遮挡）
+                            //   只夹屏幕边界，别拖出屏幕外找不回来。
+                            int safeBottom = Math.max(0, sh - bh - dp(2));
                             lp.y = Math.max(0, Math.min(safeBottom, downY - dy));
                             try {
                                 wm.updateViewLayout(bar, lp);
@@ -1123,10 +1996,37 @@ public class OverlayService extends Service {
                         }
                         return moved;
                     }
+                    case MotionEvent.ACTION_UP:
+                        handleView.removeCallbacks(longPress);
+                        if (moved) {
+                            // v2.36：只记 x（左边距有用），y 不再记忆
+                            //   —— 顶边由自动对齐说了算
+                            Prefs.setOverlayX(OverlayService.this, lp.x);
+                            AppLog.i("[ovl] 位置已移动 x=" + lp.x + " y=" + lp.y
+                                    + "（进图后会自动对齐棋盘底边）");
+                        }
+                        if (!moved) {
+                            // 没拖动 ⇒ 当点击（展开/收起）
+                            v.performClick();
+                        }
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        handleView.removeCallbacks(longPress);
+                        return true;
                     default:
                         return moved;
                 }
             }
+
+            /** 500ms 内没移动 ⇒ 长按：弹「更多菜单」 */
+            private final Runnable longPress = new Runnable() {
+                @Override
+                public void run() {
+                    if (!moved) {
+                        showMoreMenu();
+                    }
+                }
+            };
         });
     }
 
@@ -1150,6 +2050,51 @@ public class OverlayService extends Service {
      * ⚠ **只在状态真的变了才碰 View**：这个窗口会被一起截进去，若每 2.5 秒闪一次，
      *   循环里那些"等画面稳定"的调用可能会被自己干扰。
      */
+    /** 状态胶囊左侧那颗色点（用 compound drawable，纯代码画一个圆） */
+    /**
+     * 更新状态色点。
+     *
+     * <p>⚠ 收起态与展开态的**点大小不同**（18 vs 7 参考 px），
+     * 所以这里只改**颜色**，尺寸交给 applyMode 决定 —— 否则每次 tick 都会
+     * 把收起态的圆点缩回 7px（真机可复现的"点忽大忽小"）。
+     */
+    private void paintDot(int color) {
+        if (bubble == null) {
+            return;
+        }
+        stateColor = color;
+        int sizePx = RefMapper.devLen(expanded ? 7 : 18);
+        GradientDrawable dot = new GradientDrawable();
+        dot.setShape(GradientDrawable.OVAL);
+        dot.setColor(color);
+        dot.setSize(sizePx, sizePx);
+        bubble.setCompoundDrawablesWithIntrinsicBounds(dot, null, null, null);
+    }
+
+    /** 气泡的原始文案（展开态用；收起态不显示文字） */
+    private String bubbleOriginText = "MGAS";
+
+    /** 当前状态色（paint() 里更新，收起态圆点用它） */
+    private int stateColor = C_IDLE;
+
+    /** 一颗实心圆 drawable（状态点 / 收起态圆点共用） */
+    private GradientDrawable dotDrawable(int sizePx) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(stateColor);
+        d.setSize(sizePx, sizePx);
+        return d;
+    }
+
+    /** 展开态气泡的胶囊底 */
+    private GradientDrawable UiKitPill() {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(CHIP_BG);
+        g.setCornerRadius(RefMapper.devLen(20));
+        g.setStroke(dp(1), CHIP_LINE);
+        return g;
+    }
+
     private void paint(String status) {
         if (bubble == null) {
             return;
@@ -1176,20 +2121,23 @@ public class OverlayService extends Service {
         }
         lastState = st;
         int color;
+        // ⭐ 方案 A：状态**直接写在胶囊上**（不用回 App 才知道发生了什么）
         if ("run".equals(st)) {
-            color = 0xFF66FF88;
-            bubble.setText("▶ MGAS");          // 绿 = 跑起来了
+            color = C_RUN;
+            bubble.setText("MGAS");
         } else if ("lock".equals(st)) {
-            color = 0xFFFF4D4D;
-            bubble.setText("⛔ MGAS");        // 红 = 红装锁（去界面点「红装解锁」）
+            color = C_LOCK;
+            bubble.setText("MGAS");
         } else if ("err".equals(st)) {
-            color = 0xFFFF6B6B;
-            bubble.setText("! MGAS");          // 红 = 出错（去界面看日志）
+            color = C_LOCK;
+            bubble.setText("MGAS");
         } else {
-            color = 0xFFAAAAAA;
-            bubble.setText("● MGAS");          // 灰 = 空闲
+            color = C_IDLE;
+            bubble.setText("MGAS");
         }
         bubble.setTextColor(color);
+        stateColor = color;
+        paintDot(color);
         applyMode();                           // ⭐ 运行 ⇒ 自动把宽度让给日志行
     }
 
@@ -1370,10 +2318,47 @@ public class OverlayService extends Service {
             ViewGroup.LayoutParams p = getLayoutParams();
             boolean fill = p != null && p.width == LinearLayout.LayoutParams.MATCH_PARENT;
             int avail = MeasureSpec.getSize(widthSpec);
-            int w = fill ? avail : Math.min(avail, (int) Math.ceil(textWidth()));
+            // v2.44 真机 bug（用户「又完全不显示日志了」）：
+            //   诊断实证 宽=0 视口=1234 原文px=642 字=23/23
+            //   文字有、视口宽有，但 measured width = 0。
+            //   根因：非 fill 分支 Math.min(avail, 文字宽)，而 avail 有时是 0
+            //         => min(0, 642) = 0 => View 宽 0 => 画不出来。
+            //   修：avail<=0 时退回文字宽；仍为 0 则给个保底宽度。
+            // v2.46 真机（用户「日志显示不全」）：
+            //   诊断实证 宽=166 视口=120 原文px=166 绘制px=120 字=6/7
+            //   —— 宽度被卡在"文字宽"上（166），视口只有 120，字被截成 "MGAS ..."
+            //   根因：非 fill 分支 Math.min(avail, 文字宽) 是"收缩到文字"逻辑，
+            //         但我们的布局本来就给了 1209 的 LayoutParams.width，
+            //         这里再 min 一次等于把它砍回文字宽 ✗
+            //   修：**LayoutParams 给了确定宽就用它**，只有 WRAP_CONTENT 才按文字收缩。
+            int lpW = (p != null) ? p.width : LinearLayout.LayoutParams.WRAP_CONTENT;
+            int w;
+            if (fill) {
+                w = avail;
+            } else if (lpW > 0) {
+                w = lpW;                      // 布局已指定确定宽度 ⇒ 照用
+            } else {
+                int tw2 = (int) Math.ceil(textWidth());
+                w = (avail <= 0) ? Math.max(1, tw2) : Math.min(avail, Math.max(1, tw2));
+            }
+            if (w <= 0) {
+                w = RefMapper.devLen(200);
+            }
             int h = (p != null && p.height > 0)
                     ? p.height : (int) Math.ceil(paint.descent() - paint.ascent());
             setMeasuredDimension(w, resolveSize(h, heightSpec));
+        }
+
+        /** 停掉动画并清空内容（收起态用；防窗口缩小时残留上一帧文字） */
+        void stopAndClear() {
+            removeCallbacks(step);
+            text = "";
+            prev = null;
+            drawn = "";
+            drawnPrev = "";
+            roll = 1f;
+            invalidate();
+            requestLayout();
         }
 
         void setLine(String t, int st) {
@@ -1460,9 +2445,27 @@ public class OverlayService extends Service {
             return (s == null || s.isEmpty()) ? 0f : paint.measureText(s);
         }
 
-        /** 视口宽（扣掉左右内边距） */
+        /**
+         * 视口宽（扣掉左右内边距）。
+         *
+         * <p>⚠⚠ v2.12：**首帧 getWidth() 还是 0**，那时 ellipsize 会把整句截成空/省略号，
+         * 用户看到的就是「日志文字看不全」。⇒ 拿不到宽度时退回**父容器可用宽**。
+         */
         private float viewW() {
-            return Math.max(0f, getWidth() - getPaddingLeft() - getPaddingRight());
+            float w = getWidth();
+            if (w <= 0) {
+                android.view.ViewParent par = getParent();
+                if (par instanceof android.view.View) {
+                    android.view.View pv = (android.view.View) par;
+                    w = pv.getWidth() - pv.getPaddingLeft() - pv.getPaddingRight();
+                }
+            }
+            if (w <= 0) {
+                // 最后兜底：整幅屏幕宽（总比 0 好，至少不会全截断）
+                android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                w = dm.widthPixels;
+            }
+            return Math.max(0f, w - getPaddingLeft() - getPaddingRight());
         }
 
         /** 按当前宽度把"本句/上一句"都算成可绘制串（装不下 ⇒ 省略号收尾；⚠ 不左右滚） */
@@ -1470,18 +2473,50 @@ public class OverlayService extends Service {
             float w = viewW();
             drawn = ellipsize(text, w);
             drawnPrev = ellipsize(prev, w);
+            // 诊断：宽度与命中情况（只在内容变化时打，别刷屏）
+            if (AppLog.DEBUG_LAYOUT) {
+                AppLog.i("[marquee] 宽=" + Math.round(getWidth())
+                        + " 视口=" + Math.round(w)
+                        + " 原文px=" + Math.round(paint.measureText(text))
+                        + " 绘制px=" + Math.round(paint.measureText(drawn))
+                        + " 字=" + drawn.length() + "/" + text.length());
+            }
             lastW = getWidth();
         }
 
+        /**
+         * 按宽度截断（装不下加省略号）。
+         *
+         * <p>⚠⚠ v2.18 换成**自己算**，不用 {@code TextUtils.ellipsize}：
+         *   实测日志行窗口宽 1040px，而文字只用到约 800px 就被截 ⇒
+         *   TextUtils 内部对 width 的处理（预留省略号宽度 + 浮点取整）偏保守，
+         *   在我们的组合下会**多截掉一截**。
+         *   这里用 measureText 逐字二分，宽度用满为止。
+         */
         private String ellipsize(String s, float w) {
             if (s == null || s.isEmpty()) {
                 return "";
             }
-            if (w <= 0 || paint.measureText(s) <= w) {
+            float full = paint.measureText(s);
+            if (w <= 0 || full <= w) {
                 return s;
             }
-            return android.text.TextUtils.ellipsize(
-                    s, paint, w, android.text.TextUtils.TruncateAt.END).toString();
+            String ell = "…";
+            float ew = paint.measureText(ell);
+            if (w <= ew) {
+                return ell;
+            }
+            // 二分找"能放下的最长前缀"
+            int lo = 0, hi = s.length();
+            while (lo < hi) {
+                int mid = (lo + hi + 1) / 2;
+                if (paint.measureText(s, 0, mid) + ew <= w) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            return lo > 0 ? s.substring(0, lo) + ell : ell;
         }
 
         private void kick() {
@@ -1516,7 +2551,12 @@ public class OverlayService extends Service {
         @Override
         protected void onDraw(Canvas c) {
             super.onDraw(c);
-            if (getWidth() != lastW) {      // 首帧/换宽度时补算一次（setLine 可能早于布局）
+            // ⚠⚠⚠ v2.23 修「跑马灯一行字都没有」：
+            //   旧逻辑只在 getWidth() != lastW 时重算。可 setLine() 常发生在**布局完成前**
+            //   （那时 getWidth()=0 ⇒ drawn=""），之后宽度虽然变了，但
+            //   lastW 也被 remeasure 记成了最终宽度 ⇒ 条件不再成立 ⇒ **永远不重算** ✗
+            //   ⇒ 现在：**只要 drawn 空但有 text，就立刻重算**（幂等，多算一次无所谓）。
+            if (getWidth() != lastW || (drawn.isEmpty() && !text.isEmpty())) {
                 remeasure();
             }
             if (drawn.isEmpty() && drawnPrev.isEmpty()) {

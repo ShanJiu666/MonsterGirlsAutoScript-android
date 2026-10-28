@@ -53,12 +53,42 @@ public class MainActivity extends Activity {
     /** ⭐ 2026-09-30：日志订阅句柄。**必须用 addListener 存句柄**——见 onCreate 里的说明。 */
     private AppLog.Listener logListener;
     private TextView logView;
+    /** 当前页：0=运行 1=配置 2=诊断 */
+    private int page = 0;
+    /** 页面容器（切页时换它的 child） */
+    private LinearLayout pageHost;
+    /** 底栏三个 tab（切页时重画激活态） */
+    private final TextView[] navTabs = new TextView[3];
+    /** 首页日志/统计切换：0=日志 1=统计 */
+    private int logTab = 0;
+    private TextView tabLog, tabSum;
+    /** 大字状态 + 副标题 + 环形（每 tick 刷新） */
+    private TextView bigStatus, subStatus;
+    private UiKit.RingView ring;
+    /** 三格读数：体力 / 幸运草 / 金币 */
+    private TextView statStamina, statClover, statCoin;
+    /** 主按钮（待机=启动 / 运行中=停止 / 红装锁=解锁），复用一个位置 */
+    private TextView mainBtn;
+    private int mainBtnMode = 0;
+    /** 就绪条的三颗点与三格值 */
+    private View dotCapture, dotTouch, dotLock;
+    private TextView valCapture, valTouch, valLock;
     private TextView sumView;
     private TextView statusView;
-    private Button overlayBtn;
+    private TextView overlayBtn;
     private CheckBox cbSupply;
+    // ⭐ v1.78：收工日常五颗勾选（与 Prefs 一一对应 ✓）
+    private CheckBox cbGuildTasks;
+    private CheckBox cbGuildAlchemy;
+    private CheckBox cbGuildIntel;
+    private CheckBox cbRecruitFree;
+    private CheckBox cbAdFree;
+    /** ⭐ v1.91 日常前置（刷图前先做日常） */
+    private CheckBox cbDailyFirst;
     private EditText etBagEvery;
     private boolean overlayOn = false;
+    /** 当前是否在跑（由 tick 从 Python status 读，供主按钮/大字区切换） */
+    private volatile boolean running = false;
     /** 上一次画过的统计文本（变了才重设，避免光标/滚动乱跳） */
     private String lastSummary = null;
     /** 红装锁状态文案（由后台 tick 更新；refreshStatus 只负责画，不再同步调 Python） */
@@ -73,6 +103,8 @@ public class MainActivity extends Activity {
     private TextView spLoading;
     /** 已成功填过一次就不重复填（避免每次 tick 都重建 View ✓） */
     private boolean spFilled = false;
+    /** ⭐ v1.79：空清单的日志只打一次（tick 每 2 秒一次，别刷屏） */
+    private boolean spLoggedFail = false;
 
     /** 界面自动刷新（可见时才跑）：后台读 Python → 回主线程画（⚠ 绝不在 UI 线程调 Python） */
     private final Runnable tick = new Runnable() {
@@ -81,6 +113,7 @@ public class MainActivity extends Activity {
             new Thread(() -> {
                 String t = "";
                 String r = "{}";
+                String st = "{}";
                 try {
                     t = PyBridge.call("summary");
                 } catch (Throwable e) {
@@ -91,10 +124,27 @@ public class MainActivity extends Activity {
                 } catch (Throwable e) {
                     r = "{}";
                 }
+                // ⭐ 主按钮要靠它区分"待机/跑图中"（与悬浮条同一个判据源，别各读各的）
+                try {
+                    st = PyBridge.call("status");
+                } catch (Throwable e) {
+                    st = "{}";
+                }
+                // ⭐ 三格读数：**只读旧值、不触发新 OCR**（见 explore_android.hud 的注释）
+                String hudJson = "{}";
+                try {
+                    hudJson = PyBridge.call("hud");
+                } catch (Throwable e) {
+                    hudJson = "{}";
+                }
                 final String ft = t == null ? "" : t.trim();
                 final String fr = r == null ? "{}" : r.trim();
+                final String fs = st == null ? "{}" : st.trim();
+                final String fh = hudJson == null ? "{}" : hudJson.trim();
                 ui.post(() -> {
                     redLockText = (fr.isEmpty() || "{}".equals(fr)) ? "无" : "有（先解锁）";
+                    running = fs.contains("'running': True");
+                    applyHud(fh);
                     showSummary(ft);
                     // ⭐ v1.46：特殊方块勾选**兜底重试** ——
                     //   Python 冷启动要几秒，onCreate 里那一次可能还没就绪；
@@ -144,6 +194,7 @@ public class MainActivity extends Activity {
         refreshStatus();
         ui.removeCallbacks(tick);
         ui.postDelayed(tick, TICK_MS);        // 界面可见时才轮询（别在后台白烧电/白跑 Python）
+        applyLogTab();
         announceHotUpdate();                  // ⭐ v1.45g：刚热更过就**弹窗**告诉用户
         // ⭐ v1.45g 兜底：补丁也可能**刚在后台**被激活（悬浮条服务先起了 Python
         //   ⇒ bootRecover 比 onResume 晚一点）⇒ 3 秒后再查一次，避免"擦肩而过" ✗
@@ -232,6 +283,10 @@ public class MainActivity extends Activity {
             case "tap_start":
                 ui.postDelayed(this::tapStart, 400);
                 break;
+            case "probe":
+                ui.postDelayed(() -> pyCall("探针", () ->
+                        PyBridge.call("probe_popup")), 400);
+                break;
             case "dump":
                 ui.postDelayed(this::dumpFrame, 400);
                 break;
@@ -245,6 +300,13 @@ public class MainActivity extends Activity {
             case "overlay":
                 ui.postDelayed(this::toggleOverlay, 300);
                 break;
+            // dev 验证钩子：adb am start -e cmd overlay_expand -e on true
+            //   悬浮窗带 FLAG_NOT_FOCUSABLE，input tap 注入不进去 ⇒ 展开态只能这样触发
+            case "overlay_expand":
+                ui.postDelayed(() -> {
+                    OverlayService.forceExpand(!"false".equals(it.getStringExtra("on")));
+                }, 400);
+                break;
             case "red_unlock":
                 ui.postDelayed(this::pyRedUnlock, 400);
                 break;
@@ -256,114 +318,564 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ---------------- UI ----------------
+    // ══════════════════════════════════════════════════════════════
+    // UI · 方案 A（深空玻璃）
+    // ══════════════════════════════════════════════════════════════
+    //  三级信息架构：运行 / 配置 / 诊断。事实来源是
+    //  docs/ui_design/scheme_a.py —— 改颜色/圆角/字号先改那边再同步这里。
+    //
+    //  ⚠ 本段**只换显示**：所有 onClick → 既有方法、所有 Prefs 读写、
+    //    PyBridge 调用参数顺序**一个都没动**。
+    //  ⚠ 门禁 verify_explore_slots_fix.py 直接读本文件文本，这些标识符必须保留：
+    //    cbDailyFirst / fillSpecialRows / special_set / 「特殊方块（不勾 = 拉黑）」
+    //    announceHotUpdate() / AlertDialog.Builder(this) / showUpdateResult
 
-    // ⭐ 2026-09-29 UI 优化（用户「顺便优化下软件的 ui」）：卡片分区 + 统一配色 + 状态芯片。
-    //   ⚠ 只动观感：所有按钮的 onClick / Prefs 读写 / 成员引用一条没改 ✓
-    private static final int UI_BG = 0xFF0B0E13;          // 窗口底
-    private static final int UI_CARD = 0xFF161C26;        // 卡片底
-    private static final int UI_CARD_LINE = 0xFF26303F;   // 卡片描边
-    private static final int UI_PANEL = 0xFF10141B;       // 日志/统计面板底
-    private static final int UI_TXT = 0xFFD8E2F0;         // 普通字
-    private static final int UI_SUB = 0xFF7FA6D9;         // 小节标题
-    private static final int UI_BTN = 0xFF232B3A;         // 普通按钮底
-    private static final int UI_BTN_ACCENT = 0xFF1E3450;  // 授权组按钮底
-    private static final int UI_BTN_WARN = 0xFF4A3A1D;    // 红装解锁按钮底
-
+    /**
+     * 整页外壳：标题栏 + 可换页的内容区 + 固定底栏。
+     *
+     * <p>⚠ 真机踩到的坑（沿用老注释）：**不能在 buildUi() 里调 Python** ——
+     * {@code DeviceApi.bind()} 是在 {@code setContentView(buildUi())} **之后**才调，
+     * 那时 PyBridge 还没绑 ⇒ {@code IllegalStateException: bind 还没调用过}
+     * ⇒ 特殊方块勾选排会整片空白。所以这里只搭骨架，
+     * 行由 {@link #fillSpecialRows()} 在 bind 之后填、并由 tick 兜底重试。
+     */
     private View buildUi() {
-        int pad = dp(12);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, pad);
-        root.setBackgroundColor(UI_BG);
+        LinearLayout root = UiKit.column(this);
+        root.setBackground(new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{UiKit.BG_TOP, UiKit.BG_MID, UiKit.BG_BOTTOM}));
+        // ⚠ 真机踩到的坑（v2.02 首装）：底栏画到 y=2607~2648，正好被**系统手势条**压住
+        //   ⇒ 三个 tab 只剩一半可点，而且看着像"没画完"。
+        //   根因：Activity 没有处理 window insets，内容铺到了系统栏底下。
+        //   ⚠ 不能用 fitsSystemWindows（它会把背景也一起缩，渐变就断了）
+        //   ⇒ 自己在根布局上补上下 padding（值从系统栏 insets 拿，见下面 applyInsets()）
+        applySystemInsets(root);
 
-        // ── 状态芯片（就绪=绿 / 有未就绪项=橙）──
-        statusView = new TextView(this);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        statusView.setTypeface(Typeface.DEFAULT_BOLD);
-        statusView.setPadding(dp(10), dp(7), dp(10), dp(7));
-        chip(statusView, 0xFF12291A, 0xFF1F5C33);
-        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        stLp.bottomMargin = dp(10);
-        root.addView(statusView, stLp);
-
-        // ⭐ 整页可滚动（2026-09-29 用户口径：「整体可以往下滑啊，不要压缩太多」）：
-        //    控制卡**全部保留、不压缩**，放不下的部分往下滑；日志/统计固定高度常驻底部
-        ScrollView outer = new ScrollView(this);
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        outer.addView(content, new LinearLayout.LayoutParams(
+        // ── 内容区（切页只换这里）──
+        pageHost = UiKit.column(this);
+        ScrollView sc = new ScrollView(this);
+        sc.setFillViewport(true);
+        sc.addView(pageHost, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(sc, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // ══════ 卡片①：探索（正常人只用这一区）════════
-        LinearLayout card1 = card("探索");
-        // ⭐ v0.24 口径：这个按钮**不直接启动脚本** —— 只是「准备」（开悬浮条 + 切游戏前台 +
-        //    检查就绪 + 在悬浮条提醒用户去点 ▶）。真启动只能从悬浮条的 ▶ 来。
-        //    历史：v0.23 之前这里直接调 `PyBridge.call("start", ...)` ⇒ 玩家点一下脚本就跑
-        //    ⇒ 经常撞上"游戏还停在登录页/大厅/选图界面 ⇒ 瞎跑"，所以改成"两步确认"。
-        LinearLayout rowA = new LinearLayout(this);
-        rowA.setOrientation(LinearLayout.HORIZONTAL);
-        Button bStart = btn("▶ 准备启动", BTN_START, v -> pyExploreStart());
-        bStart.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        bStart.setMinimumHeight(dp(46));
-        bStart.setMinHeight(dp(46));
-        rowA.addView(bStart, lp());
-        Button bStop = btn("■ 停止探索", BTN_STOP, v -> pyExploreStop());
-        bStop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        bStop.setMinimumHeight(dp(46));
-        bStop.setMinHeight(dp(46));
-        rowA.addView(bStop, lp());
-        card1.addView(rowA);
+        // ── 底栏 ──
+        root.addView(buildNav(), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, UiKit.dp(this, 64)));
 
-        LinearLayout rowB = new LinearLayout(this);
-        rowB.setOrientation(LinearLayout.HORIZONTAL);
-        overlayBtn = btn("悬浮条：关", BTN_NORMAL, v -> toggleOverlay());
-        rowB.addView(overlayBtn, lp());
-        rowB.addView(btn("回到游戏", BTN_NORMAL, v -> bringGameFront()), lp());
-        card1.addView(rowB);
+        renderPage();
+        return root;
+    }
 
-        // ── 探索设置（④ 自动补给 / ⑤ 每 X 张升星）──
-        //  ⚠ 这些值存 Prefs：**悬浮条的 ▶ 也读这一份** ⇒ 界面上勾了，悬浮条开跑就生效 ✓
-        LinearLayout row8 = new LinearLayout(this);
-        row8.setOrientation(LinearLayout.HORIZONTAL);
-        row8.setGravity(android.view.Gravity.CENTER_VERTICAL);
-
-        cbSupply = new CheckBox(this);
-        cbSupply.setText("没体力自动用补给");
-        cbSupply.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        cbSupply.setTextColor(UI_TXT);
-        cbSupply.setChecked(Prefs.autoSupply(this));
-        cbSupply.setOnCheckedChangeListener((v, on) -> {
-            Prefs.setAutoSupply(this, on);
-            AppLog.i("设置：没体力自动用补给 = " + (on ? "开 ✓" : "关"));
+    /**
+     * 给根布局补上系统栏 padding（状态栏顶 + 手势条底）。
+     *
+     * <p>⚠ 用 {@code OnApplyWindowInsetsListener} 而不是 {@code fitsSystemWindows} ——
+     * 后者会把**背景渐变**也一起缩进去，顶部会露出一条纯色。
+     * <p>⚠ 兜底：拿不到 insets（老 ROM / 分发事件被吃掉）时退回
+     * {@code RefMapper} 检测到的 topInset + 48dp 手势条高度，
+     * 保证最坏情况底栏也不会被手势条吃掉。
+     */
+    private void applySystemInsets(final View root) {
+        final int fallbackTop = RefMapper.topInsetPx();
+        final int fallbackBottom = UiKit.dp(this, 48);
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = fallbackTop, bottom = fallbackBottom;
+            try {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    android.graphics.Insets bar = insets.getInsets(
+                            android.view.WindowInsets.Type.systemBars()
+                                    | android.view.WindowInsets.Type.displayCutout());
+                    top = bar.top;
+                    bottom = bar.bottom;
+                } else {
+                    top = insets.getSystemWindowInsetTop();
+                    bottom = insets.getSystemWindowInsetBottom();
+                }
+            } catch (Throwable ignored) {
+            }
+            v.setPadding(0, top, 0, bottom);
+            return insets;
         });
-        row8.addView(cbSupply);
+        // 立刻要一次（有些 ROM 不会主动分发）
+        root.requestApplyInsets();
+    }
 
-        TextView lbBag = new TextView(this);
-        lbBag.setText("　每");
-        lbBag.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        lbBag.setTextColor(UI_TXT);
-        row8.addView(lbBag);
+    /** 底部三页导航（高 64dp；激活项青色 + 上方 20×2 指示条） */
+    /**
+     * 底部三页导航。
+     *
+     * <p>⚠⚠ 真机踩到的坑（v2.02 首装，用户原话「下面的切换栏错位了」）：
+     * 在**垂直** LinearLayout 里 {@code addView(child)} 不传 LayoutParams 时，
+     * 默认是 {@code (MATCH_PARENT, WRAP_CONTENT)} —— 不是 WRAP_CONTENT ✗
+     * ⇒ TextView 撑满整格宽，而 TextView 自身默认 gravity 是 LEFT
+     * ⇒ 文字贴在格子最左边（看着像"三个字挤在 x=0 / 1/3 / 2/3"），
+     *   而指示条是显式 20dp 宽 ⇒ 被父级居中 ⇒ **一个居中一个靠左**，视觉上就是错位。
+     * 修法：文字显式 {@code setGravity(CENTER)} + 显式 WRAP_CONTENT 参数（双保险）。
+     */
+    private View buildNav() {
+        LinearLayout bar = UiKit.row(this);
+        bar.setBackgroundColor(0xF2070B13);
+        String[] names = {"运行", "配置", "诊断"};
+        for (int i = 0; i < names.length; i++) {
+            final int idx = i;
+            LinearLayout cell = UiKit.column(this);
+            cell.setGravity(android.view.Gravity.CENTER);
+            cell.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 8));
 
-        etBagEvery = new EditText(this);
-        etBagEvery.setText(String.valueOf(Prefs.bagEvery(this)));
-        etBagEvery.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        etBagEvery.setTextColor(UI_TXT);
-        etBagEvery.setInputType(InputType.TYPE_CLASS_NUMBER);
-        etBagEvery.setWidth(dp(52));
-        etBagEvery.setGravity(android.view.Gravity.CENTER);
-        // ⭐⭐ 2026-10-01 修（用户报「设了每 1 张图升一次，却完全没去升过」）：
-        //   原来**只在"失去焦点"时提交** ⇒ 在 MGAS 里把 10 改成 1、然后直接去悬浮条点 ▶
-        //   或切回游戏时，EditText 的**视图级焦点并没有变**（窗口失焦 ≠ 视图失焦）
-        //   ⇒ `onFocusChange` 不触发 ⇒ Prefs 里还是老值（默认 10）⇒ 悬浮条 ▶ 读到 10
-        //   ⇒ 日志里 `bag_every=10`、一次都没升星。
-        //   真机实锤（15:24 那轮）：logcat 里**连一条「设置：每 …」都没有** = 提交函数
-        //   一次都没跑过 ✓
-        //   ⇒ 改成**边打边存**（只写 Prefs、**绝不动 setText**）。老注释担心的
-        //     "1 存成 1、再打 0 变 01 打不出 10" 是 **setText 把光标复位**造成的，
-        //     这里不 setText ⇒ 那个坑不存在 ✓；空串（正在删改）跳过 ⇒ 不会存成 0 ✗
-        etBagEvery.addTextChangedListener(new android.text.TextWatcher() {
+            // 指示条（激活时可见）
+            View tick = new View(this);
+            tick.setBackground(UiKit.pill(this, UiKit.ACCENT, 0, 1f));
+            LinearLayout.LayoutParams tlp = UiKit.lpW(UiKit.dp(this, 18), UiKit.dp(this, 2));
+            tlp.bottomMargin = UiKit.dp(this, 6);
+            tick.setVisibility(View.INVISIBLE);
+            cell.addView(tick, tlp);
+
+            TextView lbl = UiKit.text(this, names[i], 10, false, 0xFF68788E);
+            lbl.setGravity(android.view.Gravity.CENTER);        // ⚠ 关键：否则贴左
+            lbl.setIncludeFontPadding(false);
+            cell.addView(lbl, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            navTabs[i] = lbl;
+
+            cell.setOnClickListener(v -> {
+                page = idx;
+                renderPage();
+                refreshNav();
+            });
+            bar.addView(cell, UiKit.lpWeight(1f));
+        }
+        return bar;
+    }
+
+    private void refreshNav() {
+        for (int i = 0; i < navTabs.length; i++) {
+            boolean on = i == page;
+            navTabs[i].setTextColor(on ? UiKit.ACCENT : 0xFF68788E);
+            navTabs[i].setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            // 指示条 = 父容器的第 0 个 child
+            View cell = (View) navTabs[i].getParent();
+            if (cell instanceof LinearLayout) {
+                View tick = ((LinearLayout) cell).getChildAt(0);
+                tick.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
+            }
+        }
+    }
+
+    /** 切页：重建 pageHost 的内容 */
+    private void renderPage() {
+        if (pageHost == null) {
+            return;
+        }
+        pageHost.removeAllViews();
+        if (page == 0) {
+            buildRunPage(pageHost);
+        } else if (page == 1) {
+            buildConfigPage(pageHost);
+        } else {
+            buildDiagPage(pageHost);
+        }
+        refreshNav();
+        refreshStatus();
+    }
+
+    // ── 页头：大标题 + 副标题（右侧可放状态胶囊）──
+    private LinearLayout pageHeader(String title, String subtitle) {
+        LinearLayout box = UiKit.column(this);
+        LinearLayout r = UiKit.row(this);
+        r.addView(UiKit.title(this, title), UiKit.lpWeight(1f));
+        r.addView(UiKit.sub(this, subtitle));
+        box.addView(r);
+        return box;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 页 1 · 运行
+    // ══════════════════════════════════════════════════════════
+    private void buildRunPage(LinearLayout host) {
+        int m = UiKit.dp(this, 16);
+        host.setPadding(m, UiKit.dp(this, 14), m, UiKit.dp(this, 12));
+
+        // 标题
+        LinearLayout hd = UiKit.column(this);
+        hd.addView(UiKit.title(this, "MGAS"));
+        hd.addView(UiKit.sub(this, "幻想少女公会 · 自动探索"));
+        host.addView(hd, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(hd, 0, 0, 0, UiKit.dp(this, 12));
+
+        // 就绪条：三格（圆点 + 标签 + 值）
+        host.addView(buildReadyBar(), UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                UiKit.dp(this, 40)));
+        UiKit.margins(host.getChildAt(host.getChildCount() - 1), 0, 0, 0, UiKit.dp(this, 12));
+
+        // 主状态卡
+        LinearLayout card = UiKit.card(this, 22);
+        LinearLayout top = UiKit.row(this);
+        TextView big = UiKit.text(this, "就绪 · 等待启动", 22, true, UiKit.INK);
+        bigStatus = big;
+        LinearLayout left = UiKit.column(this);
+        left.addView(UiKit.text(this, "当前状态", 10, false, UiKit.INK_4));
+        left.addView(big);
+        top.addView(left, UiKit.lpWeight(1f));
+        ring = new UiKit.RingView(this, UiKit.ACCENT);
+        ring.set(0f, "", "", false);
+        top.addView(ring);
+        card.addView(top);
+
+        subStatus = UiKit.text(this, "点下面按钮后由悬浮条接管，切回游戏即自动开跑",
+                10.5f, false, UiKit.INK_3);
+        card.addView(subStatus, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(subStatus, 0, UiKit.dp(this, 6), 0, UiKit.dp(this, 8));
+
+        card.addView(UiKit.hair(this));
+        LinearLayout stats = UiKit.row(this);
+        stats.addView(statCell("体力", "--", UiKit.ACCENT, 0), UiKit.lpWeight(1f));
+        stats.addView(statCell("幸运草", "--", UiKit.OK, 1), UiKit.lpWeight(1f));
+        stats.addView(statCell("金币", "--", UiKit.WARN, 2), UiKit.lpWeight(1f));
+        card.addView(stats, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(stats, 0, UiKit.dp(this, 10), 0, 0);
+
+        host.addView(card, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(card, 0, 0, 0, UiKit.dp(this, 14));
+
+        // 主按钮（位置固定，内容随状态换）
+        mainBtn = UiKit.text(this, "▶  准备启动", 17, true, 0xFF05121E);
+        mainBtn.setGravity(android.view.Gravity.CENTER);
+        mainBtn.setBackground(UiKit.gradientPill(this, 0xFF40E2F6, 0xFF247AE2, 28));
+        mainBtn.setPadding(0, UiKit.dp(this, 16), 0, UiKit.dp(this, 16));
+        mainBtn.setOnClickListener(v -> onMainBtn());
+        mainBtnMode = 0;
+        host.addView(mainBtn, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(mainBtn, 0, 0, 0, UiKit.dp(this, 10));
+
+        // 次按钮：悬浮条 / 回到游戏
+        LinearLayout sub = UiKit.row(this);
+        overlayBtn = ghostButton("悬浮条：关", v -> toggleOverlay());
+        sub.addView(overlayBtn, UiKit.lpWeight(1f));
+        TextView back = ghostButton("回到游戏", v -> bringGameFront());
+        LinearLayout.LayoutParams lp2 = UiKit.lpWeight(1f);
+        lp2.leftMargin = UiKit.dp(this, 10);
+        sub.addView(back, lp2);
+        host.addView(sub, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(sub, 0, 0, 0, UiKit.dp(this, 14));
+
+        // 日志 / 统计 卡
+        host.addView(buildLogCard(), UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    private LinearLayout statCell(String label, String value, int color, int idx) {
+        LinearLayout c = UiKit.column(this);
+        c.addView(UiKit.text(this, label, 9.5f, false, UiKit.INK_4));
+        TextView v = UiKit.text(this, value, 17, true, color);
+        c.addView(v);
+        if (idx == 0) {
+            statStamina = v;
+        } else if (idx == 1) {
+            statClover = v;
+        } else {
+            statCoin = v;
+        }
+        return c;
+    }
+
+    private View buildReadyBar() {
+        LinearLayout bar = UiKit.row(this);
+        bar.setBackground(UiKit.pill(this, 0x17FFFFFF, 0x26FFFFFF, 13));
+        bar.setPadding(UiKit.dp(this, 14), 0, UiKit.dp(this, 8), 0);
+
+        for (int i = 0; i < 3; i++) {
+            LinearLayout cell = UiKit.row(this);
+            View d = UiKit.dot(this, UiKit.INK_4, 5.6f);
+            cell.addView(d);
+            LinearLayout col = UiKit.column(this);
+            cell.addView(col);
+            UiKit.margins(col, UiKit.dp(this, 8), 0, 0, 0);
+            String[] labels = {"截图", "点击通道", "红装锁"};
+            col.addView(UiKit.text(this, labels[i], 9, false, UiKit.INK_4));
+            TextView val = UiKit.text(this, "--", 11.5f, false, UiKit.INK_2);
+            col.addView(val);
+            if (i == 0) {
+                dotCapture = d;
+                valCapture = val;
+            } else if (i == 1) {
+                dotTouch = d;
+                valTouch = val;
+            } else {
+                dotLock = d;
+                valLock = val;
+            }
+            LinearLayout.LayoutParams cp = UiKit.lpWeight(1f);
+            bar.addView(cell, cp);
+            if (i < 2) {
+                View line = new View(this);
+                line.setBackgroundColor(0x24FFFFFF);
+                bar.addView(line, UiKit.lpW(Math.max(1, UiKit.dp(this, 0.7f)), UiKit.dp(this, 20)));
+            }
+        }
+        return bar;
+    }
+
+    private LinearLayout buildLogCard() {
+        LinearLayout card = UiKit.card(this, 18);
+        LinearLayout head = UiKit.row(this);
+        head.addView(UiKit.sectionTitle(this, "运行日志"), UiKit.lpWeight(1f));
+
+        // 日志 / 统计 分段切换（合并了旧 logView + sumView 两块常驻面板）
+        LinearLayout seg = UiKit.row(this);
+        seg.setBackground(UiKit.pill(this, 0x17FFFFFF, 0x24FFFFFF, 11));
+        seg.setPadding(UiKit.dp(this, 2), UiKit.dp(this, 2), UiKit.dp(this, 2), UiKit.dp(this, 2));
+        tabLog = tab("日志", true);
+        tabSum = tab("统计", false);
+        seg.addView(tabLog, UiKit.lpW(UiKit.dp(this, 52), UiKit.dp(this, 18)));
+        seg.addView(tabSum, UiKit.lpW(UiKit.dp(this, 52), UiKit.dp(this, 18)));
+        head.addView(seg);
+        card.addView(head);
+
+        View line = UiKit.hair(this);
+        card.addView(line);
+        UiKit.margins(line, 0, UiKit.dp(this, 10), 0, UiKit.dp(this, 8));
+
+        logView = UiKit.text(this, "", 9.5f, false, 0xFF96AAC0);
+        logView.setTypeface(Typeface.MONOSPACE);
+        logView.setLineSpacing(UiKit.dpf(this, 6), 1f);
+        logView.setMovementMethod(new ScrollingMovementMethod());
+        logView.setVerticalScrollBarEnabled(true);
+        card.addView(logView, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                UiKit.dp(this, 206)));
+
+        sumView = UiKit.text(this, "", 9.5f, false, 0xFF96AAC0);
+        sumView.setTypeface(Typeface.MONOSPACE);
+        sumView.setLineSpacing(UiKit.dpf(this, 6), 1f);
+        sumView.setMovementMethod(new ScrollingMovementMethod());
+        sumView.setVisibility(View.GONE);
+        card.addView(sumView, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                UiKit.dp(this, 206)));
+        return card;
+    }
+
+    private TextView tab(String label, boolean active) {
+        TextView t = UiKit.text(this, label, 9.5f, active, active ? 0xFF9CEAFA : 0xFF76849A);
+        t.setGravity(android.view.Gravity.CENTER);
+        t.setOnClickListener(v -> {
+            logTab = "日志".contentEquals(label) ? 0 : 1;
+            applyLogTab();
+        });
+        return t;
+    }
+
+    private void applyLogTab() {
+        boolean log = logTab == 0;
+        if (logView != null) {
+            logView.setVisibility(log ? View.VISIBLE : View.GONE);
+        }
+        if (sumView != null) {
+            sumView.setVisibility(log ? View.GONE : View.VISIBLE);
+        }
+        if (tabLog != null) {
+            tabLog.setTextColor(log ? 0xFF9CEAFA : 0xFF76849A);
+            tabLog.setBackground(log ? UiKit.pill(this, 0x3822D3EE, 0x5A22D3EE, 9) : null);
+        }
+        if (tabSum != null) {
+            tabSum.setTextColor(log ? 0xFF76849A : 0xFF9CEAFA);
+            tabSum.setBackground(log ? null : UiKit.pill(this, 0x3822D3EE, 0x5A22D3EE, 9));
+        }
+    }
+
+    private TextView ghostButton(String label, View.OnClickListener l) {
+        TextView b = UiKit.text(this, label, 12.5f, false, UiKit.INK_2);
+        b.setGravity(android.view.Gravity.CENTER);
+        b.setBackground(UiKit.pill(this, 0x0DFFFFFF, 0x1AFFFFFF, 16));
+        b.setPadding(0, UiKit.dp(this, 10), 0, UiKit.dp(this, 10));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    /** 主按钮点击：按当前模式分派（启动 / 停止 / 红装解锁） */
+    private void onMainBtn() {
+        if (mainBtnMode == 1) {
+            pyExploreStop();
+        } else if (mainBtnMode == 2) {
+            pyRedUnlock();
+        } else {
+            pyExploreStart();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 页 2 · 配置
+    // ══════════════════════════════════════════════════════════
+    private void buildConfigPage(LinearLayout host) {
+        int m = UiKit.dp(this, 16);
+        host.setPadding(m, UiKit.dp(this, 14), m, UiKit.dp(this, 12));
+        host.addView(pageHeader("配置", "改动立刻生效"));
+        UiKit.margins(host.getChildAt(host.getChildCount() - 1), 0, 0, 0, UiKit.dp(this, 14));
+
+        // ── 卡：探索 ──
+        LinearLayout c1 = UiKit.card(this, 20);
+        c1.addView(UiKit.sectionTitle(this, "探索"));
+        c1.addView(toggleRow("没体力自动用补给", "结实补给 ≥1 时自动吃，吃完继续刷",
+                Prefs.autoSupply(this), on -> {
+                    Prefs.setAutoSupply(MainActivity.this, on);
+                    AppLog.i("设置：没体力自动用补给 = " + (on ? "开 ✓" : "关"));
+                }));
+        View h1 = UiKit.hair(this);
+        c1.addView(h1);
+        UiKit.margins(h1, 0, UiKit.dp(this, 10), 0, UiKit.dp(this, 10));
+        c1.addView(stepperRow());
+        host.addView(c1, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(c1, 0, 0, 0, UiKit.dp(this, 12));
+
+        // ── 卡：特殊方块（卡片标题与文案必须保留，门禁直接查文本）──
+        cardSp = UiKit.card(this, 20);
+        LinearLayout spHead = UiKit.row(this);
+        spHead.addView(UiKit.sectionTitle(this, "特殊方块（不勾 = 拉黑）"), UiKit.lpWeight(1f));
+        spHead.addView(UiKit.text(this, "共 8 类", 9.5f, false, UiKit.INK_4));
+        cardSp.addView(spHead);
+        TextView spHint = UiKit.text(this, "拉黑类不勾 = 不点也不借道；可点类不勾 = 不专门拿",
+                9.5f, false, UiKit.INK_4);
+        cardSp.addView(spHint);
+        UiKit.margins(spHint, 0, UiKit.dp(this, 4), 0, UiKit.dp(this, 8));
+
+        spBody = UiKit.column(this);
+        cardSp.addView(spBody);
+        spLoading = UiKit.text(this, "（正在读清单…）", 10, false, UiKit.INK_4);
+        spBody.addView(spLoading);
+        // ⚠⚠ 真机 bug（v2.02，用户原话「特殊方块还在显示正在读清单」）：
+        //   切页会**重建 spBody**，但 spFilled 还是上一轮留下的 true，
+        //   而新容器里已经有 1 个子 View（就是这行 spLoading）⇒
+        //   fillSpecialRows() 守卫 `spFilled && childCount > 0` 成立 ⇒ **直接 return**
+        //   ⇒ 永远停在「正在读清单…」，一次都不会去调 special_list ✗
+        //   ⇒ 重建容器 = 必须同时复位标记，让它重新去读一遍。
+        spFilled = false;
+        AppLog.i("特殊方块：配置页重建 ⇒ 复位 spFilled，准备重读清单");
+        host.addView(cardSp, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(cardSp, 0, 0, 0, UiKit.dp(this, 12));
+
+        // ── 卡：收工日常 ──
+        LinearLayout c3 = UiKit.card(this, 20);
+        c3.addView(UiKit.sectionTitle(this, "收工日常 · 体力刷完后自动做"));
+        c3.addView(toggleRow("公会日常 · 派遣任务", "4 把椅子都派出去 + 领已完成奖励",
+                Prefs.guildTasks(this), on -> {
+                    Prefs.setGuildTasks(MainActivity.this, on);
+                    AppLog.i("设置：公会日常·派遣 = " + (on ? "开 ✓" : "关"));
+                }));
+        c3.addView(toggleRow("公会日常 · 炼金", "消耗 6 件 5★ 满星装备，不可逆",
+                Prefs.guildAlchemy(this), on -> {
+                    Prefs.setGuildAlchemy(MainActivity.this, on);
+                    AppLog.i("设置：公会日常·炼金 = " + (on ? "开 ✓" : "关"));
+                }));
+        c3.addView(toggleRow("公会日常 · 情报领奖", "每日逐条 + 每周最上面，纯领奖",
+                Prefs.guildIntel(this), on -> {
+                    Prefs.setGuildIntel(MainActivity.this, on);
+                    AppLog.i("设置：公会日常·情报 = " + (on ? "开 ✓" : "关"));
+                }));
+        c3.addView(toggleRow("免费指定招募", "用掉当天免费机会，不花宝石",
+                Prefs.recruitFree(this), on -> {
+                    Prefs.setRecruitFree(MainActivity.this, on);
+                    AppLog.i("设置：免费招募 = " + (on ? "开 ✓" : "关"));
+                }));
+        c3.addView(toggleRow("我有免广告", "自动领取 金币×3 / 四叶草×3 / 体力×3",
+                Prefs.adFree(this), on -> {
+                    Prefs.setAdFree(MainActivity.this, on);
+                    AppLog.i("设置：免广告 = " + (on ? "开 ✓" : "关"));
+                }));
+
+        // 日常前置（琥珀强调条：它改变执行顺序）
+        LinearLayout df = UiKit.row(this);
+        df.setBackground(UiKit.pill(this, 0x18FBBF24, 0x54FBBF24, 12));
+        df.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 8), UiKit.dp(this, 12), UiKit.dp(this, 8));
+        LinearLayout dl = UiKit.column(this);
+        dl.addView(UiKit.text(this, "⚡ 日常前置", 11, true, 0xFFFFD98A));
+        dl.addView(UiKit.text(this, "刷图之前先做完，而不是等收工", 9.5f, false, 0xFFD0B892));
+        df.addView(dl, UiKit.lpWeight(1f));
+        cbDailyFirst = new CheckBox(this);
+        UiKit.Toggle dfT = new UiKit.Toggle(this, Prefs.dailyFirst(this), UiKit.WARN);
+        dfT.setOn(Prefs.dailyFirst(this));
+        dfT.onChange(() -> {
+            cbDailyFirst.setChecked(dfT.isOn());
+            Prefs.setDailyFirst(MainActivity.this, dfT.isOn());
+            AppLog.i("设置：日常前置 = " + (dfT.isOn() ? "开 ✓（刷图前先做）" : "关（收工后做）"));
+        });
+        df.addView(dfT);
+        // ⚠ cbDailyFirst 是**门禁要求的标识符**（v1.91 ②）：真状态机仍是它，
+        //   自绘开关只是视图层，两边同步（见上面 onChange）。
+        cbDailyFirst.setChecked(Prefs.dailyFirst(this));
+        cbDailyFirst.setVisibility(View.GONE);
+        c3.addView(df);
+        UiKit.margins(df, 0, UiKit.dp(this, 12), 0, 0);
+
+        host.addView(c3, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** 一行开关：标题 + 一行说明 + 右侧自绘开关 */
+    private View toggleRow(String title, String desc, boolean on,
+                           java.util.function.Consumer<Boolean> apply) {
+        LinearLayout row = UiKit.row(this);
+        row.setPadding(0, UiKit.dp(this, 9), 0, UiKit.dp(this, 9));
+        LinearLayout col = UiKit.column(this);
+        col.addView(UiKit.text(this, title, 13.5f, false, on ? UiKit.INK : UiKit.INK_2));
+        col.addView(UiKit.text(this, desc, 9.5f, false, UiKit.INK_4));
+        row.addView(col, UiKit.lpWeight(1f));
+        UiKit.Toggle t = new UiKit.Toggle(this, on, UiKit.ACCENT);
+        t.onChange(() -> {
+            apply.accept(t.isOn());
+            ((TextView) col.getChildAt(0)).setTextColor(t.isOn() ? UiKit.INK : UiKit.INK_2);
+        });
+        row.addView(t);
+        return row;
+    }
+
+    /**
+     * 「每 X 张图升星」—— **可直接填数字** + 两侧微调按钮。
+     *
+     * <p>⚠ 用户口径（2026-10-19）：「升级装备星级的地方要能自己填数字」——
+     * 纯步进器点 100 下才能到 100，不可接受。
+     *
+     * <p>⚠⚠ 输入法坑（老版本踩过、这里必须保住）：
+     * **不能在 TextWatcher 里 setText()** —— 那会把光标复位，打「10」变「01」。
+     * ⇒ 这里 TextWatcher **只读不写**，只在「失焦 / 收回键盘 / 点别处」时做一次规范化。
+     */
+    private View stepperRow() {
+        LinearLayout row = UiKit.row(this);
+        row.addView(UiKit.text(this, "每 __ 张图升级装备星级", 13.5f, false, UiKit.INK),
+                UiKit.lpWeight(1f));
+
+        LinearLayout box = UiKit.row(this);
+        box.setBackground(UiKit.pill(this, 0x17FFFFFF, 0x26FFFFFF, 15));
+        int pad = UiKit.dp(this, 4);
+        box.setPadding(pad, pad, pad, pad);
+
+        TextView minus = stepBtn("−");
+
+        // ⭐ 输入框：可点、可打字；数字键盘；居中
+        EditText value = new EditText(this);
+        value.setText(String.valueOf(Prefs.bagEvery(this)));
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        value.setTextColor(UiKit.INK);
+        value.setTypeface(Typeface.DEFAULT_BOLD);
+        value.setGravity(android.view.Gravity.CENTER);
+        value.setInputType(InputType.TYPE_CLASS_NUMBER);
+        value.setBackground(null);                 // 不要 EditText 默认下划线
+        value.setPadding(0, 0, 0, 0);
+        value.setIncludeFontPadding(false);
+        value.setSelectAllOnFocus(true);           // 点进去全选 ⇒ 直接打字覆盖
+        value.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        etBagEvery = value;                        // ⚠ 保持老字段名：onPause 的 commitBagEvery 还认它
+
+        // ⚠ TextWatcher 只**存不写**（写会复位光标 ⇒ 打 10 变 01）
+        value.addTextChangedListener(new android.text.TextWatcher() {
             @Override
             public void afterTextChanged(android.text.Editable s) {
                 saveBagEveryQuiet(s == null ? "" : s.toString());
@@ -377,312 +889,599 @@ public class MainActivity extends Activity {
             public void onTextChanged(CharSequence s, int st, int b, int c) {
             }
         });
-        etBagEvery.setOnFocusChangeListener((v, has) -> {
+        // 失焦时规范化（空/非法回落默认值），这一次才允许 setText
+        value.setOnFocusChangeListener((v, has) -> {
             if (!has) {
                 commitBagEvery();
             }
         });
-        row8.addView(etBagEvery);
 
-        TextView lbBag2 = new TextView(this);
-        lbBag2.setText("张图升级装备星级");
-        lbBag2.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        lbBag2.setTextColor(UI_TXT);
-        row8.addView(lbBag2);
-        card1.addView(row8);
+        TextView plus = stepBtn("+");
+        minus.setOnClickListener(v -> bumpBagEvery(-1, value));
+        plus.setOnClickListener(v -> bumpBagEvery(+1, value));
 
-        // ⑭ 单独一行：跟设置挤一行会被压成"竖排"（实测）
-        LinearLayout row8b = new LinearLayout(this);
-        row8b.setOrientation(LinearLayout.HORIZONTAL);
-        row8b.addView(btn("⑭ 红装解锁（发现红装后点这里才能重新开跑）", BTN_WARN, v -> pyRedUnlock()), lp());
-        card1.addView(row8b);
-        content.addView(card1);
+        box.addView(minus, UiKit.lpW(UiKit.dp(this, 26), UiKit.dp(this, 28)));
+        box.addView(value, UiKit.lpW(UiKit.dp(this, 46), UiKit.dp(this, 28)));
+        box.addView(plus, UiKit.lpW(UiKit.dp(this, 26), UiKit.dp(this, 28)));
+        row.addView(box);
+        return row;
+    }
 
-        // ══════ 卡片②：首次设置（各点一次就行）════════
-        LinearLayout card2 = card("首次设置（各点一次就行）");
-        LinearLayout rowC = new LinearLayout(this);
-        rowC.setOrientation(LinearLayout.HORIZONTAL);
-        rowC.addView(btn("① 授权截图", BTN_ACCENT, v -> requestCapture()), lp());
-        rowC.addView(btn("② 无障碍设置", BTN_ACCENT, v -> openAccessibility()), lp());
-        rowC.addView(btn("③ 悬浮窗权限", BTN_ACCENT, v -> openOverlayPerm()), lp());
-        card2.addView(rowC);
-        content.addView(card2);
+    private TextView stepBtn(String s) {
+        TextView t = UiKit.text(this, s, 14, false, UiKit.INK_2);
+        t.setGravity(android.view.Gravity.CENTER);
+        t.setBackground(UiKit.pill(this, 0x0FFFFFFF, 0x1FFFFFFF, 13));
+        return t;
+    }
 
-        // ⭐ v1.41 热更新卡（用户 2026-10-03：「发给朋友的怎么搞热更新？」）
-        //   逻辑补丁**不用在这里点** —— 悬浮条一起来就自动查、自动下、重启即生效；
-        //   这张卡主要管**整包**：点一下 → 下载 → 系统安装器弹出 → 点「安装」。
-        LinearLayout card4 = card("更新");
-        LinearLayout rowU = new LinearLayout(this);
-        rowU.setOrientation(LinearLayout.HORIZONTAL);
-        rowU.addView(btn("检查更新（补丁+整包）", BTN_ACCENT, v -> doUpdate("auto")), lp());
-        rowU.addView(btn("只看状态", BTN_NORMAL, v -> doUpdate("check")), lp());
-        card4.addView(rowU);
-        content.addView(card4);
+    /**
+     * 步进器加减：基于**当前输入框里的值**算，而不是 Prefs 里的旧值。
+     *
+     * <p>⚠ 用户可能刚手打了 37 还没失焦就点 +，此时 Prefs 还是旧值 10 ——
+     * 读输入框才不会把 37 吃掉。
+     */
+    private void bumpBagEvery(int delta, TextView value) {
+        int v;
+        try {
+            v = Integer.parseInt(value.getText().toString().trim());
+        } catch (Throwable e) {
+            v = Prefs.bagEvery(this);
+        }
+        v += delta;
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 99) {
+            v = 99;
+        }
+        value.setText(String.valueOf(v));          // 这里可以 setText：是按钮点的，不是打字
+        Prefs.setBagEvery(this, v);
+        AppLog.i("设置：每 " + v + " 张图升级装备星级" + (v == 0 ? "（= 关闭）" : ""));
+    }
+    // ══════════════════════════════════════════════════════════
+    // 页 3 · 诊断
+    // ══════════════════════════════════════════════════════════
+    private void buildDiagPage(LinearLayout host) {
+        int m = UiKit.dp(this, 16);
+        host.setPadding(m, UiKit.dp(this, 14), m, UiKit.dp(this, 12));
 
-        // ══════ 卡片④：特殊方块勾选（用户口径：**放在「更新」下面**）════════
-        //  学 PC 端 `0e43db5` / `2ab3105`：
-        //  用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中**商人和宝库默认勾选**，
-        //    其他的默认不勾选（就是拉黑），**暂时也无法勾选**」✓
-        //  语义（`targets_cfg` 顶部注释）：`types` 里 **true = 主动去处理**；
-        //    缺/False ⇒ `is_blocked(name)` = True ⇒ **拉黑**（不进目标、也不借道 ✓）
-        //  ⚠ 勾选变化**立刻落盘** ✓（PC 端 `2ab3105` 修的坑：攒着不写 ⇒ 改了没用 ✗）
-        //  ⚠ 取消勾选要**显式写 False** ✓ —— 不能删键，否则 `load()` 的
-        //    `setdefault(k, True)` 会把它补回 True ⇒ 取消勾选**永远无效** ✗✗
-        //  ⚠⚠ 真机踩到的坑：**不能在 `buildUi()` 里调 Python** ✗ ——
-        //    `DeviceApi.bind()` 是 `setContentView(buildUi())` **之后**才调的
-        //    ⇒ 那时 `PyBridge` 还没绑 ⇒ `IllegalStateException: bind 还没调用过`
-        //    ⇒ 整个勾选排填不出来（真机实测：卡片在、里面只有一行"读不到清单"）
-        //    ⇒ 所以这里**只搭骨架**，行由 `fillSpecialRows()` 在 bind 之后填 ✓
-        cardSp = card("特殊方块（不勾 = 拉黑）");
-        TextView spHint = new TextView(this);
-        spHint.setText("商人和宝库默认勾选；其余特殊方块暂时锁定（= 拉黑）。"
-                + "改动立刻生效，下一轮规划就按新口径走 ✓");
-        spHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        spHint.setTextColor(UI_SUB);
-        cardSp.addView(spHint);
-        spBody = new LinearLayout(this);
-        spBody.setOrientation(LinearLayout.VERTICAL);
-        cardSp.addView(spBody);
-        spLoading = new TextView(this);
-        spLoading.setText("（正在读清单…）");
-        spLoading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        spLoading.setTextColor(UI_SUB);
-        spBody.addView(spLoading);
-        content.addView(cardSp);
+        LinearLayout hd = UiKit.row(this);
+        hd.addView(UiKit.title(this, "诊断"));
+        // 状态胶囊
+        statusView = UiKit.text(this, "检查中", 9.5f, false, UiKit.OK);
+        statusView.setGravity(android.view.Gravity.CENTER);
+        statusView.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 6),
+                UiKit.dp(this, 12), UiKit.dp(this, 6));
+        hd.addView(statusView);
+        host.addView(hd);
+        host.addView(UiKit.sub(this, "授权 / 更新 / 调试 都在这一页"));
 
-        // ══════ 卡片③：调试（**按钮默认关闭**：Prefs.showDebug 默认 false ⇒ 整盒藏起）════════
-        LinearLayout card3 = card("调试");
-        LinearLayout rowD = new LinearLayout(this);
-        rowD.setOrientation(LinearLayout.HORIZONTAL);
+        // ── 授权三件 ──
+        LinearLayout p1 = UiKit.card(this, 20);
+        p1.addView(UiKit.sectionTitle(this, "首次设置（各点一次）"));
+        p1.addView(permRow(0, "① 授权截图", "MediaProjection，装机会掉", v -> requestCapture()));
+        p1.addView(permRow(1, "② 无障碍设置", "点击通道，常驻", v -> openAccessibility()));
+        p1.addView(permRow(2, "③ 悬浮窗权限", "悬浮条显示用", v -> openOverlayPerm()));
+        host.addView(p1, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(p1, 0, UiKit.dp(this, 12), 0, UiKit.dp(this, 12));
+
+        // ── 更新 ──
+        LinearLayout p2 = UiKit.card(this, 20);
+        p2.addView(UiKit.sectionTitle(this, "更新"));
+        LinearLayout up = UiKit.row(this);
+        LinearLayout ul = UiKit.column(this);
+        ul.addView(UiKit.text(this, "检查补丁与整包", 13, true, UiKit.INK));
+        ul.addView(UiKit.text(this, "补丁重启即生效；整包走系统安装器", 9.5f, false, UiKit.INK_4));
+        up.addView(ul, UiKit.lpWeight(1f));
+        TextView chk = UiKit.text(this, "检查更新", 10.5f, false, 0xFF9CEAFA);
+        chk.setGravity(android.view.Gravity.CENTER);
+        chk.setBackground(UiKit.pill(this, 0x1C22D3EE, 0x6022D3EE, 14));
+        chk.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
+                UiKit.dp(this, 14), UiKit.dp(this, 8));
+        chk.setOnClickListener(v -> doUpdate("auto"));
+        up.addView(chk);
+        UiKit.margins(up, 0, UiKit.dp(this, 8), 0, 0);
+        p2.addView(up);
+        host.addView(p2, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(p2, 0, 0, 0, UiKit.dp(this, 12));
+
+        // ── 调试（默认折叠）──
+        LinearLayout p3 = UiKit.card(this, 20);
+        LinearLayout dbgHead = UiKit.row(this);
+        dbgHead.addView(UiKit.sectionTitle(this, "调试"), UiKit.lpWeight(1f));
+        dbgHead.addView(UiKit.text(this, "默认隐藏", 9.5f, false, UiKit.INK_4));
+        p3.addView(dbgHead);
+
         CheckBox cbDebug = new CheckBox(this);
         cbDebug.setText("显示调试按钮（排查用）");
-        cbDebug.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        cbDebug.setTextColor(UI_TXT);
+        cbDebug.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        cbDebug.setTextColor(UiKit.INK_2);
         cbDebug.setChecked(Prefs.showDebug(this));
-        rowD.addView(cbDebug);
-        rowD.addView(btn("清空日志", BTN_NORMAL, v -> {
-            AppLog.clear();
-            logView.setText("");
-        }), new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 0.55f));
-        card3.addView(rowD);
+        p3.addView(cbDebug);
 
-        LinearLayout debugBox = new LinearLayout(this);
-        debugBox.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout debugBox = UiKit.column(this);
         debugBox.setVisibility(Prefs.showDebug(this) ? View.VISIBLE : View.GONE);
         cbDebug.setOnCheckedChangeListener((v, on) -> {
             Prefs.setShowDebug(this, on);
             debugBox.setVisibility(on ? View.VISIBLE : View.GONE);
         });
-        LinearLayout rowE = new LinearLayout(this);
-        rowE.setOrientation(LinearLayout.HORIZONTAL);
-        rowE.addView(btn("初始化 OCR", BTN_NORMAL, v -> initOcr()), lp());
-        rowE.addView(btn("测识别+dump", BTN_NORMAL, v -> testOcr()), lp());
-        debugBox.addView(rowE);
-        LinearLayout rowF = new LinearLayout(this);
-        rowF.setOrientation(LinearLayout.HORIZONTAL);
-        rowF.addView(btn("点开始冒险", BTN_NORMAL, v -> tapStart()), lp());
-        rowF.addView(btn("导出截图", BTN_NORMAL, v -> dumpFrame()), lp());
-        debugBox.addView(rowF);
-        LinearLayout rowG = new LinearLayout(this);
-        rowG.setOrientation(LinearLayout.HORIZONTAL);
-        rowG.addView(btn("环境快照", BTN_NORMAL, v -> pyInfo()), lp());
-        rowG.addView(btn("端上自检", BTN_NORMAL, v -> pySelftest()), lp());
-        debugBox.addView(rowG);
-        card3.addView(debugBox);
-        content.addView(card3);
-        root.addView(outer, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // ── 推图日志（PC 窗口风格：等宽字体）—— **固定高度常驻**（不跟上面的滚动走，永远看得到）──
-        root.addView(sectionLabel("推图日志（PC 窗口同款）"));
-        logView = new TextView(this);
-        logView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-        logView.setTypeface(Typeface.MONOSPACE);      // ⭐ 等宽：`== 第 1 张图 ==` 这类缩进才对得齐
-        logView.setTextColor(0xFFC8D4E4);
-        logView.setMovementMethod(new ScrollingMovementMethod());
-        logView.setBackgroundColor(UI_PANEL);
-        logView.setPadding(dp(8), dp(6), dp(8), dp(6));
-        root.addView(logView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(150)));
+        LinearLayout g1 = UiKit.row(this);
+        g1.addView(dbBtn("初始化 OCR", "载 det+rec", v -> initOcr()), UiKit.lpWeight(1f));
+        LinearLayout.LayoutParams gp = UiKit.lpWeight(1f);
+        gp.leftMargin = UiKit.dp(this, 10);
+        g1.addView(dbBtn("测识别 + dump", "存帧落盘", v -> testOcr()), gp);
+        debugBox.addView(g1);
 
-        // ── 本次统计（= PC 窗口下面那个独立统计框）—— 固定高度常驻 ──
-        root.addView(sectionLabel("本次统计"));
-        sumView = new TextView(this);
-        sumView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-        sumView.setTypeface(Typeface.MONOSPACE);
-        sumView.setTextColor(0xFFC8D4E4);
-        sumView.setMovementMethod(new ScrollingMovementMethod());
-        sumView.setBackgroundColor(UI_PANEL);
-        sumView.setPadding(dp(8), dp(6), dp(8), dp(6));
-        root.addView(sumView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(110)));
-        return root;
-    }
+        LinearLayout g2 = UiKit.row(this);
+        g2.addView(dbBtn("点开始冒险", "盲点一次", v -> tapStart()), UiKit.lpWeight(1f));
+        LinearLayout.LayoutParams gp2 = UiKit.lpWeight(1f);
+        gp2.leftMargin = UiKit.dp(this, 10);
+        g2.addView(dbBtn("导出截图", "files/dump", v -> dumpFrame()), gp2);
+        UiKit.margins(g2, 0, UiKit.dp(this, 8), 0, 0);
+        debugBox.addView(g2);
 
-    // ── UI 小工具（卡片 / 圆角 / 按钮样式）──
+        LinearLayout g3 = UiKit.row(this);
+        g3.addView(dbBtn("环境快照", "版本/模型", v -> pyInfo()), UiKit.lpWeight(1f));
+        LinearLayout.LayoutParams gp3 = UiKit.lpWeight(1f);
+        gp3.leftMargin = UiKit.dp(this, 10);
+        g3.addView(dbBtn("端上自检", "PyBridge 通", v -> pySelftest()), gp3);
+        UiKit.margins(g3, 0, UiKit.dp(this, 8), 0, 0);
+        debugBox.addView(g3);
 
-    /** 按钮样式代号 */
-    private static final int BTN_NORMAL = 0;
-    private static final int BTN_START = 1;
-    private static final int BTN_STOP = 2;
-    private static final int BTN_ACCENT = 3;
-    private static final int BTN_WARN = 4;
+        LinearLayout g4 = UiKit.row(this);
+        g4.addView(dbBtn("清空日志", "清屏", v -> {
+            AppLog.clear();
+            if (logView != null) {
+                logView.setText("");
+            }
+        }), UiKit.lpWeight(1f));
+        LinearLayout.LayoutParams gp4 = UiKit.lpWeight(1f);
+        gp4.leftMargin = UiKit.dp(this, 10);
+        g4.addView(dbBtn("天赋果实记录", "只看不跑", v -> pyFruitReport()), gp4);
+        UiKit.margins(g4, 0, UiKit.dp(this, 8), 0, 0);
+        debugBox.addView(g4);
 
-    /** 一张圆角卡片（带小节标题），返回内容容器 */
-    private LinearLayout card(String title) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(UI_CARD);
-        g.setCornerRadius(dp(12));
-        g.setStroke(dp(1), UI_CARD_LINE);
-        box.setBackground(g);
-        box.setPadding(dp(10), dp(8), dp(10), dp(10));
-        TextView tv = sectionLabel(title);
-        box.addView(tv);
-        return box;
-    }
+        p3.addView(debugBox);
+        host.addView(p3, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(p3, 0, 0, 0, UiKit.dp(this, 12));
 
-    /** 小节标题（蓝灰色小字） */
-    private TextView sectionLabel(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setTextColor(UI_SUB);
-        tv.setPadding(0, dp(2), 0, dp(6));
-        return tv;
+        // ── 一键反馈 ──
+        LinearLayout fb = UiKit.row(this);
+        fb.setBackground(UiKit.pill(this, 0x16FBBF24, 0x4CFBBF24, 13));
+        fb.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 10),
+                UiKit.dp(this, 14), UiKit.dp(this, 10));
+        LinearLayout fl = UiKit.column(this);
+        fl.addView(UiKit.text(this, "一键反馈", 12, false, 0xFFFFD98A));
+        fl.addView(UiKit.text(this, "打包日志 + 机型 + 现场帧，走系统分享", 8.5f, false, 0xFFC8B08C));
+        fb.addView(fl, UiKit.lpWeight(1f));
+        TextView share = UiKit.text(this, "打包并分享 ›", 10, false, 0xFFFFD98A);
+        share.setOnClickListener(v -> {
+            AppLog.i("点「一键反馈」⇒ 打包日志 + 机型信息 + 现场帧");
+            final Context c = getApplicationContext();
+            new Thread(() -> {
+                try {
+                    Feedback.collectAndShare(c);
+                } catch (Throwable t) {
+                    AppLog.i("[反馈] 异常：" + t);
+                }
+            }, "fb").start();
+        });
+        fb.addView(share);
+        host.addView(fb, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
     /**
-     * 「特殊方块」勾选排 —— 学 PC 端 `0e43db5` / `2ab3105` / `5de0e9c`。
+     * 授权项一行：状态点 + 标题/说明 + 右侧「已就绪 / 去设置」。
      *
-     * <p>用户口径（PC 端原话）：「窗口加上特殊方块勾选，其中<b>商人和宝库默认勾选</b>，
-     * 其他的默认不勾选（就是拉黑），<b>暂时也无法勾选</b>」✓
+     * <p>⚠ 用户口径（2026-10-19）：「单项设置完成要立即显示已就绪，现在看不出缺哪个」——
+     * 旧版这一行**只有静态的「去设置 ›」**，做完回来也还是那句，
+     * 用户必须回到「运行」页看三格条才知道生效没 ⇒ 就地显示状态。
      *
-     * <p>语义：`targets_cfg.types` 里 <b>true = 主动去处理</b>；缺/False ⇒ 拉黑 ✓
-     * <p>勾选变化<b>立刻落盘</b> ✓（PC 端 `2ab3105` 修的坑：攒着不写 ⇒ 改了没用 ✗）
-     * <p>可勾的两个 = `explore_android.SP_EDITABLE`（旅行商人 / 黄金宝库），
-     * 其余 `locked=true` ⇒ <b>灰掉</b>（用户口径「暂时无法勾选」✓）
+     * <p>@param kind 0=截图 1=无障碍 2=悬浮窗；由 {@link #refreshPermissions()} 按它取真值
+     */
+    private View permRow(int kind, String title, String desc, View.OnClickListener l) {
+        LinearLayout row = UiKit.row(this);
+        row.setBackground(UiKit.pill(this, 0x0DFFFFFF, 0x1AFFFFFF, 13));
+        row.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 9),
+                UiKit.dp(this, 12), UiKit.dp(this, 9));
+
+        View dot = new View(this);
+        dot.setBackground(dotBg(UiKit.INK_4));
+        LinearLayout.LayoutParams dlp = UiKit.lpW(UiKit.dp(this, 6), UiKit.dp(this, 6));
+        dlp.rightMargin = UiKit.dp(this, 9);
+        row.addView(dot, dlp);
+
+        LinearLayout col = UiKit.column(this);
+        col.addView(UiKit.text(this, title, 12.5f, false, UiKit.INK));
+        col.addView(UiKit.text(this, desc, 9, false, UiKit.INK_4));
+        row.addView(col, UiKit.lpWeight(1f));
+
+        TextView go = UiKit.text(this, "去设置 ›", 10, false, UiKit.ACCENT);
+        row.addView(go);
+        row.setOnClickListener(l);
+        UiKit.margins(row, 0, UiKit.dp(this, 6), 0, 0);
+
+        permDots[kind] = dot;
+        permLabels[kind] = go;
+        return row;
+    }
+
+    /** 授权三项的状态点 / 状态文字（key = 0 截图 1 无障碍 2 悬浮窗） */
+    private final View[] permDots = new View[3];
+    private final TextView[] permLabels = new TextView[3];
+
+    /**
+     * 刷新「首次设置」三项的就地状态。
      *
-     * <p>⚠⚠ 真机踩到的坑：<b>不能在 `buildUi()` 里调它</b> ✗ ——
-     * `DeviceApi.bind()` 是 `setContentView(buildUi())` <b>之后</b>才调，
-     * 那时 `PyBridge` 还没绑 ⇒ `IllegalStateException: bind 还没调用过`
-     * ⇒ 卡片建出来了、里面只有一行「读不到清单」（真机实测 ✗）
-     * ⇒ 所以本方法<b>幂等 + 可重试</b>：在 bind 之后调一次，
-     * 没成功就让 tick 每轮再试（Python 冷启动慢也能补上 ✓）
+     * <p>⚠ tick 每 2 秒调一次（见 onCreate 的 tick），所以**用户从系统设置页返回后
+     * 最多 2 秒就能看到变成「已就绪」** —— 不用回运行页看三格条。
+     */
+    private void refreshPermissions() {
+        boolean[] ok = new boolean[]{
+                FrameStore.has(),
+                AutoTouchService.ready(),
+                Settings.canDrawOverlays(this),
+        };
+        String[] okText = {"已就绪", "已就绪", "已就绪"};
+        String[] noText = {"去设置 ›", "去设置 ›", "去设置 ›"};
+        for (int i = 0; i < permDots.length; i++) {
+            if (permDots[i] == null || permLabels[i] == null) {
+                continue;
+            }
+            permDots[i].setBackground(dotBg(ok[i] ? UiKit.OK : UiKit.INK_4));
+            permLabels[i].setText(ok[i] ? okText[i] : noText[i]);
+            permLabels[i].setTextColor(ok[i] ? UiKit.OK : UiKit.ACCENT);
+        }
+    }
+
+    private View dbBtn(String title, String desc, View.OnClickListener l) {
+        LinearLayout b = UiKit.column(this);
+        b.setBackground(UiKit.pill(this, 0x0DFFFFFF, 0x1AFFFFFF, 12));
+        b.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 8),
+                UiKit.dp(this, 12), UiKit.dp(this, 8));
+        b.addView(UiKit.text(this, title, 11.5f, false, UiKit.INK_2));
+        b.addView(UiKit.text(this, desc, 8.5f, false, UiKit.INK_4));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    /**
+     * 特殊方块勾选排（胶囊 chip 版）。语义与老版完全一致。
+     *
+     * <p>⚠⚠ 真机踩到的坑（沿用老注释）：不能在 buildUi() 里调它 ——
+     * DeviceApi.bind() 在 setContentView() 之后才调，那时 PyBridge 还没绑，
+     * 会抛 IllegalStateException: bind 还没调用过 ⇒ 卡片在、里面只有一行「读不到清单」。
+     * 所以本方法幂等 + 可重试：bind 之后调一次，没成功就让 tick 每轮再试。
      */
     private void fillSpecialRows() {
-        if (spFilled || spBody == null) {
+        if (spBody == null) {
             return;
         }
-        String js = PyBridge.call("special_list");
+        // ⚠ 守卫判据：**容器里只有那行「正在读清单…」⇒ 视为没填过**。
+        //   旧写法只看 `childCount > 0`，而加载提示本身就是 1 个子 View
+        //   ⇒ 永远判定"已填好"⇒ 一次都不重试（真机 v2.02 的 bug）
+        boolean onlyLoading = spBody.getChildCount() <= 1
+                && spBody.getChildAt(0) == spLoading;
+        if (spFilled && !onlyLoading && spBody.getChildCount() > 0) {
+            return;
+        }
+        if (spFilled && onlyLoading) {
+            AppLog.i("特殊方块：容器里只剩加载提示 ⇒ 当作没填，重试一次");
+            spFilled = false;
+        } else if (spFilled && spBody.getChildCount() == 0) {
+            AppLog.i("特殊方块：spBody 被清空过 ⇒ 重填一次");
+            spFilled = false;
+        }
+        String js = null;
+        try {
+            js = PyBridge.call("special_list");
+        } catch (Throwable e) {
+            AppLog.i("特殊方块：调用 special_list 异常 ⇒ " + e);
+        }
         org.json.JSONArray arr = null;
         try {
             org.json.JSONObject o = new org.json.JSONObject(
                     (js == null || js.isEmpty()) ? "{}" : js);
             arr = o.optJSONArray("items");
         } catch (Throwable e) {
-            AppLog.i("特殊方块：解析列表失败 " + e);
+            AppLog.i("特殊方块：解析列表失败 " + e
+                    + " ｜ 原文前120字=" + (js == null ? "null"
+                    : js.substring(0, Math.min(120, js.length()))));
         }
         if (arr == null || arr.length() == 0) {
+            final String why = (js == null) ? "PyBridge 还没就绪"
+                    : (js.isEmpty() ? "Python 返回空串"
+                       : (arr == null ? "JSON 里没有 items 数组" : "items 是空数组"));
             if (spLoading != null) {
                 spLoading.setText("（正在读清单…若一直这样，看日志）");
             }
-            return;                    // 不置 spFilled ⇒ 下一轮 tick 会再试 ✓
+            if (js != null && !js.isEmpty() && !spLoggedFail) {
+                spLoggedFail = true;
+                AppLog.i("特殊方块：清单为空 ⇒ " + why + " ｜ 原文前120字="
+                        + js.substring(0, Math.min(120, js.length())));
+            }
+            return;
         }
         spBody.removeAllViews();
+        spLoading = null;          // 提示行已被移除，别再拿它做判据
         spFilled = true;
-        LinearLayout box = spBody;
-        // 排布：横向流式放，每行最多 2 个（手机上再窄也不挤 ✓）
-        LinearLayout row = null;
+        try {
+            int nLocked = 0;
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o = arr.optJSONObject(i);
+                if (o != null && o.optBoolean("locked", true)) {
+                    nLocked++;
+                }
+            }
+            AppLog.i("特殊方块：勾选排已填 " + arr.length() + " 个（锁定 " + nLocked + " 个）");
+        } catch (Throwable ignored) {
+        }
+
+        // ── 排版：**按实测宽度换行**，不再"每行硬塞 3 个" ──
+        //   ⚠ 真机踩到的坑（v2.02 首装，用户原话「特殊方块排版有问题」）：
+        //     旧写法是 `used = (used+1) % 3` —— 每行固定 3 个，但 chip 宽度随名字长短变化
+        //     ⇒ 长名字（如「机巧宝箱怪」）被挤成**两行文字**，比邻居高一倍，整排歪掉 ✗
+        //   ⇒ 改成：用量宽函数先算每颗 chip 的宽度，累加超过容器宽就换行。
+        //     容器宽 = 卡片内容宽（屏宽 - 两侧 16 外边距 - 卡片左右 20 内边距）。
+        int avail = getResources().getDisplayMetrics().widthPixels
+                - UiKit.dp(this, 16 * 2)      // 页面左右外边距
+                - UiKit.dp(this, 20 * 2)      // 卡片左右内边距
+                - UiKit.dp(this, 4);          // 余量，防浮点误差把最后一颗挤下去
+        final int gap = UiKit.dp(this, 8);
+
+        // 先按「拉黑类 / 可点类」分组 —— 两类的"不勾"语义不同，混排会让人误读
+        java.util.List<org.json.JSONObject> blocks = new java.util.ArrayList<>();
+        java.util.List<org.json.JSONObject> picks = new java.util.ArrayList<>();
         for (int i = 0; i < arr.length(); i++) {
             org.json.JSONObject it = arr.optJSONObject(i);
             if (it == null) {
                 continue;
             }
+            if (it.optBoolean("block_class", true)) {
+                blocks.add(it);
+            } else {
+                picks.add(it);
+            }
+        }
+
+        if (!blocks.isEmpty()) {
+            TextView cap = UiKit.text(this, "拉黑类（不勾 = 不点，也不借道）", 9.5f, false, UiKit.INK_4);
+            spBody.addView(cap, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            clp.topMargin = UiKit.dp(this, 8);
+            cap.setLayoutParams(clp);
+            chipFlow(blocks, avail, gap);
+        }
+        if (!picks.isEmpty()) {
+            TextView cap = UiKit.text(this, "可点类（不勾 = 不专门拿，挡路仍会点）", 9.5f, false, UiKit.INK_4);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            clp.topMargin = UiKit.dp(this, 12);
+            spBody.addView(cap, clp);
+            chipFlow(picks, avail, gap);
+        }
+    }
+
+    /**
+     * 把一组特殊方块画成**按宽度流式换行**的 chip。
+     *
+     * <p>⚠ 宽度必须实测：中文字宽不均（「旅行商人」4 字 vs 「机巧宝箱怪」5 字），
+     * 固定每行 N 个一定会把长的挤换行 —— 那就是真机上看到的"排版有问题"。
+     */
+    private void chipFlow(java.util.List<org.json.JSONObject> items, int avail, int gap) {
+        LinearLayout row = null;
+        int usedW = 0;
+        for (org.json.JSONObject it : items) {
             final String nm = it.optString("name", "");
             final boolean on = it.optBoolean("on", false);
             final boolean locked = it.optBoolean("locked", true);
-            if (i % 2 == 0) {
-                row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                box.addView(row);
-            }
-            CheckBox cb = new CheckBox(this);
-            cb.setText(nm + (locked ? "（锁定）" : ""));
-            cb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-            cb.setTextColor(locked ? UI_SUB : UI_TXT);
-            cb.setChecked(on);
-            cb.setEnabled(!locked);            // 锁定的灰掉（用户口径「暂时无法勾选」✓）
+            final boolean blockClass = it.optBoolean("block_class", true);
+
+            TextView ch = UiKit.text(this,
+                    nm + (locked ? "" : (on ? "  ✓" : "  ○")),
+                    11.5f, false,
+                    locked ? 0xFF6E7C90 : (on ? 0xFF9CEAFA : 0xFF78849A));
+            ch.setGravity(android.view.Gravity.CENTER);
+            ch.setSingleLine(true);                    // ⚠ 关键：不许换行（换行就歪）
+            ch.setBackground(locked
+                    ? UiKit.pill(this, 0x08FFFFFF, 0x14FFFFFF, 15)
+                    : (on ? UiKit.pill(this, 0x1E22D3EE, 0x6E22D3EE, 15)
+                          : UiKit.pill(this, 0x0FFFFFFF, 0x24FFFFFF, 15)));
+            ch.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 7),
+                    UiKit.dp(this, 14), UiKit.dp(this, 7));
+            ch.setTag(it);
+            ch.setContentDescription(locked ? nm + "（锁定）"
+                    : (blockClass ? nm + "〔不勾=拉黑〕" : nm + "〔不勾=不专门拿〕"));
             if (!locked) {
-                cb.setOnCheckedChangeListener((v, val) -> {
-                    String r = PyBridge.call("special_set", nm, val);
-                    AppLog.i("特殊方块「" + nm + "」⇒ "
-                            + (val ? "勾选·主动处理" : "取消·拉黑") + "（" + r + "）");
-                });
+                ch.setOnClickListener(v -> toggleSpecial(v));
             }
-            row.addView(cb, lp());
+
+            // 量宽：文字宽 + 左右 padding（含 ✓/○ 标记）
+            android.graphics.Paint pt = ch.getPaint();
+            int textW = (int) Math.ceil(pt.measureText(ch.getText().toString()));
+            int chipW = textW + UiKit.dp(this, 28);
+
+            if (row == null || (usedW > 0 && usedW + gap + chipW > avail)) {
+                row = UiKit.row(this);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                rlp.topMargin = UiKit.dp(this, 8);
+                spBody.addView(row, rlp);
+                usedW = 0;
+            }
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            if (usedW > 0) {
+                cp.leftMargin = gap;
+            }
+            row.addView(ch, cp);
+            usedW += (usedW > 0 ? gap : 0) + chipW;
         }
     }
 
-    /** 给任意 View 铺圆角底（状态芯片用） */
-    private void chip(View v, int bg, int line) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(bg);
-        g.setCornerRadius(dp(9));
-        g.setStroke(dp(1), line);
-        v.setBackground(g);
-    }
-
-    private Button btn(String text, int style, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        int bg = UI_BTN;
-        int fg = UI_TXT;
-        switch (style) {
-            case BTN_START:
-                bg = 0xFF1D4A2C;
-                fg = 0xFF8CFF9E;
-                break;
-            case BTN_STOP:
-                bg = 0xFF4A1D1D;
-                fg = 0xFFFF9E9E;
-                break;
-            case BTN_ACCENT:
-                bg = UI_BTN_ACCENT;
-                fg = 0xFFB0D8FF;
-                break;
-            case BTN_WARN:
-                bg = UI_BTN_WARN;
-                fg = 0xFFFFD98A;
-                break;
-            default:
-                break;
+    /** 点一颗特殊方块：立刻落盘 + 就地改观感（不重建，避免滚动位置乱跳） */
+    private void toggleSpecial(android.view.View v) {
+        org.json.JSONObject o2 = (org.json.JSONObject) v.getTag();
+        String name2 = o2.optString("name", "");
+        boolean locked = o2.optBoolean("locked", true);
+        if (locked) {
+            AppLog.i("特殊方块「" + name2 + "」是锁定项（暂不可勾选）");
+            return;
         }
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(bg);
-        g.setCornerRadius(dp(10));
-        g.setStroke(dp(1), 0x33FFFFFF);
-        b.setBackground(g);
-        b.setTextColor(fg);
-        // ⭐ Material Button 默认 minHeight=48dp ⇒ 8 行按钮就吃掉 1150px。收到 34dp，
-        //    再配合「整页可滚动 + 日志/统计固定高度常驻」（2026-09-29 用户口径：
-        //    「也可能做成整体可以往下滑啊，不要压缩太多」⇒ 不压缩，改成滚动）✓
-        b.setMinimumHeight(dp(34));
-        b.setMinHeight(dp(34));
-        b.setPadding(dp(6), dp(2), dp(6), dp(2));
-        b.setOnClickListener(l);
-        return b;
+        boolean nowOn = !o2.optBoolean("on", false);
+        boolean blk = o2.optBoolean("block_class", true);
+        String r = PyBridge.call("special_set", name2, nowOn);
+        try {
+            o2.put("on", nowOn);
+        } catch (Throwable ignored) {
+        }
+        TextView tv = (TextView) v;
+        tv.setText(name2 + (nowOn ? "  ✓" : "  ○"));
+        tv.setTextColor(nowOn ? 0xFF9CEAFA : 0xFF78849A);
+        tv.setBackground(nowOn
+                ? UiKit.pill(this, 0x1E22D3EE, 0x6E22D3EE, 15)
+                : UiKit.pill(this, 0x0FFFFFFF, 0x24FFFFFF, 15));
+        AppLog.i("特殊方块「" + name2 + "」⇒ "
+                + (nowOn ? "勾选·主动处理"
+                         : (blk ? "取消·拉黑（不点、不借道）"
+                                : "取消·不专门拿（挡路仍会点）"))
+                + "（" + r + "）");
     }
 
-    private LinearLayout.LayoutParams lp() {
-        return new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+    /**
+     * 刷新状态：运行页就绪条 + 大字区 + 主按钮，诊断页状态胶囊。
+     *
+     * <p>每个控件都判空 —— 它们只在自己那一页被创建（切页会重建），
+     * 而 tick 每 2 秒无条件调用本方法，不判空就是 NPE。
+     */
+    private void refreshStatus() {
+        boolean cap = FrameStore.has();
+        boolean touch = AutoTouchService.ready();
+        boolean locked = "有（先解锁）".equals(redLockText);
+        boolean ready = cap && touch && !locked;
+
+        if (dotCapture != null) {
+            setDot(dotCapture, cap);
+            valCapture.setText(cap ? "就绪" : "未授权");
+        }
+        if (dotTouch != null) {
+            setDot(dotTouch, touch);
+            valTouch.setText(touch ? "就绪" : "未开启");
+        }
+        if (dotLock != null) {
+            dotLock.setBackground(dotBg(locked ? UiKit.WARN : UiKit.OK));
+            valLock.setText(locked ? "有" : "无");
+        }
+
+        if (mainBtn != null) {
+            if (locked) {
+                setMainBtn(2, "⑭ 红装解锁（点这里才能重新开跑）",
+                        UiKit.gradientPill(this, 0xFF7A5410, 0xFF563A0C, 28),
+                        0xFFFFD98A);
+            } else if (running) {
+                setMainBtn(1, "■  停止探索",
+                        UiKit.gradientPill(this, 0xFF9C2E3A, 0xFF6C1C28, 28),
+                        0xFFFFE8E8);
+            } else {
+                setMainBtn(0, "▶  准备启动",
+                        UiKit.gradientPill(this, 0xFF40E2F6, 0xFF247AE2, 28),
+                        0xFF05121E);
+            }
+        }
+
+        if (bigStatus != null) {
+            if (locked) {
+                bigStatus.setText("发现红装");
+                bigStatus.setTextColor(UiKit.INK);
+                subStatus.setText("解锁后才能重新开跑；解锁键在下面橙色条");
+                ring.setColor(UiKit.WARN);
+                ring.set(0f, "", "", true);
+            } else if (running) {
+                bigStatus.setText("正在跑图");
+                subStatus.setText("计划执行中 · 进度看悬浮条或下面日志");
+                ring.setColor(UiKit.ACCENT);
+            } else if (ready) {
+                bigStatus.setText("就绪 · 等待启动");
+                subStatus.setText("点下面按钮后由悬浮条接管，切回游戏即自动开跑");
+                ring.setColor(UiKit.ACCENT);
+                ring.set(0f, "", "", false);
+            } else {
+                bigStatus.setText("还不能开跑");
+                subStatus.setText(!cap ? "缺「① 授权截图」"
+                        : (!touch ? "缺「② 无障碍设置」" : "先处理红装锁"));
+                ring.setColor(UiKit.WARN);
+                ring.set(0f, "", "", false);
+            }
+        }
+
+        refreshPermissions();
+        if (statusView != null) {
+            statusView.setText(ready ? "全部就绪" : "有未完成项");
+            statusView.setTextColor(ready ? UiKit.OK : UiKit.WARN);
+            statusView.setBackground(UiKit.pill(this,
+                    ready ? 0x1A34D399 : 0x1AFBBF24,
+                    ready ? 0x8034D399 : 0x80FBBF24, 11));
+        }
+    }
+
+    /**
+     * 把 hud() 的三格读数刷到运行页。
+     *
+     * <p>⚠ 取不到时显示 "—" 而**不是 0**：0 会让用户以为"体力真的空了"，
+     * 这正是本项目反复踩的「判据静默失效」那一族的反面 —— 读不到就要看得出来。
+     */
+    private void applyHud(String json) {
+        if (json == null || json.isEmpty() || "{}".equals(json)) {
+            return;
+        }
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(json);
+            if (statStamina != null) {
+                statStamina.setText(fmt(o.optInt("stamina", -1)));
+            }
+            if (statClover != null) {
+                statClover.setText(fmt(o.optInt("clover", -1)));
+            }
+            if (statCoin != null) {
+                int coin = o.optInt("coin", -1);
+                statCoin.setText(coin < 0 ? "—" : String.format(Locale.US, "%,d", coin));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String fmt(int v) {
+        return v < 0 ? "—" : String.valueOf(v);
+    }
+
+    private void setMainBtn(int mode, String label, GradientDrawable bg, int fg) {
+        mainBtnMode = mode;
+        mainBtn.setText(label);
+        mainBtn.setTextColor(fg);
+        mainBtn.setBackground(bg);
+    }
+
+    private void setDot(View v, boolean ok) {
+        v.setBackground(dotBg(ok ? UiKit.OK : UiKit.WARN));
+    }
+
+    private GradientDrawable dotBg(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        return g;
     }
 
     private int dp(int v) {
@@ -690,6 +1489,9 @@ public class MainActivity extends Activity {
     }
 
     private void appendLog(String line) {
+        if (logView == null) {
+            return;              // 当前不在运行页 ⇒ 日志仍在 AppLog 里，切回来会重放
+        }
         logView.append(line + "\n");
         scrollToEnd(logView);
     }
@@ -703,6 +1505,9 @@ public class MainActivity extends Activity {
             return;
         }
         lastSummary = txt;
+        if (sumView == null) {
+            return;
+        }
         sumView.setText(txt.isEmpty() ? "（还没跑过；跑完一张图后这里会出现 PC 同款统计）" : txt);
         // ⚠ 统计面板**停在顶部**（要看到 `════════ 本次统计 ════════` 那一行）；
         //   只有日志区是"跟着尾巴走"（showSummary 里别调 scrollToEnd ✗ 实测会只看到最后两行）
@@ -718,7 +1523,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 「每 X 张图升级装备星级」提交（失去焦点 / onPause 时）—— 空/非法就回落默认 10 */
     private void commitBagEvery() {
         if (etBagEvery == null) {
             return;
@@ -763,22 +1567,6 @@ public class MainActivity extends Activity {
         AppLog.i("设置：每 " + v + " 张图升级装备星级" + (v == 0 ? "（= 关闭）" : ""));
     }
 
-    private void refreshStatus() {
-        statusView.setText(String.format(Locale.US,
-                "截图：%s ｜ 点击通道：%s ｜ 红装锁：%s",
-                FrameStore.has() ? "就绪" : "未授权",
-                AutoTouchService.ready() ? "就绪" : "未开启",
-                redLockText));
-        // ⭐ v0.26：OCR 不再上芯片 —— 第一次 OCR 时自动初始化（非前置条件，用户口径），
-        //   显示「未初始化」反而让用户以为要去手动点（实际不用）
-        boolean ok = FrameStore.has() && AutoTouchService.ready()
-                && "无".equals(redLockText);
-        statusView.setTextColor(ok ? 0xFF8CFFB0 : 0xFFFFC08A);
-        // ⭐ 芯片底色跟着变：全就绪=绿底，缺哪样=橙底（一眼看出还差什么）
-        chip(statusView, ok ? 0xFF12291A : 0xFF33220E,
-                ok ? 0xFF1F5C33 : 0xFF6B4A1D);
-    }
-
     // ---------------- 动作 ----------------
 
     private void requestCapture() {
@@ -790,14 +1578,29 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        // ⭐ v2.10 诊断：把回调的真实参数打出来。
+        //   之前"授权了但没帧"，就是因为不知道这个回调到底有没有被调用、res 是什么。
+        AppLog.i("[截图授权] onActivityResult req=" + req + " res=" + res
+                + " data=" + (data == null ? "null" : "有"));
+        if (req == REQ_CAPTURE && res != RESULT_OK) {
+            AppLog.i("[截图授权] 用户取消或系统拒绝（res=" + res + "）⇒ 没有截图通道");
+        }
+        if (req == REQ_CAPTURE && res == RESULT_OK && data == null) {
+            AppLog.i("[截图授权] ⚠ RESULT_OK 但 data 为 null ⇒ 系统没给 projection 令牌");
+        }
         if (req == REQ_CAPTURE && res == RESULT_OK && data != null) {
             Intent i = new Intent(this, CaptureService.class);
             i.putExtra(CaptureService.EXTRA_CODE, res);
             i.putExtra(CaptureService.EXTRA_DATA, data);
-            if (Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(i);
-            } else {
-                startService(i);
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startForegroundService(i);
+                } else {
+                    startService(i);
+                }
+                AppLog.i("[截图授权] 已启动 CaptureService ✓");
+            } catch (Throwable t) {
+                AppLog.i("[截图授权] ⚠ 启动 CaptureService 失败：" + t);
             }
             ui.postDelayed(this::refreshStatus, 1500);
         }
@@ -956,6 +1759,28 @@ public class MainActivity extends Activity {
      * <p>用户 2026-10-04 口径：点了「检查更新」要能立刻看出**发生了什么**
      * （已是最新／补丁已下载待重启生效／需要更新整包／失败原因）。
      */
+    /**
+     * 🌱 看天赋果实记录（v1.78 新增）。
+     *
+     * 用户口径（PC 原文）：「类似**小助手的天赋果实记录**，做好放到**工具栏**里」
+     *   ＋「**自动扫描**，工具那里能看到天赋果实获取记录」
+     *
+     * ⚠ 这个按钮**只读记录、不动游戏**：真正的扫描在「体力 < 100 收工」时自动做 ✓
+     *   （不给「立即扫」按钮 —— 扫一次要点开背包、翻页、识图，
+     *     放在工具栏里让人随手点会打断正在跑的那一局 ✗）
+     */
+    private void pyFruitReport() {
+        pyCall("天赋果实记录", () -> {
+            try {
+                PyBridge.ensureStarted(getApplicationContext());
+                return PyBridge.call("_cmd_run_snippet",
+                        "import fruit; print(fruit.report_text())");
+            } catch (Throwable t) {
+                return "读取失败：" + t;
+            }
+        });
+    }
+
     private void showUpdateResult(String msg) {
         try {
             new android.app.AlertDialog.Builder(this)
