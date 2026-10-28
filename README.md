@@ -4730,3 +4730,503 @@ popups 派遣分支：if int(ctx.get('slots_free', 1) or 0) <= 0:   ← ⛔ 把�
   `tools/probe_slots_semantics177.py`（`None` vs `0` 的语义）、
   `tools/probe_slotrow177.py`（裁槽位行）
 
+
+---
+
+### 6.74 ⭐⭐⭐⭐⭐ v2.09 「弹窗系全部静默失效」—— `C` 被污染成 0（2026-10-26/27）
+
+> 用户报的问题（**五个，看起来毫不相关**）：
+> 「显示画面认不出，正在收起面板」/「没有任何面板也收起面板」/「进图前乱点、切到其他图」/
+> 「boss 格子打不了」/「传承祭坛显示本轮不买」
+>
+> **它们全是同一个根因**：`dlg_shift()` 返回 0 ⇒ 整个「弹窗系」坐标系失效。
+
+#### 病根链（三道叠加）
+
+1. **`RefMapper.setScreen()` 被参考帧尺寸污染**
+   ```
+   23:29:49  屏幕 1280x2588   （未锚定）
+   23:29:55  屏幕 1280x2772 ⇒ 锚定模型 kx=1.1852 shift=496
+   23:29:59  屏幕 1080x1920 ⇒ 缩放 k=1.0000      ← 有人把**参考帧**尺寸写进来了
+   ```
+   `shift = 1920 − 1920×1.0 = 0` ⇒ `dialogShift() = 960 + (0−960)/1 = **0**`
+
+2. **`mapbot.dlg_shift()` 把首次结果永久缓存**
+   ```python
+   if _DLG_C is None:
+       try:    _DLG_C = float(jclass("...RefMapper").dialogShift())
+       except: _DLG_C = 0.0        # ← 0 一旦缓存，整个会话都是 0
+   ```
+
+3. **所有弹窗系判据都靠 `bool(dlg_c())` 当闸门**
+   ```python
+   if not dlg_c(): return None      # dlg_ocr 直接不做事
+   _fe_anchor = ... and bool(dlg_c()) and ...   # 战斗分支进不去
+   dlg_items(items)                 # C=0 ⇒ 不加偏移 ⇒ band 全错位
+   ```
+
+⇒ **战斗/宝库/商人/勇者之墓/祭坛 的所有面板全认不出**，而**表面没有任何报错**。
+
+#### 取证方法（这次最值钱的一条）
+
+PC 端装了 `rapidocr_onnxruntime`，而项目自带的 ONNX 模型就在 `app/src/main/assets/`
+⇒ **在 PC 上逐像素复刻端侧的 `toRef()` / `toDlg()` 裁剪，用同一套模型离线跑出手机端看到的一切**：
+
+```python
+# 复刻 RefMapper.toRef（anchored 分支）
+kx = W/1080.0; shift = H - 1920*kx
+top_end  = topInset + 300*kx          # 顶块 dst y 0..300
+bot_start = 300*kx + shift            # 锚底区 dst y 300..1920
+ref.paste(im.crop((0,topInset,W,top_end)).resize((1080,300)), (0,0))
+ref.paste(im.crop((0,bot_start,W,H)).resize((1080,1620)), (0,300))
+```
+
+⚠ **端侧还有一层 0.75 倍**（`OcrEngine.SCALED_W=810`）＋ det 口径是 `limit_type=max`
+（不是 rapidocr 默认的 `min`）⇒ 离线复刻时要一起对；否则 OCR 结果与真机不同。
+
+#### 修法（4 处，缺一不可）
+
+| 位置 | 改动 |
+|---|---|
+| `RefMapper.setScreen()` | 记录 `devScreenW/H`，**拒绝参考帧尺寸**（1080×1920）覆盖设备映射 |
+| `mapbot.dlg_shift()` | **只缓存非零值**；0 与异常都留 `None` ⇒ 下次重试 |
+| `explore_loop.dlg_c()` | 同上 |
+| `explore_loop.dlg_ocr()` | 判据从 `bool(dlg_c())` 改成 `hasattr(b,"ocr_dlg")`（真机专有能力，与 C 无关） |
+
+**验证**：`C = 209.43743896484375`（之前恒为 0）＋ 日志出现
+`· 居中弹窗偏移 C=+209px（高分辨率屏 ⇒ 弹窗系 = 归一化帧 y+209）`
+
+#### 同批修掉的其它 7 个（都是「同一类错」的不同形态）
+
+这类错的共同点：**判据建在拿不到数据的地方 / 坐标通道混用 / 写死坐标落在危险区**。
+
+| # | 位置 | 病 | 修 |
+|---|---|---|---|
+| ② | `_shrine_price` / `_shrine_price_xy` | band 写死 `(1305,1425)`，那是**弹窗系**值当**参考系**用 ⇒ 设备 2043~2185，真值 1862，**差 180px** ⇒ 永远读不到价格 | 改 `SHRINE_PRICE_XY[1] − dlg_shift()` 动态算 |
+| ③ | `shrine_flow` 购买 | `_shrine_price_xy()` 返回**参考系**，却走 `tap_dlg()`（弹窗系）⇒ 偏 **248px** ⇒ 点空 ⇒ 不弹确认框 | 参考系走 `tap()`，锚点走 `tap_dlg()` |
+| ④ | `_confirm()` | **只 OCR 一次**就 `return False`（实测只等 0.68s），而确认框有弹出动画 ⇒ 永远判「没弹框」 | 轮询 6 轮 ≈4.2s，每轮 `_invalidate()` 作废帧缓存；判据去空格 + `cy>800`→`cy>600` |
+| ⑤ | `explore_loop.UNIVERSAL_CLOSE = (541,1890)` | `tap()` 换算到真机是 **设备 y=2736 = 底部导航栏「开始冒险」** ⇒ 一点就切图 | `popup_none` 计数**必须要求棋盘真被盖住**；认不出面板时**取消盲点** |
+| ⑥ | `buypanels.UNIV_CLOSE = (541,1890)` | **同一个坐标**走 `tap_dlg()` 落在 **设备 y≈2488 = 棋盘内** ⇒ 点一个格子 | `_univ_close` 认不到文字按钮就**不点**，如实返回 False |
+| ⑦ | 12 个面板收尾点 | `if _has(_items(b), 标题): _univ_close(...)` —— 而**面板标题在 `toRef` 丢弃带里** ⇒ 真机恒 False ⇒ 面板永远关不掉 ⇒ 残留面板挡住后续格子 | 新增 `panel_still_open()`（用**弹窗帧**判）+ `close_panel()`，确认开着才动手 |
+| ⑧ | `final_collect` 补点 | 点「最后点过的那格」，若是 **boss 格** ⇒ 把**战斗面板又开一次**，而本函数只收莱姆/新装备/预言石板 ⇒ 面板残留 ⇒ 下一张图开局点不动 | 加 `fight_skip`（与 `purple_skip`/`buy_skip` 同类保护） |
+
+#### 移植自 PC 的一个真 bug（`marked_rc`）
+
+对拍 `_infer_chain_consumed` 发现手机端 **78 行 / PC 108 行** —— 不是行数漂移，是**手机端缺一个修复**：
+
+```python
+def _infer_chain_consumed(..., marked_rc=None):   # PC 多这个参数
+    _mk = set(marked_rc or ())
+    ...
+    if x in _mk:            # 带内容标记的格 → 跳过
+        _skip_marked.append(x); covered.add(x); covered |= nbrs(x); continue
+```
+
+PC 原文记着这个病：**「刷了 68 张图只打 62 个首领」** ——
+本函数只看「亮着却没人能揭示」就判「已被连锁吃掉」，**完全没看这格有没有内容标记**
+⇒ 把**带 boss 标记**的格当被吃掉的裸地剔出模型 ⇒ 那 6 张图开局就判「没目标」退图。
+
+游戏里**连锁只吃普通空地**（`SpecialSpot==0` 的连通片）⇒ 带标记的格不可能被连锁吃掉，
+所以这条判据在逻辑上就错。已整段移植（函数 + 调用点传 `marked_rc`）。
+
+#### ⚠ 三条踩过的坑（下次别再踩）
+
+1. **`tap()` 与 `tap_dlg()` 差 248px** —— 同一个 `(541,1890)`：
+   `tap()` → 设备 2736（导航栏）；`tap_dlg()` → 设备 2488（棋盘内）。
+   **写死坐标前必须先算它在两条通道上的落点**。
+2. **Gradle 的 Python 增量判断不可靠** —— 改了 `.py` 但 `mergeArm64ReleasePythonSources`
+   报 `UP-TO-DATE`，装上去的还是旧代码（日志里连新加的 `src` 字段都没有）。
+   **必须 `rm -rf app/build/python app/build/intermediates/assets/*/merge*/chaquopy` 强制重打**，
+   并核对 APK 内 `buypanels.pyc` 的**字节数变化** + 新符号命中。
+3. **装包后 `MediaProjection` 必掉**，且**已在跑进程不会自动加载新代码** ——
+   必须 `am force-stop` 再启，并核对 `ps -o STIME` 晚于 `lastUpdateTime`。
+   本次就因此误判过一次（进程 01:57 起、APK 02:05 装，02:06 那次祭坛跑的还是旧代码）。
+
+#### 交付
+
+- `versionCode=209` / `versionName="2.09"`，**已装机** `lastUpdateTime=2026-10-27 02:22:40`
+- ✅ **传承祭坛真机验证通过**（用户确认「传承祭坛没问题了」）
+- 门禁 **946 通过 / 2 失败 / 1 跳过**（两个失败均为**基线既存**：
+  `mapgen 漂移未登记`、`v1.77 B③` 的语料 `_tmpman/v176_dispatch/bagdbg/mgas_log.txt`
+  是 10-06 的旧日志、`free_txt` 已不存在 ⇒ **不是本轮引入**）
+- 坐标审计：全仓写死坐标按真机换算后对撞「底部导航栏 / 棋盘带」，
+  剩余 3 处（`START_ADV` / `UPGRADE_BTN` / 背包流程 L3049）**均为设计意图**，见 §6.74 附表
+
+#### 附：坐标审计表（真机 1280×2772 / kx=1.1852 / shift=496 / topInset=132）
+
+| 常量 | ref | 通道 | 设备落点 | 判定 |
+|---|---|---|---|---|
+| `UNIVERSAL_CLOSE` | (541,1890) | `tap` | y=2736 底部导航 | ✗ 已取消盲点 |
+| `UNIV_CLOSE` | (541,1890) | `tap_dlg` | y=2488 棋盘内 | ✗ 已取消盲点 |
+| `START_ADV` | (540,1828) | `tap` | (640,2663) 底部导航 | ✓ 设计意图（点「开始冒险」图标） |
+| `UPGRADE_BTN` | (923,1550) | `tap` | (1094,2333) 棋盘内 | ✓ 设计意图（背包面板打开时才用） |
+| 背包流程 L3049 | (803,1112) | `tap` | (952,1814) 棋盘内 | ✓ 同上 |
+
+⚠ 危险区阈值（设备像素）：底部导航 `y 2600~2772`；棋盘带 `y 1684~2537 & x 42~1240`
+
+---
+
+### 6.75 v2.09b 勇者之墓「永远选不到 100%」+ 停止慢（2026-10-27）
+
+> 用户报：「**勇者之墓的点击脚本不正常**」「**又去点必定成功了**」
+> 「**明明要先选择成功率高的（直接点成功率那三个字然后点确定就行）**」
+> ＋「**安卓版的停止不像 PC 版一样点了立即停**」
+
+#### 真机实测验证（本轮修完后）
+
+```
+20:10:31  发现勇者之墓 · 正在领奖…
+20:10:32  勇者之墓：选第 2 行（成功率 100%）   <- 选对了
+20:10:36  勇者之墓结果：★成功
+20:10:40  勇者之墓完成（第 1 个）
+```
+
+#### 病① 面板标题读不到 => `relic_flow` 从不被调用
+
+`popups()` 分支入口要求 `fb(items, '勇者之墓')`（完整四字），
+而 `relic_flow` 内部又要求 `_has(it, '英灵使者')` —— **两个都读不到**：
+
+```
+实测 OCR（真机参考帧 1080x1920）：
+  「英灵使者」 -> 读成「天火风日」conf 0.538（误读）
+  「勇者之墓」 -> 画面里根本没有这四个字
+  能读到的：成功率90%/100% 、必定成功 、确定 、说明文案
+```
+
+=> 用结构特征兜底（与传承祭坛同口径）：
+
+```python
+def _relic_panel_like(it):
+    """① 至少 2 个「成功率 N%」  ② 至少 1 个「必定成功」或「勇者」"""
+    _n_succ = sum(1 for t in it if "成功率" in str(t.get("text") or ""))
+    _n_hero = sum(1 for t in it if ("勇者" in s or "必定成功" in s))
+    return _n_succ >= 2 and _n_hero >= 1
+```
+
+第一版判据写错了（照**背包界面**写的「N级>=5 + 筛选>=1」）：
+实测背包装备列表也是「N级x16 + 筛选x1」，**成功率=0** => 会把**背包误判成勇者之墓**。
+两帧对拍确认：背包 `False` / 勇者之墓 `True` ✓
+
+#### 病② `RELIC_SUCC_Y` 偏 56px => 永远选 90% 那行（最要命）
+
+```python
+RELIC_SUCC_Y = {890: 0, 1083: 1, 1277: 2}   # PC 720系 x1.5 推算
+RELIC_SUCC_TOL = 21                          # 容差
+```
+
+真机实测（弹窗系）：
+
+| 行 | 旧期望 | 实测 | 差 |
+|---|---|---|---|
+| 0（90%） | 890 | **946** | +56 |
+| 1（100%）| 1083 | **1139** | +56 |
+| 2（100%）| 1277 | **1333** | +56 |
+
+**全部偏 56~57px，容差只有 21 => 三行一行都归不进** => `succ = {}`
+=> `pick = None` => 走「默认行1」= **成功率 90% 那行**。
+
+=> 改成按 y 排序取索引，不依赖任何绝对 y：
+
+```python
+_succ_list.sort(key=lambda x: x[0])          # 按 y 从上到下
+succ = {i: (v[1], v[2]) for i, v in enumerate(_succ_list)}
+pick = next((r for r in (0, 1, 2) if succ.get(r, (False,))[0]), None)
+```
+
+#### 病③ `RELIC['ok']` 差 49px => 落点距「必定成功」只 97px
+
+```
+旧 RELIC['ok'] = (687,1440) dlg -> 设备 y=1955
+「确定」实测在         -> 设备 y=2012  （差 57px）
+旧 rows[2] = (428,1206) dlg -> 设备 y=1678
+「必定成功」实测在     -> 设备 y=2012 / x=463
+旧 rows[2] 落点 (507,1926) 距「必定成功」(463,2012) 仅 97px
+```
+
+**这就是用户看到「又去点必定成功了」的来源。**
+
+=> `RELIC` 常量全部换成实测值：
+
+```python
+RELIC = {
+    'title': '英灵使者',
+    'rows': [(766, 947), (766, 1139), (767, 1333)],   # 三栏文字中心
+    'ok':   (690, 1488),          # 「确定」实测 conf 1.000
+    'must': (392, 1488),          # 「必定成功」—— 不该点，仅供诊断
+    'close_x': (983, 453),
+}
+```
+
+这些只是**兜底**；正常路径走 OCR 找到的坐标（`src: succ_ocr` / `src: ocr`）。
+
+#### 病④ 安卓端停止慢 —— 两个循环没有停止检查
+
+对比 PC 与安卓的停止检查点，**安卓少 2 个**：
+
+| 循环 | 最长阻塞 | PC | 安卓（修前） |
+|---|---|---|---|
+| `wait_end`（战斗/结算） | 45s | ✓ | ✓ |
+| **`start_fight`**（等开打） | **15s** | ✓ | **缺** |
+| **`back_poll`**（轮询找返回） | **6s x 多次** | ✓ | **缺** |
+| `popups` | — | — | ✓（安卓额外） |
+
+=> 点停止后要等当前那段跑完（最长 ~21s）。已补：
+
+```python
+# start_fight
+if stop_requested():
+    log.append({'battle': 'stopped_in_start_fight', 'elapsed': ...})
+    return True
+
+# back_poll
+if stop_requested():
+    log.append({tag: 'back_poll_stopped', 'polls': polls})
+    return None
+```
+
+Java 侧 `waitChange`/`waitStable` **本来就支持中断**（v0.25，<=80ms 响应）
+=> 单次点击的等待不是瓶颈，**问题就是这两处纯 Python 循环** ✓
+
+#### 顺带清掉一处死代码
+
+AST 扫全仓 6 个模块的「return 后不可达」，只有一处：
+
+```python
+def is_blocked(name, cfg=None):
+    for k in BLOCK_NAMES:
+        if k in n: return not enabled(k, cfg)
+    return False                            # <- 这里就返回了
+    for k in SPECIAL_NAMES:                # <- 死代码（PC 移植残留）
+        if k in n: return not enabled(k, cfg)
+    return False                           # <- 死代码
+```
+
+会让维护者误以为「不勾也会拉黑所有特殊方块」，与现行「只对 5 个拉黑类生效」矛盾 => 已删 ✓
+
+#### 本轮最大的教训：探针验证方法错了
+
+用 `am start -n ...MainActivity -e cmd probe` 跑探针，**会把 MGAS 拉回前台**
+=> 探针截到的是 **MGAS 自己的界面**（OCR 读到「截图/点击通道/准备启动/运行日志」）
+=> `relic_like=False` / `relic_succ=[]` **全是假阴性** => 我据此误判了两轮。
+
+试过用 `--es cmd py` 广播在后台跑任意代码（不拉前台），
+但 **App 在后台时 MIUI 拦截广播**（`Broadcast completed` 但无任何反应）。
+
+=> **正确做法**：让脚本自己跑（点悬浮条 ▶），然后 **只读日志**。
+   日志里 `{'relic':'succ',...}` / `{'relic':'pick_row','row':2}` 才是真证据 ✓
+
+#### 本轮另一组失误（诚实记账）
+
+1. **认错界面**：用户给了两张截图（背包装备列表 / 勇者之墓），我照**背包**那张写了判据
+   => 「N级 + 筛选」是背包特征，会把背包误判成勇者之墓。
+2. **用 JS 拼字符串写 Python**：反复转义出错，还把 `explore_loop.py` 写成过
+   **A + A' 的重复结构**（18907 行、`wait_end` 调用点变 4 个）—— 是门禁抓出来的。
+   => **改 Python 文件一律用 Python 脚本写**，不用 JS 拼。
+3. **logcat 单行有上限**（3608 字节就截断）=> 探针 JSON 后半段丢失，
+   我把「字段缺失」误读成「代码没生效」。
+   => 已改成探针**写文件** `/sdcard/Download/autoexplore/probe.json` ✓
+
+#### 交付
+
+- `versionCode=209`，**已装机** `lastUpdateTime=2026-10-27 18:59:02`
+- ✅ **勇者之墓真机验证通过**（20:10:31~20:10:40，选第2行 100% => ★成功）
+- 门禁 **946 通过 / 2 失败 / 1 跳过**（两个失败均基线既存：
+  `mapgen 漂移未登记` / `v1.77 B③` 语料为 10-06 旧日志）
+
+#### 一个仍然存在的验证盲区（写下来别忘）
+
+探针 `cmd probe` **只能验证「不在游戏里」的场景**（它会把 MGAS 拉前台）。
+要验证**游戏内**的判据，只有两条路：
+1. 让脚本真跑一遍，读日志（本轮用的）
+2. 把帧 dump 到文件，**拉回 PC 离线复刻**（PC 装 `rapidocr_onnxruntime` +
+   项目自带 ONNX 模型 + 逐像素复刻 `toRef`/`toDlg`，含 **0.75 倍缩放**与
+   `limit_type=max` 口径）—— 这是本轮锁死根因的方法 ✓
+
+---
+
+### 6.76 v2.78 预言石碑连环 5 个 bug + 模拟器复刻真机（2026-10-28）
+
+> 用户报的（按顺序）：
+> 1. 「**为什么打开了预言石碑显示了装备相关的日志**」
+> 2. 「**打开预言石碑，显示发现勇者之墓，正在领奖**」
+> 3. 「**没有正确点掉预言石碑**」
+> 4. 「**没有正确选中预言**」
+> 5. 「**连预言石碑都没点开，为什么**」
+
+#### 病① 「武装」卡文字含「获得装备」⇒ 被 newequip 抢
+
+```
+预言石碑面板实测 OCR（参考系）：
+  祥和   ref(212, 506)
+  武装卡说明「地块结算时获得装备数量+100%」
+```
+
+`L['newequip'] = ('获得新装备', '获得装备', '新装备')` **子串匹配**，而
+`'获得装备' in '地块结算时获得装备数量+100%'` ⇒ **命中** ⇒ 用装备流程点预言面板。
+
+**且顺序是**：`close_newequip()` 在 6127 行，`prophecy` 在 6138 行 ⇒ 装备分支先 return。
+修：`close_newequip` 加前置排除 `_is_prophecy_panel()`。
+
+#### 病② 「战场」卡第二行含完整四字「勇者之墓」⇒ 被 relic 抢
+
+```
+战场卡说明（两行）：
+  「地图中至少出现1个勇者」
+  「之墓，并且勇者之墓奖」      ← ★ 含完整「勇者之墓」
+```
+
+而 `L['special']` 里 `勇者之墓` 排在 `预言石碑` **之前** ⇒ `t` 被判成勇者之墓
+⇒ `relic_flow` 找不到「成功率」⇒ `panel_missing` ⇒ **重复 40+ 次**。
+
+v1.78 当年靠 `_panel_title_of` 读标题修，但本次标题被 OCR 读成「领合石板」/「言何饭」
+⇒ **旧修法失效**。修：用结构特征 `_is_prophecy_panel()` 提前拦。
+
+#### 病③ 按钮叫「确定」但 `bottom_close` 只认「关闭」
+
+```python
+L['close'] = '关闭'      # bottom_close() 只认这个
+L['ok']    = '确定'      # 而预言面板的按钮是「确定」实测 ref(541,1180)
+```
+
+`universal_close()` 判断链：
+```python
+cl = bottom_close(items)          # None（认不到「关闭」）
+is_battle = is_battle_panel(...)  # False
+if cl: ...                        # 跳过
+elif is_battle: ...               # 跳过
+else:
+    rec = {'universal_close': 'skipped_no_blind_tap'}   # ← 压根没点
+```
+
+修：`cl is None` 时补 `_bottom_ok(items)`（认 返回/确定/确认）。
+
+#### 病④ `FORETELL_CARD_Y` 写死真机弹窗系值
+
+**这是本项目「把某台机器的弹窗系绝对值当跨机器常量」的第二个实例**（第一个是 `SHRINE_PRICE_XY`）：
+
+```
+真机    1280x2772  ⇒  C = 209    卡片标题弹窗系 = 506+209 = 715
+模拟器  1280x2640  ⇒  C = 154    卡片标题弹窗系 = 506+154 = 660
+
+代码 FORETELL_CARD_Y = 714，容差窗口 684~769
+⇒ 模拟器上 660 落在窗口外 ⇒ 三张卡全读不到 ⇒ cards_timeout ⇒ 一张都不选 ✗
+```
+
+修：
+```python
+FORETELL_CARD_Y_REF = 506       # 参考系基值
+def _foretell_card_y():
+    return FORETELL_CARD_Y_REF + int(round(dlg_shift()))
+```
+
+#### 病⑤ ⭐ `return 'handled'` ⇒ `done.add()` ⇒ 目标永久消失
+
+**最隐蔽的一个。** 日志铁证：
+```
+plan: first  cells: ['5,2', '4,2', '1,2', '3,1']    ← 5,2 = 预言石碑
+solver: done_cells_dropped  cells: ['4,2', '5,2']   ← 立刻被当已消耗删掉
+```
+
+链路：
+```
+① 点 5,2 → 弹出预言石碑面板
+② 面板处理（无论成败）→ popups() return 'handled'
+③ 上层：if act in ('battle','battle_clear','handled'): done.add(st['last'])
+④ 下一轮 _seed_rc 含 5,2
+⑤ _dropped.extend(_mem) → 5,2 整块剔除
+⑥ 模型里没这个目标了 → 计划里不再有它 → 连面板都不再弹
+```
+
+**`done` 的语义是「格子点没了」，但面板格点完格子还在**（预言石碑/商人/宝库/祭坛）。
+
+修：`done.add()` 前加 `_is_panel_cell` 判断：
+```python
+_nm_last = 该格 name
+_is_panel_cell = any(kw in _nm_last for kw in (
+    '预言石碑', '预言石板', '旅行商人', '黄金宝库',
+    '传承祭坛', '限时礼包', '金属宝箱怪', '机巧宝箱怪'))
+if _is_panel_cell:
+    log.append({'panel_cell_kept': ...})    # 不写 done
+else:
+    done.add(st['last'])
+```
+
+#### 顺带修的：限时礼包别名
+
+面板标题「**限时超值礼包**」= 限+时+超+值+礼+包
+`L['special']` 里「**限时礼包**」= 限+时+礼+包
+⇒ 中间插了「超值」⇒ `'限时礼包' in '限时超值礼包'` = **False**
+
+而 `SPECIAL_ALIAS` 有这条别名，但它在 `for t in L['special']` **循环之内**才执行
+⇒ 循环入口 `fb()` 就 False ⇒ 永远轮不到。
+
+修：循环前先做一次标题归一：
+```python
+_title_now = _panel_title_of(items)
+_t_alias = SPECIAL_ALIAS.get(_title_now, _title_now) if _title_now else None
+for t in L['special']:
+    if fb(items, t) or t in _sp or t == _t_alias:
+```
+
+#### 顺带修的：压暗帧丢标记 / 提前收工
+
+- **压暗帧丢标记**：`marks_kept: board_dimmed` 保住后，`marks_dropped_panel`
+  按 `ratio < 0.55` 又丢了（棋盘整体压暗时所有格 ratio 都掉）⇒ 加 `_dimmed_kept` 短路
+- **提前收工**：`blank_board` 判据只看 `had_plan`，没看 `st['plan']` 剩不剩步
+  ⇒ 加 `and not _plan_left`
+
+#### 模拟器复刻真机（本轮基建）
+
+**为什么要做**：真机验证一次要等 3 分钟，模拟器可以快速迭代。
+
+**结论：MuMu Android 15 不可用** —— 无障碍 `dispatchGesture` 返回 true 但事件被拒：
+```
+Inconsistent event: Invalid DOWN event - pointers already down: {1}
+```
+累计 43 次，连 `input tap` 都受影响。**换 Android 12 后正常。**
+
+**正确的分辨率设置方式**（改 json 无效）：
+```bash
+M="D:\MuMu Player 12\nx_main\MuMuManager.exe"
+& $M control -v 4 shutdown
+& $M setting -v 4 --key resolution_mode --value custom     # ← 关键
+& $M setting -v 4 --key resolution_width.custom --value 1280
+& $M setting -v 4 --key resolution_height.custom --value 2640
+& $M setting -v 4 --key resolution_dpi.custom --value 520
+& $M control -v 4 launch
+```
+- `resolution_mode` 默认 `phone.2`，**会覆盖 custom 尺寸**
+- key 必须带 `.custom` 后缀，否则报 `key not writable`
+- MuMu **不支持降级**（15.0 → 12.0 报 `cannot downgrade`），只能新建实例
+- 窗口尺寸要按比例算：`宽 = 高 × (分辨率宽/高)`，否则左右出黑边
+
+**topInset 注入**（模拟器没有挖孔）：
+```bash
+adb shell "am broadcast -a com.fantasy.autoexplore.CMD \
+  --es cmd set_inset --ei px 132 -f 0x01000000"
+```
+⚠ `-f 0x01000000`（FLAG_RECEIVER_INCLUDE_BACKGROUND）**必须加**，否则后台 App 收不到。
+⚠ `set_inset` 在 `DEBUG_ONLY` 列表里 ⇒ **只在 debug 包放行**。
+
+**模拟器速度**：OCR 3000~5500ms/次（真机 ~1000ms）。
+MuMu 用 CPU 模拟 onnxruntime，没有 NEON 加速 ⇒ **只适合验证逻辑，不代表真机性能**。
+
+#### 交付
+
+- `versionCode=209`，已装机（Android 12 模拟器 12:14:08）
+- 门禁 **946 通过 / 2 失败 / 1 跳过**（两个失败均基线既存）
+- 交接文档：`docs/05-安卓端交接-20261028.md`
+
+#### ⚠ 本轮最大的教训
+
+**#1~#5 是一条链，每层都只修对了局部：**
+```
+① FORETELL_CARD_Y 写死 ⇒ 读不到卡
+② 读不到卡 ⇒ 面板处理失败 ⇒ block_cell 拉黑 ⇒ 写进 done
+③ 改成走 foretell_flow ⇒ 但 return 'handled' ⇒ 仍然写进 done
+④ done ⇒ 整块剔除 ⇒ 目标永久消失
+```
+**`done` 这条隐式路径一直没被看见** —— 三次都在改"处理逻辑"，
+没注意到 `popups()` 的 `return` 会在上层被转成 `done.add()`。
+
+⇒ **教训：改返回值前先查「谁会消费它」。**
