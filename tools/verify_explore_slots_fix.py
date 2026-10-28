@@ -10516,6 +10516,170 @@ except Exception as _e79:       # noqa: BLE001
     check('v2.79 守门可运行（%r）' % (_e79,), False)
 print()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.80【「自动停了」—— 预言面板**上层认得出、下层认不出** ⇒ 面板关不掉 ⇒ 整局白跑】
+#
+#   ---- 用户原话（2026-10-28）：「查查日志为什么自动停了」----
+#   从设备拉 bagdbg/mgas_log.txt（281 行）解析出的链条：
+#
+#     点开预言石碑
+#       -> popups() 用**结构特征**认出它（special: 预言石碑, by: structure）
+#       -> 调用 buypanels.foretell_flow()
+#       -> 但它第一行只认**标题文字**「预言石板」
+#       -> 真机 OCR 读成「**预合石板**」=> panel_missing（**45 轮，每轮一次**）
+#       -> 返回空 => popups 的 else 分支只调 ensure_closed()
+#       -> ensure_closed 只认 X **字符**（x/X/十字），预言面板没有 => **一次都不点**
+#       -> 面板永远开着 => 挡住棋盘
+#       -> 45 轮 stamina 2054->2058（**只涨不跌**）=> 一格都没点开
+#       -> maxed => 退图 => finish_map 反复点「确定」(540,1178) **25 次**
+#       -> 90s 超时 => finished:false => STATS['stopped']='退图失败' => **停整局**
+#
+#   ---- 决定性数字（这条断言的数据来源）----
+#     `foretell: panel_missing` = 45 次；`finish: confirmed` = 25 次；
+#     每轮 64s 共 2884s（48 分钟）；`"stop"` 出现 **0 次**（= **不是用户点停** ✓）
+#
+#   ---- 本质：同族第 N 次「判据建在错的层」 ----
+#     上层用结构特征认面板、下层用标题认 —— **两层判据不同口径** => 下层静默失败。
+#     与 v2.78 病(2)『标题被读成言何饭 => 旧修法失效』是同一条教训：
+#     **标题不可靠时必须以结构特征为准**。
+#
+#   ---- 修法（三层同口径）----
+#     (1) foretell_flow 的标题门槛补 `_foretell_panel_like()` 结构特征兜底
+#     (2) panel_still_open / close_panel 加 `structured=` 形参
+#         （原来 `panel_still_open` 只认标题 => 标题读不到就 `return 0` **一次不点**）
+#     (3) foretell_flow 两处 close_panel 传 `structured=_foretell_panel_like`
+try:
+    import buypanels as _BPmod80
+
+    _BP80 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+
+    # ── A 结构级 ──
+    check('v2.80 A(1) 有 _foretell_panel_like()（结构特征判据，不看标题） · %s'
+          % ('有 OK' if 'def _foretell_panel_like(' in _BP80 else '缺'),
+          'def _foretell_panel_like(' in _BP80)
+
+    _i80 = _BP80.find('def foretell_flow(')
+    _ft80 = _BP80[_i80:_BP80.find(chr(10) + 'def ', _i80 + 10)] if _i80 >= 0 else ''
+    check('v2.80 A(2) foretell_flow 的标题门槛**带结构特征兜底**'
+          '（只认标题 => 真机读成「预合石板」=> panel_missing 45 次 X） · %s'
+          % ('已兜底 OK' if '_foretell_panel_like(it)' in _ft80 else '仍只认标题'),
+          '_foretell_panel_like(it)' in _ft80)
+
+    check('v2.80 A(3) 标题读不到时**留日志** `title_unreadable_but_structure_ok`'
+          '（否则下次排查又是一头雾水 —— 静默失效最典型的表现就是日志里缺某一行） · %s'
+          % ('有 OK' if 'title_unreadable_but_structure_ok' in _ft80 else '缺'),
+          'title_unreadable_but_structure_ok' in _ft80)
+
+    _i_psi = _BP80.find('def panel_still_open(')
+    _psi80 = _BP80[_i_psi:_BP80.find(chr(10) + 'def ', _i_psi + 10)] if _i_psi >= 0 else ''
+    check('v2.80 A(4) `panel_still_open()` 有 `structured=` 形参并用上'
+          '（原来只认标题 => close_panel 直接 return 0 **一次不点** X） · %s'
+          % ('有 OK' if ('structured=None' in _psi80 and 'structured(' in _psi80)
+                          else '缺'),
+          'structured=None' in _psi80 and 'structured(' in _psi80)
+
+    _i_cp = _BP80.find('def close_panel(')
+    _cp80 = _BP80[_i_cp:_BP80.find(chr(10) + 'def ', _i_cp + 10)] if _i_cp >= 0 else ''
+    check('v2.80 A(5) `close_panel()` 透传 `structured=` 给 panel_still_open · %s'
+          % ('透传 OK' if 'structured=structured' in _cp80 else '没透传'),
+          'structured=structured' in _cp80)
+
+    check('v2.80 A(6) foretell_flow 两处 close_panel 都传了 structured'
+          '（cards_timeout / tail 漏一个 => 那条路径仍然关不掉 X） · %s'
+          % ('两处齐 OK' if _ft80.count('structured=_foretell_panel_like') >= 2
+                            else '漏传 %d 处' % (2 - _ft80.count('structured=_foretell_panel_like'))),
+          _ft80.count('structured=_foretell_panel_like') >= 2)
+
+    # ── B 执行级（喂**事故帧的完整 OCR** 真跑）──
+    #   !! 必须用**完整 items**（含「确定」），不能用日志里那 12 条 ——
+    #     日志只存了 `[:12]`，缺了「确定」=> 会误判成"OCR 漏检"（我第一版就这么误判过）
+    _FULL80 = [
+        ('预合石板', 540, 451), ('本次可选择1个预言！', 530, 514),
+        ('武装', 212, 714), ('圣域', 540, 714), ('神兵', 868, 715),
+        ('地块结算时获得装备', 212, 800), ('多格地块结算时至少', 540, 800),
+        ('地块结算时所有装备', 868, 800), ('百', 212, 840),
+        ('数量+100%', 212, 880), ('至少是紫色位阶。', 540, 880),
+        ('有1个神石。', 868, 880),
+        ('确定', 541, 1333),          # 真机 foretell_panel2.png 实测
+    ]
+    _it80 = [item(_t, _cx, _cy) for _t, _cx, _cy in _FULL80]
+
+    class _B80(object):
+        ocr_grabs = True
+
+        def __init__(self, _png):
+            import cv2 as _cv80
+            _im = _cv80.imread(_png)
+            self._img = _cv80.resize(_im, (1080, 1920),
+                                     interpolation=_cv80.INTER_CUBIC)
+            self.taps = []
+            self.state = 'panel'
+
+        def img(self):
+            return self._img
+
+        def img_dlg(self):
+            return self._img
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            return [] if self.state == 'closed' else [dict(t) for t in _it80]
+
+        def ocr_dlg(self, *a, **k):
+            return [] if self.state == 'closed' else [dict(t) for t in _it80]
+
+        def tap(self, x, y, wait=0.0):
+            self.tap_dlg(x, y, wait)
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((int(x), int(y)))
+            if (int(x), int(y)) == (541, 1333):
+                self.state = 'closed'
+
+        def _sleep(self, s):
+            pass
+
+    _png80 = os.path.join(PROJ, '..', 'mapbot_pc', 'runs', 'spec_dev',
+                          'foretell_panel2.png')
+    if not os.path.exists(_png80):
+        skip('v2.80 B(1)~B(3) 执行级（缺真机帧 mapbot_pc/runs/spec_dev/foretell_panel2.png）')
+    else:
+        # B(1) 判据本身
+        check('v2.80 B(1) 执行级：事故那帧 `_foretell_panel_like()` = True'
+              '（`_has(预言石板)` = **False** —— 真机确实读成「预合石板」） · like=%s has=%s'
+              % (_BPmod80._foretell_panel_like(_it80),
+                 bool(_BPmod80._has(_it80, '预言石板'))),
+              _BPmod80._foretell_panel_like(_it80) is True
+              and bool(_BPmod80._has(_it80, '预言石板')) is False)
+
+        # B(2) 端到端：面板**真的被关掉**
+        _b80 = _B80(_png80)
+        _lg80 = []
+        _BPmod80.foretell_flow(_b80, _lg80)
+        _closed80 = [e for e in _lg80
+                     if e.get('foretell_nocards') == 'close_panel']
+        check('v2.80 B(2) 端到端：面板**真的被关掉**（state=%s / taps=%s）'
+              % (_b80.state, _b80.taps),
+              _b80.state == 'closed' and (541, 1333) in _b80.taps)
+        check('v2.80 B(2) 端到端：`close_panel` 的 **n >= 1**（旧行为是 n=0 **一次不点**）· %s'
+              % ((_closed80[-1] if _closed80 else None),),
+              bool(_closed80) and int(_closed80[-1].get('n') or 0) >= 1)
+        check('v2.80 B(2) 端到端：**不再 panel_missing**（那是 45 轮白跑的起点） · %s'
+              % ([e.get('foretell') for e in _lg80 if e.get('foretell')],),
+              not any(e.get('foretell') == 'panel_missing' for e in _lg80))
+
+        # B(3) 对照项：**旧路径确实关不掉**（证明 B(2) 不是恒真）
+        _b80c = _B80(_png80)
+        _n80c = _BPmod80.ensure_closed(_b80c, [])
+        check('v2.80 B(3) 对照项：旧路径 `ensure_closed()` 对预言面板 **n=0 且一次不点**'
+              '（它只认 X 字符 x~493/1024 => 预言面板没有 => 面板永远关不掉 X） · n=%s taps=%s'
+              % (_n80c, _b80c.taps),
+              _n80c == 0 and not _b80c.taps)
+except Exception as _e80:       # noqa: BLE001
+    check('v2.80 守门可运行（%r）' % (_e80,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

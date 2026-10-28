@@ -1468,8 +1468,16 @@ UNIV_CLOSE = (541, 1890)
 #        （PC / 9:16 无弹窗帧 ⇒ 退回原来的归一化帧标题判据，行为不变 ✓）
 #     ② `close_panel()`：**确认面板还开着才动手**（绝不盲点万能点位到棋盘上）
 #        顺序：X 关闭符 → 文字按钮（返回/确定/关闭）→ 万能点位
-def panel_still_open(bot, title=None):
-    """面板**是否还开着** —— 用**弹窗帧**判（标题在归一化帧的丢弃带里，真机恒不可见 ✗）"""
+def panel_still_open(bot, title=None, structured=None):
+    """面板**是否还开着** —— 用**弹窗帧**判（标题在归一化帧的丢弃带里，真机恒不可见 ✗）
+
+    `structured`：**结构特征判据**（`callable(items) -> bool`），v2.80 新增。
+    ⚠⚠ 为什么必须有这条（2026-10-28 真机事故，见 foretell_flow 的长注释）：
+      本函数原来**只认标题文字**；而真机把「预言石板」读成「预合石板」
+      ⇒ 恒判「面板没开」⇒ `close_panel()` 直接 return 0 **一次都不点**
+      ⇒ 面板永远关不掉 ⇒ 挡住棋盘 ⇒ 整局白跑（45 轮 stamina 一格没动）✗✗
+    ⇒ **面板「在不在」不能只靠标题**，与上层 `popups()` 必须同口径（结构特征）✓
+    """
     try:
         _C = dlg_shift()
     except Exception:       # noqa: BLE001
@@ -1492,11 +1500,21 @@ def panel_still_open(bot, title=None):
                 return _panelish
             return _panelish
         # 弹窗帧一条都没读到（OCR 失败）⇒ 退回归一化帧标题判据（保守）
-    if title:
+    _its_now = None
+    if title or structured:
         try:
-            return _has(_items(bot), title)
+            _its_now = _items(bot)
         except Exception:       # noqa: BLE001
-            return False
+            _its_now = None
+    if title and _its_now is not None:
+        if _has(_its_now, title):
+            return True
+    if structured is not None:
+        try:
+            if _its_now is not None and structured(_its_now):
+                return True
+        except Exception:       # noqa: BLE001
+            pass
     return False
 
 
@@ -1623,13 +1641,13 @@ def panel_title_close_x(bot, title=None, log=None, tag='panel_x'):
             log.append({tag: 'err', 'e': repr(_e)[:100]})
         return None
 
-def close_panel(bot, log=None, tag='panel', title=None):
+def close_panel(bot, log=None, tag='panel', title=None, structured=None):
     """**保证把面板关掉**（不依赖标题在归一化帧里可见）✓
 
     ⚠ 只在**确认面板还开着**时才动手 ⇒ 绝不在棋盘上盲点万能点位 ✓
     """
     try:
-        if not panel_still_open(bot, title):
+        if not panel_still_open(bot, title, structured=structured):
             return 0
     except Exception:       # noqa: BLE001
         return 0
@@ -2332,6 +2350,30 @@ def _foretell_read_cards(bot, log=None):
     return [], FORETELL_WAIT_ROUNDS
 
 
+def _foretell_panel_like(items):
+    """是不是预言面板 —— **只看结构特征，不看标题**（v2.80）
+
+    why: 真机把标题「预言石板」读成「**预合石板**」（2026-10-28 日志实证），
+         而 `popups()` 是用结构特征认出这个面板的 ⇒ 本函数也必须同口径 ✓
+    """
+    try:
+        _dur = 0
+        _pre = 0
+        _cat = 0
+        for _t in (items or []):
+            _s = str(_t.get('text') or '').replace(' ', '')
+            if '持续' in _s and '张' in _s:
+                _dur += 1
+            if '预言' in _s:
+                _pre += 1
+            if _s in ('战场', '武装', '宝库'):
+                _cat += 1
+            if '可选择' in _s and '个' in _s:
+                _pre += 1        # 「本次可选择1个预言！」→ 面板独有句 ✓
+        return _dur >= 2 or _pre >= 1 or _cat >= 2
+    except Exception:       # noqa: BLE001
+        return False
+
 def foretell_flow(bot, log, flags=None):
     """预言石碑「预言石板」：选卡 → 点确定 → 拿预言；命中要停的卡 ⇒ **不选卡直接停**
 
@@ -2347,10 +2389,28 @@ def foretell_flow(bot, log, flags=None):
     flags = flags or {}
     b = _proxy(bot)
     it = _items(b)
-    if not _has(it, FORETELL['title']):
+    # !! v2.80【**标题门槛必须有结构特征兜底**】—— 2026-10-28 真机日志事故
+    #   用户报「自动停了」，拉 mgas_log.txt 才看清：
+    #     `popups()` 用**结构特征**认出了预言面板（special: 预言石碑, by: structure）
+    #     ⇒ 调用本函数；可本函数第一行又要求**标题文字** `预言石板`
+    #     ⇒ 真机把标题读成「**预合石板**」⇒ `_has` 恒 False ⇒ `panel_missing`
+    #     ⇒ 返回空 acts ⇒ popups 只调 `ensure_closed()`（它只认 X **字符**）
+    #     ⇒ **面板关不掉** ⇒ 挡住棋盘 ⇒ 45 轮 stamina 2054→2058 **一格没点开**
+    #     ⇒ maxed ⇒ 退图时反复点「确定」25 次 ⇒ finish timeout ⇒ 停整局 ✗✗
+    #   ⇒ 同一个面板，**上层认它、下层不认它** —— 两层判据必须同口径。
+    #     （与 v2.78 病(2)『标题被读成言何饭 ⇒ 旧修法失效』同一族：
+    #        **标题不可靠时必须以结构特征为准**。）
+    #   结构特征（与 explore_loop._is_prophecy_panel 同口径，三条任一即可）：
+    #     ① 至少 2 个「持续N张」 ② 至少 1 个「预言」 ③ 至少 2 个标题词（战场/武装/宝库）
+    #     + ④「本次可选择N个」/「可选择1个预言」这类**面板独有句**（真机实测命中 ✓）
+    if not (_has(it, FORETELL['title']) or _foretell_panel_like(it)):
         log.append({'foretell': 'panel_missing',
                     'texts': [(t.get('text') or '')[:12] for t in (it or [])][:12]})
         return out
+    if not _has(it, FORETELL['title']):
+        # 标题没读到但结构对 ⇒ **记一笔**（否则下次排查又是一头雾水）✓
+        log.append({'foretell': 'title_unreadable_but_structure_ok',
+                    'texts': [(t.get('text') or '')[:12] for t in (it or [])][:8]})
 
     # ① 本次可选几个（面板上写着「可选择N个」）
     import re as _re
@@ -2369,7 +2429,8 @@ def foretell_flow(bot, log, flags=None):
     if not cards:
         log.append({'foretell': 'cards_timeout', 'rounds': _rounds})
         say('      · ⚠ 等了 %d 轮仍没读到卡片 ⇒ 不盲点，关面板（下轮再来）' % _rounds)
-        close_panel(b, log, 'foretell_nocards', title=FORETELL['title'])
+        close_panel(b, log, 'foretell_nocards', title=FORETELL['title'],
+                structured=_foretell_panel_like)
         return out
     say('      · 读到 %d 张卡（第 %d 轮）' % (len(cards), _rounds))
     log.append({'foretell': 'cards', 'n': len(cards), 'round': _rounds,
@@ -2441,7 +2502,8 @@ def foretell_flow(bot, log, flags=None):
     log.append({'foretell': 'ok', 'at': list(at), 'src': 'ocr' if p else 'fallback'})
     out['acts'] = ['pick%d' % len(pick), 'ok']
 
-    close_panel(b, log, 'foretell_tail', title=FORETELL['title'])
+    close_panel(b, log, 'foretell_tail', title=FORETELL['title'],
+                structured=_foretell_panel_like)
     log.append({'foretell': 'done', 'picked': out['picked'], 'stop': out['stop']})
     return out
 
