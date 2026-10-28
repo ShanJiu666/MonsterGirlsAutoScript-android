@@ -6447,8 +6447,25 @@ def popups(b, items, log, ctx=None):
             it2 = ocr_ch(b, min_conf=0.2, tag='dispatch')
             t2 = [i['text'] for i in it2]
             log.append({'dispatch': 'tap%d' % (_try + 1), 'texts': t2[:8]})
-            if not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x) or
-                       ('探索预计时间' in x) for x in t2):
+            # !! v2.83 修【「派遣面板还在吗」判据里混进了一个**常驻文案**】
+            #   ---- 真机铁证（2026-10-28 23:01，45 轮死循环）----
+            #     {"dispatch":"tap1","texts":["++","探索预计时间【10:00:00】","探索效率25秒/次",...]}
+            #     {"dispatch":"tap2","texts":["探索预计时间【10:00:00】","探索效率10秒/次",...]}
+            #   ---- 病 ----
+            #   旧判据是 `not any(探索配队 / 开始探索 / 派遣 / **探索预计时间** in x)`
+            #   而「探索预计时间【10:00:00】」是**配队面板的常驻文案**：
+            #   点完「一键派遣」按钮会变成「开始探索」，但那行**预计时间一直在** X
+            #   => `_gone` **恒为 False** => 每轮都点第 2 下（`btn_by_ocr` 第二次
+            #     读到的是已经变身的「开始探索」按钮，位置偏了 9px）
+            #   => 落入 `still_open_close` => return handled => **派遣从未成功**
+            #   => round 首 HUD 再读 slots_free=2（busy 恒 1）=> 紫格还在
+            #   => **无限循环 45 轮**（用户：「刚刚一直循环紫金地块派遣小队」）X
+            #   ---- 修法 ----
+            #   「面板还在」只认**按钮类**文字（探索配队 / 开始探索 / 派遣），
+            #   **不再**把常驻说明文案当判据 ✓
+            #   （「探索预计时间」是面板说明，与"派遣成没成"无关）
+            if not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x)
+                       for x in t2):
                 _gone = True
                 break
         if not _gone:

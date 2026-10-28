@@ -10913,6 +10913,86 @@ try:
 except Exception as _e82:       # noqa: BLE001
     check('v2.82 守门可运行（%r）' % (_e82,), False)
 print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.83【「一直循环紫金地块派遣小队」—— 常驻文案被当成「面板还在」的判据】
+#
+#   ---- 用户原话（2026-10-28）----
+#     「刚刚一直循环紫金地块派遣小队」
+#   ---- 真机铁证（第 5 张图，23:00:27 → 23:07，**45 轮**）----
+#     r5 ~ r44  slots_free=2  slots={free_txt:2, busy:1, busy_strict:1}   <- 45 轮一模一样
+#     `busy` 从头到尾都是 **1** => **派遣一次都没成功**
+#     {dispatch: tap1, texts:[++, 探索预计时间【10:00:00】, 探索效率25秒/次, ...]}
+#     {dispatch: tap2, texts:[探索预计时间【10:00:00】, 探索效率10秒/次, ...]}
+#     {dispatch: still_open_close}
+#
+#   ---- 病 ----
+#     「派遣面板还在吗」的判据是：
+#       not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x)
+#               or (**'探索预计时间' in x**) for x in t2)
+#     而「探索预计时间【10:00:00】」是配队面板的**常驻说明文案**：
+#     点完「一键派遣」按钮会变成「开始探索」，**但那行预计时间一直在** X
+#     => `_gone` **恒为 False** => 每轮都点第 2 下 => 落 still_open_close
+#     => return handled => **派遣从未成功**
+#     => 下一轮 HUD 又读 slots_free=2（busy 恒 1）=> 紫格还在 => **无限循环 45 轮** X
+#
+#   ---- 这一族错的特征（本项目第 N 次）----
+#     **用一个恒定存在的信号，去判断「某件事发生了没有」**：
+#       · v2.79 BAND 裁掉 HUD => clover_count 恒 None
+#       · v2.78 `c` 未赋值 => 每轮 UnboundLocalError
+#       · 本条：常驻说明文案 => _gone 恒 False
+#     => 判据必须是**随状态变化**的量（按钮名 / 槽位计数），不能是背景文案
+#
+#   ---- 修法 ----
+#     「面板还在」只认**按钮类**文字（探索配队 / 开始探索 / 派遣），
+#     **不再**把常驻说明文案当判据
+try:
+    _EL83 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _L83 = _EL83.split(chr(10))
+
+    # ── A 结构级（撤注释后查，防留档注释假红）──
+    def _code83(_src):
+        _o = []
+        for _ln in _src.split(chr(10)):
+            if _ln.strip().startswith('#'):
+                continue
+            _o.append(_ln.split('#')[0] if '#' in _ln else _ln)
+        return chr(10).join(_o)
+
+    _c83 = _code83(_EL83)
+    check('v2.83 A(1) 撤回守门：**代码里**不再有 `(探索预计时间 in x)` 这条判据'
+          '（它是配队面板常驻说明 => 恒真 => _gone 恒 False => 45 轮死循环 X） · %s'
+          % ('干净 OK' if "('探索预计时间' in x)" not in _c83 else '仍有'),
+          "('探索预计时间' in x)" not in _c83)
+
+    _i83 = _c83.find('if not any(' + chr(40) + chr(39) + '探索配队')
+    _seg83 = _c83[_i83:_i83 + 220] if _i83 >= 0 else ''
+    _has83 = all(k in _seg83 for k in ('探索配队', '开始探索', '派遣'))
+    check('v2.83 A(2) 「面板还在」仍认**按钮类**三种文字（探索配队/开始探索/派遣）'
+          '（不能为了去脏水把真按钮也删掉 X） · %s' % ('齐 OK' if _has83 else '缺'),
+          _has83)
+
+    # ── B 执行级：用事故那两次 OCR texts 真跑判据 ──
+    _T1_83 = ['++', '探索预计时间【10:00:00】', '探索效率25秒/次',
+              '※探索角色位阶越高获取道具效率越高', '1级', '级', '1级', '级']
+    _T2_83 = ['探索预计时间【10:00:00】', '探索效率10秒/次',
+              '※探索角色位阶越高获取道具效率越高', '级', '1级', '1级', '级', '筛选']
+    for _r in range(2):
+        _tx = _T1_83 if _r == 0 else _T2_83
+        # 新判据（只认按钮类）
+        _gone83 = not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x)
+                          for x in _tx)
+        check('v2.83 B(1) 执行级[事故 tap%d 的真 OCR] 新判据 => _gone=%s（期望 True）'
+              % (_r + 1, _gone83), _gone83 is True)
+        # 对照项：旧判据必须仍为 False（证明这条断言不是恒真）
+        _old83 = not any(('探索配队' in x) or ('开始探索' in x) or ('派遣' in x)
+                         or ('探索预计时间' in x) for x in _tx)
+        check('v2.83 B(2) 对照项[事故 tap%d] **旧判据**仍= %s（期望 False）——'
+              ' 这一条证明新判据不是恒真（旧写法在这两帧上永远 False）'
+              % (_r + 1, _old83), _old83 is False)
+except Exception as _e83:       # noqa: BLE001
+    check('v2.83 守门可运行（%r）' % (_e83,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
