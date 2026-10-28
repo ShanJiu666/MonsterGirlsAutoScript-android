@@ -10307,6 +10307,214 @@ except Exception as _e78:       # noqa: BLE001
     check('v2.78 守门可运行（%r）' % (_e78,), False)
 print()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.79【限时礼包「免费→返回」之后**面板还开着，脚本没有第三步把它关掉**】
+#
+#   ---- 用户原话（2026-10-28）----
+#     「限时礼包的脚本好像少了一步关闭礼包页面（在点击免费和返回之后）」
+#
+#   ---- 实测：不是少一步，那一步存在但**一次都没生效** ----
+#     喂真机帧（`mapbot_pc/runs/spec_dev/gift_after_return.png`）＋其 rapidocr 结果跑
+#     `gift_flow()`：
+#       {'gift': 'tap_free1', ...}                              <- 点了免费
+#       {'close': 'no_text_btn', 'what': 'gift_tail', ...}      <- 认不到文字按钮，不点
+#       {'gift_tail': 'close_panel', 'n': 0, ...}               <- 关面板动作 = **0 次**
+#     而同一帧 OCR：面板上**没有**「返回/确定/关闭」任何一个（34 条结果里一个都没有）
+#
+#   ---- 三层叠加（每层单独看都合理）----
+#     (1) `_univ_close()` 先按**文字**找按钮 —— 礼包面板没有这种按钮 X
+#     (2) 万能位 `UNIV_CLOSE` 在 v2.59 被**明确禁掉**（走 tap_dlg 在真机落在**棋盘内**，
+#         盲点 = 点一个格子）=> 那条注释写的就是「如实返回 False」O
+#     (3) 面板唯一出口是**右上角红色 X**，而 `ensure_closed()` 只认 `x~493/1024 +-60`
+#         且 `y in [180,300]`（那**是棋盘两侧面板**的标定值）=> 礼包 X 实测 ref(876,621)
+#         **x 与 y 两轴都不命中** => 永远点不到 XX
+#     => 面板残留 => 盖住棋盘 => 后面格子点不动（与 6.74 病(7) 同一条链）
+#
+#   ---- 修法：新增 `panel_title_close_x()`（结构特征，不写死坐标）----
+#     四条**全中**才认：红块 54~80px ＋ 白/红比 >=0.18 ＋ 同行左侧有标题 ＋ 标题在**白名单**
+#     接进 `close_panel()` 作为**第三道**（在文字按钮之后、万能位之前）
+#
+#   !! 本组最值钱的一条：**白名单是踩出来的，黑名单挡不住**
+#     第一版写成黑名单（排除「当前难度/首领战斗/帮助/配队」这些导航 UI 词）=>
+#     结算面板那个「**回放按钮**」(759,225) 左侧是**地图名**「异常之风」，
+#     它不在任何导航词表里 => 照样命中 => **点它就会放一遍回放**
+#     （PC 语料 16866 帧里 (759,225) 出现 **43 次**；用户 2026-09-25 连报三次
+#       「还在看回放」就是它）=> 只有「**必须是已知面板标题**」能可靠挡住 => 白名单 O
+#     => 教训：**用「排除已知坏样本」写的判据，挡不住没见过的坏样本**。
+try:
+    _BP79 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+
+    # ── A 结构级 ──
+    check('v2.79 A(1) 有 panel_title_close_x()（按结构特征定位标题行的 X） · %s'
+          % ('有 OK' if 'def panel_title_close_x(' in _BP79 else '缺'),
+          'def panel_title_close_x(' in _BP79)
+
+    _i79 = _BP79.find('PANEL_X_TITLES = (')
+    _seg79 = _BP79[_i79:_i79 + 320] if _i79 >= 0 else ''
+    _wl79 = all(k in _seg79 for k in ('预言石板', '英灵使者', '限时超值礼包',
+                                      '传承祭坛', '黄金宝库', '旅行商人'))
+    check('v2.79 A(2) 白名单 PANEL_X_TITLES 含六个真面板标题'
+          '（!! 必须是**白名单**：黑名单挡不住「回放按钮」左侧的地图名「异常之风」X） · %s'
+          % ('齐 OK' if _wl79 else '缺'), _wl79)
+
+    check('v2.79 A(3) 判据里**没有**残留黑名单思路（不再靠「排除导航词」）'
+          '（黑名单=用「已知坏样本」写判据 => 挡不住没见过的坏样本 X） · %s'
+          % ('干净 OK' if ('PANEL_X_NOT_TITLE' not in _BP79) else '仍有黑名单'),
+          'PANEL_X_NOT_TITLE' not in _BP79)
+
+    _i_cp79 = _BP79.find('def close_panel(')
+    _NL79 = chr(10)
+    _i_cp79_end = (_BP79.find(_NL79 + 'def ', _i_cp79 + 10)
+                    if _i_cp79 >= 0 else -1)
+    _cpbody79 = _BP79[_i_cp79:_i_cp79_end] if _i_cp79 >= 0 and _i_cp79_end > 0 else ''
+    # !! 必须先剥掉整行注释再找函数名：我在注释里逐字写了 `ensure_closed()`, 
+    #    `_univ_close()` 来解释病因 => 直接 find 会命中文档而不是代码 => 假红
+    #    （本仓已踩过五次：v1.62c / v1.67 / v1.68 A(10) / v2.78 C1 / 本条）
+    _cpcode79 = chr(10).join(_ln79 for _ln79 in _cpbody79.split(chr(10))
+                             if not _ln79.strip().startswith('#'))
+    _i_x79 = _cpcode79.find('panel_title_close_x(')
+    _i_u79 = _cpcode79.find('_univ_close(')
+    _i_e79 = _cpcode79.find('ensure_closed(')
+    check('v2.79 A(4) close_panel() 真接上了这道闸门，顺序 = ensure_closed -> title_x -> _univ_close'
+          '（文字按钮最准要优先；但礼包面板没有文字按钮 => 必须有结构特征那道） · %s'
+          % (('顺序对 OK (%d < %d < %d)' % (_i_e79, _i_x79, _i_u79))
+             if (0 <= _i_e79 < _i_x79 < _i_u79) else '顺序错/缺'),
+          0 <= _i_e79 < _i_x79 < _i_u79)
+
+    # ── B 执行级（真跑，喂真机帧） ──
+    _gift_frame79 = os.path.join(PROJ, '..', 'mapbot_pc', 'runs', 'spec_dev',
+                                 'gift_after_return.png')
+    if not os.path.exists(_gift_frame79):
+        skip('v2.79 B(1)~B(3) 执行级（缺真机帧 mapbot_pc/runs/spec_dev/gift_after_return.png）')
+    else:
+        import cv2 as _cv79
+        import buypanels as _BPmod79
+
+        def _mk79(_rows):
+            return [item(_t, _cx, _cy) for _t, _cx, _cy in _rows]
+
+        _GIFT_PANEL79 = _mk79([
+            ('限时超值礼包', 541, 620), ('超值礼包1', 277, 704), ('已领取', 770, 800),
+            ('20', 337, 854), ('超值礼包2', 277, 933), ('6', 786, 1020),
+            ('60', 337, 1083), ('超值礼包3', 278, 1162), ('免费', 770, 1259),
+            ('剩余时间05:57:27', 540, 1402)])
+        _REPLAY79 = _mk79([
+            ('异常之风', 540, 225), ('首领战斗2人存活', 136, 225),
+            ('当前难度521', 975, 277), ('帮助', 821, 210),
+            ('战斗事件', 541, 443), ('100级', 539, 599)])
+        _SHRINE79 = _mk79([('传承祭坛', 691, 504), ('选择装备', 540, 700),
+                            ('确定', 540, 1200)])
+
+        class _B79(object):
+            ocr_grabs = True
+
+            def __init__(self, _png, _items):
+                _im = _cv79.imread(_png)
+                self._img = _cv79.resize(_im, (1080, 1920),
+                                         interpolation=_cv79.INTER_CUBIC)
+                self._items = [dict(t) for t in _items]
+                self.taps = []
+
+            def img(self):
+                return self._img
+
+            def img_dlg(self):
+                return self._img
+
+            def snap(self, *a, **k):
+                pass
+
+            def ocr(self, *a, **k):
+                return [dict(t) for t in self._items]
+
+            def ocr_dlg(self, *a, **k):
+                return [dict(t) for t in self._items]
+
+            def tap(self, x, y, wait=0.0):
+                self.taps.append((int(x), int(y)))
+
+            def tap_dlg(self, x, y, wait=0.0):
+                self.taps.append((int(x), int(y)))
+
+            def _sleep(self, s):
+                pass
+
+        _shrine79 = os.path.join(PROJ, '..', 'mapbot_pc', 'runs', 'acc3',
+                                 'shrine_panel_r-1.png')
+        _cases79 = [
+            ('礼包面板（标题 541,620 / X 876,621）',
+             _gift_frame79, _GIFT_PANEL79, '限时超值礼包', (876, 621)),
+            ('对照 - 结算面板**回放按钮**(759,225)：左侧是地图名「异常之风」',
+             os.path.join(PROJ, '..', 'mapbot_pc', 'runs', 'acc1', 'm9_r003.png'),
+             _REPLAY79, None, None),
+        ]
+        if os.path.exists(_shrine79):
+            _cases79.append(
+                ('传承祭坛（标题 691,504 / X 984,504）',
+                 _shrine79, _SHRINE79, '传承祭坛', (984, 504)))
+        for _r in range(len(_cases79)):
+            _nm, _png, _it, _ti, _want = _cases79[_r]
+            if not os.path.exists(_png):
+                skip('v2.79 B(1)[%s] 缺帧 %s' % (_nm, _png))
+                continue
+            _bot = _B79(_png, _it)
+            _got = _BPmod79.panel_title_close_x(_bot, title=_ti, log=[])
+            check('v2.79 B(1) 执行级[%s] => %r（期望 %r）' % (_nm, _got, _want),
+                  _got == _want)
+
+        _S_PANEL = _mk79([('限时超值礼包', 541, 620), ('超值礼包1', 277, 704),
+                          ('免费', 770, 800), ('超值礼包2', 277, 933),
+                          ('超值礼包3', 278, 1162)])
+        _S_RESULT = _mk79([('恭喜获得', 540, 700), ('货币', 400, 900),
+                           ('返回', 540, 1211)])
+        _S_AFTER = _mk79([('限时超值礼包', 541, 620), ('超值礼包1', 277, 704),
+                          ('已领取', 770, 800), ('超值礼包2', 277, 933)])
+        _S_CLOSED = _mk79([('开始冒险', 541, 1889)])
+
+        class _SB79(_B79):
+            def __init__(self, _png):
+                _B79.__init__(self, _png, _S_PANEL)
+                self.state = 'panel'
+
+            def _cur(self):
+                return {'panel': _S_PANEL, 'result': _S_RESULT,
+                        'after': _S_AFTER, 'closed': _S_CLOSED}[self.state]
+
+            def ocr(self, *a, **k):
+                return [dict(t) for t in self._cur()]
+
+            def ocr_dlg(self, *a, **k):
+                return [dict(t) for t in self._cur()]
+
+            def tap_dlg(self, x, y, wait=0.0):
+                self.taps.append((int(x), int(y)))
+                if self.state == 'panel' and (int(x), int(y)) == (770, 800):
+                    self.state = 'result'
+                elif self.state == 'result' and (int(x), int(y)) == (540, 1211):
+                    self.state = 'after'
+                elif self.state == 'after' and (int(x), int(y)) == (876, 621):
+                    self.state = 'closed'
+
+            def _sleep(self, s):
+                pass
+
+        _sb = _SB79(_gift_frame79)
+        _BPmod79.gift_flow(_sb, [])
+        check('v2.79 B(2) 端到端：tap 时序 = **免费 -> 返回 -> 右上角 X**'
+              '（用户原话「少了一步关闭礼包页面」= 缺的正是第三个） · %s'
+              % (repr(_sb.taps),),
+              _sb.taps == [(770, 800), (540, 1211), (876, 621)])
+        check('v2.79 B(2) 端到端：**面板最终真被关掉**（不是以为关了）· state=%s'
+              % (_sb.state,), _sb.state == 'closed')
+
+        _sb2 = _SB79(_gift_frame79)
+        _BPmod79.gift_flow(_sb2, [])
+        check('v2.79 B(3) 对照项：步骤(1)「免费」与(2)「返回」**仍然都在**'
+              '（新加的是第(3)步，不能把前两步顶掉 X） · %s' % (repr(_sb2.taps[:2]),),
+              _sb2.taps[:2] == [(770, 800), (540, 1211)])
+except Exception as _e79:       # noqa: BLE001
+    check('v2.79 守门可运行（%r）' % (_e79,), False)
+print()
 
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

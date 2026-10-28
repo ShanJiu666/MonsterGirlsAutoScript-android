@@ -1500,6 +1500,129 @@ def panel_still_open(bot, title=None):
     return False
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⭐ v2.79【面板「标题行右上角 X」—— 按**结构特征**定位，不写死坐标】
+#
+#   ---- 病（用户 2026-10-28 报：「限时礼包的脚本好像少了一步关闭礼包页面」）----
+#     不是少一步：`close_panel()` **调用了**，但一次都没生效（实测 n=0，面板还开着）。
+#     三层叠加：
+#       ① `_univ_close()` 先按**文字**找「返回/确定/关闭」—— 礼包面板**没有**这种按钮
+#          （拿真机帧跑 rapidocr：34 条结果里一个都没有，只有「已领取/免费/剩余时间」）
+#       ② 兜底的万能位在 v2.59 被**明确禁掉**（`UNIV_CLOSE=(541,1890)` 走 tap_dlg
+#          在真机落在**棋盘内**，盲点 = 点一个格子 ⇒ 注释写着「如实返回 False」）
+#       ③ 面板唯一真正的出口是**右上角那个红色 X** —— 而 `ensure_closed()` 的判据是
+#          `x≈493 或 1024 ±60` 且 `y∈[180,300]`（**那是棋盘两侧面板**的标定值）
+#          ⇒ 礼包面板的 X 实测 ref(876,621)：**x 与 y 两轴都不命中** ⇒ 永远点不到 ✗✗
+#     结局：面板残留 ⇒ 盖住棋盘 ⇒ 后面格子点不动（与 §6.74 病⑦ 同一条链）
+#
+#   ---- 为什么不直接加个坐标常量 ----
+#     X 的 y 随面板高度变（礼包 621 / 传承祭坛 504 / 结算 225…）⇒ 写死任一值都只对
+#     某一种面板成立，正是本项目「弹窗系绝对值当跨机器常量」那族错 ✗
+#
+#   ---- 判据（四条**全中**才认，缺一不认 ⇒ fail-safe）----
+#     ① 红色块 54~80px、面积 1500~9000（⚠ 红宝石图标**同尺寸** ⇒ 单靠它不够）
+#     ② 白/红像素比 >= 0.18（X 的白笔画）—— 实测 X=0.267 / 红宝石=0.10~0.11 ✓
+#     ③ **同一行左侧有「面板标题」**（±45px，X 在它右边）—— 这条是关键
+#     ④ 该标题必须在 `PANEL_X_TITLES` 白名单里
+#     ⚠ ③④ 用「标题白名单」而不是写死 y ⇒ 换面板/换分辨率都成立 ✓
+#   ---- 为什么是**白名单**不是黑名单（实测教训）----
+#     第一版写成黑名单（排除「当前难度/首领战斗/帮助…」）⇒ **挡不住**：
+#     结算面板那个「回放按钮」(759,225) 左侧是**地图名**「异常之风」，
+#     它不在任何「导航 UI」词表里 ⇒ 照样命中 ⇒ **点它就会放一遍回放**
+#     （PC 语料 16866 帧里 (759,225) 出现 **43 次**，用户连报三次「还在看回放」✗✗）
+#     ⇒ 只有「**必须是已知面板标题**」这一条能可靠挡住 ⇒ 白名单 ✓
+PANEL_X_TITLES = ('预言石板', '英灵使者', '限时超值礼包', '传承祭坛',
+                  '黄金宝库', '旅行商人', '金属宝箱怪', '机巧宝箱怪')
+
+
+def panel_title_close_x(bot, title=None, log=None, tag='panel_x'):
+    """面板**标题行右上角**的红色 X -> (x, y) | None（坐标为弹窗系）
+
+    ⚠ 只在**弹窗帧**（`img_dlg()`）上找 —— 归一化帧把这条带整段丢了。
+    ⚠ 判据是**白名单**（见上）；`title` 只用来**进一步**收窄，不是必需。
+    """
+    try:
+        img = bot.img_dlg() if hasattr(bot, 'img_dlg') else None
+    except Exception:       # noqa: BLE001
+        img = None
+    if img is None or getattr(img, 'size', 0) == 0:
+        if log is not None:
+            log.append({tag: 'no_dlg_frame'})
+        return None
+    try:
+        import cv2
+        import numpy as _np
+    except Exception:       # noqa: BLE001
+        return None
+    try:
+        _h, _w = img.shape[:2]
+        if (_w, _h) != (1080, 1920):      # 统一到参考尺度（红块尺寸是参考系标定的）
+            img = cv2.resize(img, (1080, 1920), interpolation=cv2.INTER_CUBIC)
+        _cb0, _cg0, _cr0 = (img[:, :, 0].astype(int), img[:, :, 1].astype(int),
+                            img[:, :, 2].astype(int))
+        _red = ((_cr0 > 150) & (_cr0 - _cg0 > 70) & (_cr0 - _cb0 > 60)).astype(_np.uint8) * 255
+        _m = cv2.morphologyEx(_red, cv2.MORPH_CLOSE, _np.ones((9, 9), _np.uint8))
+        _n, _lb, _st, _ce = cv2.connectedComponentsWithStats(_m, 8)
+        _cands = []
+        for _i in range(1, _n):
+            _x, _y, _ww, _hh, _a = _st[_i]
+            if not (1500 < _a < 9000):
+                continue
+            if not (54 <= _ww <= 80 and 54 <= _hh <= 80):
+                continue
+            _cx, _cy = int(_ce[_i][0]), int(_ce[_i][1])
+            _crop = img[max(0, _cy - _hh // 2):_cy + _hh // 2,
+                        max(0, _cx - _ww // 2):_cx + _ww // 2]
+            if _crop.size == 0:
+                continue
+            _cb, _cg, _cr = (_crop[:, :, 0].astype(int), _crop[:, :, 1].astype(int),
+                             _crop[:, :, 2].astype(int))
+            _wh = int(((_cr > 200) & (_cg > 200) & (_cb > 200)).sum())
+            _rd = int(((_cr > 150) & (_cr - _cg > 70) & (_cr - _cb > 60)).sum())
+            _ratio = (_wh / float(_rd)) if _rd else 0.0
+            if _ratio >= 0.18:
+                _cands.append({'x': _cx, 'y': _cy, 'ratio': round(_ratio, 3)})
+        if not _cands:
+            if log is not None:
+                log.append({tag: 'no_x_block'})
+            return None
+        try:
+            _its = _items(bot)
+        except Exception:       # noqa: BLE001
+            _its = []
+        _texts = []
+        for _t in (_its or []):
+            _s = str(_t.get('text') or '').strip().replace(' ', '')
+            if not _s or len(_s) > 12:
+                continue
+            _texts.append({'x': int(_t.get('cx') or 0), 'y': int(_t.get('cy') or 0), 't': _s})
+        _want = (title,) if isinstance(title, str) else tuple(title or ())
+        _hit = None
+        for _c in sorted(_cands, key=lambda d: d['y']):
+            for _t in _texts:
+                if abs(_t['y'] - _c['y']) > 45 or _t['x'] >= _c['x']:
+                    continue
+                if not any(_pt in _t['t'] for _pt in PANEL_X_TITLES):
+                    continue                      # ④ 白名单（挡回放钮的关键）
+                if _want and not any(_tt in _t['t'] for _tt in _want):
+                    continue
+                _hit = dict(_c)
+                _hit['title'] = _t['t']
+                break
+            if _hit:
+                break
+        if log is not None:
+            log.append({tag: 'scan', 'cands': _cands[:6], 'hit': _hit,
+                        'n_texts': len(_texts)})
+        if not _hit:
+            return None
+        return (int(_hit['x']), int(_hit['y']))
+    except Exception as _e:      # noqa: BLE001
+        if log is not None:
+            log.append({tag: 'err', 'e': repr(_e)[:100]})
+        return None
+
 def close_panel(bot, log=None, tag='panel', title=None):
     """**保证把面板关掉**（不依赖标题在归一化帧里可见）✓
 
@@ -1515,6 +1638,25 @@ def close_panel(bot, log=None, tag='panel', title=None):
         n += int(ensure_closed(bot, log) or 0)
     except Exception:       # noqa: BLE001
         pass
+    # ⭐ v2.79【第三道：**标题行右上角 X**（结构特征定位）】
+    #   病（用户 2026-10-28「限时礼包好像少了关闭礼包页面这一步」）：
+    #     `ensure_closed()` 只认 x≈493/1024 且 y∈[180,300]（那是**棋盘两侧面板**
+    #     的标定值）；而 `_univ_close()` 认不到文字按钮就**不点**（v2.59 禁掉盲点）。
+    #     ⇒ 礼包面板（X 实测 ref(876,621)、**没有任何文字按钮**）两头都够不着
+    #     ⇒ 面板残留、盖住棋盘、后面格子点不动 ✗✗
+    # ⚠ 顺序放在 _univ_close **之前**：文字按钮最准（结果框位置随文案变），
+    #   万一没有文字按钮，再按结构特征找标题行的 X ✓
+    if not n:
+        try:
+            _px = panel_title_close_x(bot, title=title, log=log, tag=tag + '_x')
+            if _px:
+                bot.tap_dlg(_px[0], _px[1], wait=1.8)
+                n += 1
+                if log is not None:
+                    log.append({tag: 'close_by_title_x', 'at': [_px[0], _px[1]],
+                                'title': title})
+        except Exception:       # noqa: BLE001
+            pass
     if not n:
         try:
             if _univ_close(bot, log, tag, items=_items(bot)):
