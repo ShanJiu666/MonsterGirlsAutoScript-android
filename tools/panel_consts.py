@@ -128,6 +128,31 @@ SCAN_SOURCES = {
         'PREF_CLOVER': ('num', 'scale'),
         'SPRITE_PINK_THR': ('num', 'scale'),
         'SPRITE_GREEN_THR': ('num', 'scale'),
+        # ══════════════════════════════════════════════════════════════════
+        # ⭐ v1.78【从 PC 移植的五个特殊地块面板】—— 全部 **dlg_final**（弹窗系最终坐标）
+        #   为什么是 dlg_final 而不是 ref：
+        #     这五个面板**锚设备屏幕中心**（`RefMapper.dialogShift()`），与棋盘的
+        #     「顶块锚顶 + 其余锚底」不是同一坐标系 ⇒ 真机换分辨率时它们跟着**面板**走，
+        #     不跟棋盘走 ✓（与 MERCHANT / VAULT 同口径 —— 那两行早就这么登记的）
+        #   ⚠ 数值来历：**PC 720×1280 实测值 ×1.5**（两端同为 9:16 纯等比）。
+        #     交叉验证：PC 宝库「返回」(359,827)×1.5=(539,1241) vs 手机实测 (539,1240)
+        #     ⇒ **只差 1px** ⇒ 倍数关系成立 ✓
+        #   ⚠⚠ 诚实标注：**这五个面板还没在手机真机上采过帧**（PC 采的）。
+        #     按上面那条 dlg_final 语义它们应当自适应；真机一跑就能确认 ✓
+        'RELIC': ('dict', 'dlg_final'),          # 勇者之墓「英灵使者」三行/确定/X
+        'GIFT': ('dict', 'dlg_final'),           # 限时礼包三档 + 结果框返回
+        'FORETELL': ('dict', 'dlg_final'),       # 预言石碑 卡片 y / 确定
+        'MIMIC_CARD_X': ('tuple', 'dlg_final'),  # 宝箱怪 四列商品卡 x
+        'MIMIC_PRICE_X': ('tuple', 'dlg_final'), # 宝箱怪 四列价格数字 x
+        'MIMIC_BUY_BTN': ('xy', 'dlg_final'),    # 宝箱怪 详情页购买按钮
+        'MIMIC_BUY_Y_RANGE': ('band', 'dlg_final'),  # 购买键 y 范围（设备系，面板锚中心）
+        'MIMIC_REFRESH': ('xy', 'dlg_final'),    # 宝箱怪「刷新」（**不点**，登记以待审计）
+        'SHRINE_PRICE_XY': ('xy', 'dlg_final'),  # 传承祭坛「30000」文字中心
+        'SHRINE_BUY_XY': ('xy', 'dlg_final'),    # 传承祭坛 价格按钮点击点
+        'SHRINE_X_XY': ('xy', 'dlg_final'),      # 传承祭坛 ✗ 关闭
+        'SHRINE_FILTER_XY': ('xy', 'dlg_final'), # 传承祭坛「筛选」（**不点**）
+        'SHRINE_REFRESH_XY': ('xy', 'dlg_final'),# 传承祭坛「刷新」（**不点**）
+        'UNIV_CLOSE': ('xy', 'ref'),             # 万能关闭位（= explore_loop.UNIVERSAL_CLOSE）
     },
 }
 
@@ -182,6 +207,11 @@ EXEMPT = {
         '_AUTO_SKIP': '自动跳过勾选状态（dict，bool）',
         '_OCR_CH': 'OCR 通道总闸（dict，bool）',
         '_COLLECT': '补点计数器（dict，int）',
+    },
+    # ⭐ v1.78：从 PC 移植的**品阶表**（纯数值，不是坐标）
+    'buypanels.py': {
+        '_FORETELL_WORD_TIER': '预言石碑「位阶词 → 品阶」映射（int→int，非坐标）',
+        '_FORETELL_FIXED_TIER': '预言石碑「卡名 → 品阶」映射（str→int，非坐标）',
     },
 }
 
