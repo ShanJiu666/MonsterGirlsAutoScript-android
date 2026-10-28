@@ -459,6 +459,40 @@ def scan_board(img, thr=None, scales=None, region=None, use_color=True):
 # ⭐⭐⭐ v1.45：定点窗口版（热路径用它）
 # ══════════════════════════════════════════════════════════════════════════
 
+# (模板, 尺度) → (缩放后 rgb, 掩膜 m, nmask)。⭐ **逐位等价**记忆化：
+#   `cv2.resize` 是确定性纯函数（同输入 + 同 interpolation 必得同输出，含浮点舍入），
+#   缓存里存的正是那三个中间量，而 `matchTemplate` 与所有闸门判据的代码**一行不动** ✓
+# ⚠ 缓存**不需要**清理逻辑：模板来自 `load_tpls()` 的**模块级缓存**，
+#   运行期不会被回收、内容也不变（`load_tpls.cache_clear()` 全仓无人调用）。
+_TPL_PREP = {}
+
+
+def _tpl_prep(tpl_rgba, s):
+    """(模板, 尺度) → (缩放后 rgb, 掩膜 m, nmask)。⭐ 逐位等价记忆化
+
+    ⚠ 这三个量**只依赖 (模板, 尺度)**，与是哪一格**完全无关**。
+      而 `scan_board_fast` 是 35 格 × 6 模板（v1.68 已去重 7→6）× 5 尺度 = **1050 次**调用，
+      不同 (模板, 尺度) 组合只有 6×5 = **30 个** ⇒ **1020 次（97%）是重复计算**
+      （每次 ≈ 1.6M 次乘法加法，真机上不便宜）。
+    ⚠ key 用 `id(tpl_rgba)`：模板数组来自模块级 `load_tpls()` 缓存 ⇒ 运行期**不会被回收**、
+      地址不会复用；再带上 `shape` 兜底，任何意外都不会串到别的模板上 ✓
+    """
+    key = (id(tpl_rgba), tpl_rgba.shape, s)
+    hit = _TPL_PREP.get(key)
+    if hit is not None:
+        return hit
+    th, tw = tpl_rgba.shape[:2]
+    w, h = int(round(tw * s)), int(round(th * s))
+    rgb = cv2.resize(tpl_rgba[:, :, :3].astype(np.float32), (w, h),
+                     interpolation=cv2.INTER_LINEAR)
+    m = cv2.resize(np.where(tpl_rgba[:, :, 3] > 32, 255, 0).astype(np.uint8), (w, h),
+                   interpolation=cv2.INTER_NEAREST)
+    nmask = int((m > 0).sum())
+    val = (rgb, m, nmask)
+    _TPL_PREP[key] = val
+    return val
+
+
 def _match_window(img, tpl_rgba, s, ecx, ecy, half):
     """在 **格心 (ecx,ecy) ± half** 这个小窗里做一次带掩码 TM_SQDIFF
 
@@ -481,11 +515,8 @@ def _match_window(img, tpl_rgba, s, ecx, ecy, half):
     sub = img[y0:y0 + ch, x0:x0 + cw]
     if sub.size == 0:
         return None
-    rgb = cv2.resize(tpl_rgba[:, :, :3].astype(np.float32), (w, h),
-                     interpolation=cv2.INTER_LINEAR)
-    m = cv2.resize(np.where(tpl_rgba[:, :, 3] > 32, 255, 0).astype(np.uint8), (w, h),
-                   interpolation=cv2.INTER_NEAREST)
-    nmask = int((m > 0).sum())
+    # ⭐ 这三个量只与 (模板, 尺度) 有关 ⇒ 记忆化（逐位等价，见 `_tpl_prep` 注释）
+    rgb, m, nmask = _tpl_prep(tpl_rgba, s)
     if nmask < 20:
         return None
     res = cv2.matchTemplate(sub.astype(np.float32), rgb, cv2.TM_SQDIFF, mask=m)

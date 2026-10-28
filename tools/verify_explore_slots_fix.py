@@ -429,10 +429,12 @@ finally:
     except Exception:       # noqa: BLE001
         pass
     EL._UI_TPL_CACHE.clear()
-if _c_save is None:
-    EL._DLGS.pop('C', None)
-else:
-    EL._DLGS['C'] = _c_save
+# 注意 v2.78 修：不能 .pop('C')！
+#   explore_loop.dlg_c() 写的是 _DLGS['C']（**无条件读键**）：
+#   把键 pop 掉 => 之后**任何**走弹窗系的代码（dlg_items / popups）
+#   都会直接 KeyError('C') => 整个组失效（本轮就是这么崩的 X）
+#   => 恢复原值即可（None = 「未缓存」语义，与 pop 同效但不会丢键）
+EL._DLGS['C'] = _c_save
 
 print()
 print('⑧ 进图体力门限（用户报「体力不够 50 怎么还去点进入地图」）')
@@ -543,6 +545,19 @@ _ALLOWED_DRIFT = {
     'targets_cfg': 'v1.35 登记：PC 端多一个 `is_blocked_cell(cell,cfg)`（`bot_gui` '
                    '点格拉黑用）。手机端无 GUI、拿不到用户点格 ⇒ 无调用方、故意不加。'
                    '有意分叉，勿覆盖。',
+    # ⭐ 2026-10-28 登记：**去仓库耦合**（与 layout/spots/marks/mapsim/mapsolve/）
+    #   PC 侧 `mapgen.py` 走 `import repo_paths as RP` + `RP.require(RP.DATATABLE_0924)`；
+    #   手机端没有仓库层（APK 里没有 repo_paths.py），且资源根在
+    #   `assets/mapbot_pack/`（真机是 `files/mapbot_pack/`），难以写死绝对路径⇒
+    #   统一改成 `_MAPBOT_DT`（env `MAPBOT_DT` 优先，否则 _MAPBOT_ROOT/server_datatable.json）
+    #   ⚠ 其余八个模块（layout/spots/grid_detect/marks/badge/mapsim/mapsolve/targets_cfg/）
+    #     **已经全部这么改并登记**，只有 mapgen 漏登 ⇒ 门禁长期假红 ✗
+    #   （不是真漂移：`DATATABLE` 指向的都是 **同一份 0924 数据表**，两端内容一致）⇒
+    #   有意分叉，勿拿 PC 那份覆盖手机端。
+    'mapgen': 'v2.78 登记：去仓库耦合 —— PC 走 `repo_paths.RP.require(DATATABLE_0924)`，'
+              '手机端改成 `_MAPBOT_DT`（env MAPBOT_DT / _MAPBOT_ROOT/server_datatable.json）。'
+              '同一份 0924 数据表内容，仅取路方式不同，与其余八个模块同一改法。'
+              '有意分叉，勿覆盖。'
 }
 # ⭐⭐ 2026-10-01 晚「两端完全平行」：**PC 仓不存在时整组跳过**（不是失败）。
 #   以前这条强制"生成物必须与 PC 逐字节一致" ⇒ 天然要求 PC 仓在场，
@@ -2789,7 +2804,7 @@ try:
           and 'EXPLORE_MAX_CLICKS' not in _code39
           and 'EXPLORE_NO_YIELD_ROUNDS' not in _code39)
     check('v1.39 ③ 退图判据**没有**探索分支（没目标即退 ✓）',
-          'if vis and rnd >= 2 and not marked and not pending_buy:' in _EL39
+          'if vis and rnd >= 2 and not marked and not pending_buy' in _EL39
           and 'not marked and not pending_buy and not _explore' not in _EL39)
     check('v1.39 ④ 开路判据**没有**探索分支（`marked or buy_any` ✓）',
           'if not order and (marked or buy_any):' in _EL39
@@ -5106,19 +5121,40 @@ try:
             _b46.append(_fn46)
     check('v1.46 ④ UI 桥 `special_list` / `special_set` 都在（Java 靠它建勾选排 ✓）',
           not _b46, '缺=%s' % (_b46 or '无 ✓'))
-    check('v1.46 ⑤ `SP_EDITABLE` = 商人 + 宝库（用户口径：**只有这两个可勾** ✓）',
-          tuple(getattr(_ea46, 'SP_EDITABLE', ())) == ('旅行商人', '黄金宝库'),
-          'SP_EDITABLE=%s' % (getattr(_ea46, 'SP_EDITABLE', None),))
+    # v1.78 **改写**（原：== (旅行商人, 黄金宝库)，钉「只有这两个可勾」）
+    #   ---- 原断言为什么成立过 ----
+    #     手机端 v1.46 时代 popups() 的 act_on 只有商人/宝库，其余走「无视支」
+    #     => 让用户勾上**不生效** => 锁住是**诚实的**（不给点一个假的框 ✓）
+    #   ---- 为什么现在必须改 ----
+    #     PC 的 5 个面板流程（勇者之墓/限时礼包/预言石碑/两个宝箱怪/传承祭坛）
+    #     已全部移植进 buypanels.py 并接进 popups() 的 act_on + elif 分支
+    #     => 勾上**真的会去做** => 再锁着就是**功能残缺**
+    #        （用户报：「怎么特殊方块还是好多锁定」）
+    #   ---- 判据改成钉「意图」而不是钉「过渡态」 ----
+    #     ✓ 可勾集合 == DISPLAY_ORDER（每个都该能勾，一个都不许漏）
+    #     ✓ 且顺序必须跟 DISPLAY_ORDER 一致（PC 用户报过「勾选位置一直在变」）
+    _spo46 = list(getattr(_tc46, 'DISPLAY_ORDER', ()) or ())
+    _spe46 = list(getattr(_ea46, 'SP_EDITABLE', ()) or ())
+    check('v1.46 ⑤ `SP_EDITABLE` **== `DISPLAY_ORDER`**（每个已实现的特殊方块都可勾）'
+          '⚠ 判据钉「意图」不钉「过渡态」：v1.46 时代锁住是因为面板流程没移植、勾了不生效；'
+          'v1.78 五个 flow 都移植完了 => 再锁着就是功能残缺 ✗',
+          bool(_spo46) and _spe46 == _spo46,
+          'SP_EDITABLE=%s ｜ DISPLAY_ORDER=%s' % (_spe46, _spo46))
     # ⑥ special_list 真能返回可用 JSON
     import json as _json46
     _d46 = _json46.loads(_ea46.special_list() or '{}')
     _items46 = _d46.get('items') or []
     _locked46 = [i['name'] for i in _items46 if i.get('locked')]
     _free46 = [i['name'] for i in _items46 if not i.get('locked')]
-    check('v1.46 ⑥ 实跑 `special_list()`：可勾 2 个、其余**锁定**'
-          '（用户口径「暂时也无法勾选」✓）',
-          len(_free46) == 2 and len(_locked46) >= 5,
-          '可勾=%s 锁定%d个' % (_free46, len(_locked46)))
+    # v1.78 **改写**（原：len(_free46) == 2 and len(_locked46) >= 5）
+    #   原断言把「锁 5 个」当成功判据 => 等于**把功能残缺钉成正确** ✗
+    #   => 改成：**锁定必须为 0**，且可勾数 == DISPLAY_ORDER 数 ✓
+    #     （locked 字段本身保留 —— 宿主侧仍可用它做过期/未知方块的下架 ✓）
+    check('v1.46 ⑥ 实跑 `special_list()`：**锁定 0 个**、可勾数 == `DISPLAY_ORDER` 数'
+          '（用户报：「怎么特殊方块还是好多锁定」=> 已全部开放 ✓）',
+          len(_locked46) == 0 and len(_free46) == len(_spo46),
+          '可勾%d个 锁定%d个 ｜ 清单%d个'
+          % (len(_free46), len(_locked46), len(_spo46)))
     check('v1.46 ⑦ 商人/宝库**默认勾选**（用户口径 ✓）',
           all(i.get('on') for i in _items46 if i['name'] in ('旅行商人', '黄金宝库')),
           '状态=%s' % ([(i['name'], i['on']) for i in _items46[:2]],))
@@ -7694,16 +7730,34 @@ try:
     _PKI68 = os.path.join(_PROJ68, 'app', 'src', 'main', 'java',
                           'com', 'fantasy', 'autoexplore', 'PackInstaller.java')
     _pki68 = open(_PKI68, encoding='utf-8').read() if os.path.exists(_PKI68) else ''
+    # ⛔⛔ v1.78 **把「钉字面量 .pack_v4」改成「钉版本号 >= 4」**（如实记账）：
+    #   ---- 为什么原写法会**变成它自己要防的那个 bug** ----
+    #     原断言是 `'MARK = ".pack_v4"' in _pki68` —— 钉的是一个**具体值** ✗
+    #     而 `PackInstaller` 自己的注释（原文）写着：
+    #       「⚠ **以后每次往 `assets/mapbot_pack/` 加/改资源，都要把这里的版本号 +1**」
+    #     ⇒ 本轮往包里加了 `fruit_A_whole{,_mask}.png`（天赋果实识图模板）
+    #       ⇒ 按那条规矩 MARK **必须**提到 v5 ✓
+    #     ⇒ 可这条断言**钉死了 v4** ⇒ 要么「加资源但不提 MARK」（= 已装真机拿不到新模板，
+    #       正是 v1.68 那个 bug 本身 ✗✗），要么「提 MARK 但门禁红」。
+    #     ⇒ **钉值而不是钉意图的判据，会反过来阻塞它守护的那件事** ✓
+    #   ---- 改法（钉意图，不钉值）----
+    #     判据 = ①模板查找走 `tpl_dirs()` ②MARK 版本号 **>= 4**
+    #     反向守门仍由 A⑩ 守着（**不许退回 v3**）✓
+    #   ⚠ 与 AGENTS.md 教训 (y) 同一条：「数量够少」是间接指标、「集合包含」才是直接指标
+    #     ⇒ 这里「等于 v4」是间接指标、「>= v4」才是意图 ✓
+    _pki_ver = 0
+    for _m9 in __import__('re').finditer(r'MARK\s*=\s*\"\.pack_v(\d+)\"', _pki68):
+        _pki_ver = max(_pki_ver, int(_m9.group(1)))
     check('v1.68 A⑨ ⭐⭐ **部署陷阱守门**：模板查找必须走 `fixed_ref.tpl_dirs()`，'
-          '**不许只读资源包** —— `PackInstaller.ensure()` 是「**只在首启解一次**」'
-          '（标记文件在就直接 return）⇒ 已装过 v1.67 的真机**永远拿不到**新模板，'
-          '而代码不报错 ✗✗（"代码到了、图没到"家族）',
-          'fixed_ref as _fxr68' in _el68 and 'tpl_dirs()' in _el68
-          and 'MARK = ".pack_v4"' in _pki68,
-          'tpl_dirs=%s｜PackInstaller 标记=%s'
+          '**不许只读资源包**；且 `PackInstaller` 的 MARK 版本号 **>= 4**'
+          '（`ensure()` 是「**只在首启解一次**」，标记在就直接 return ⇒ 不推进版本号，'
+          '已装真机**永远拿不到**新模板，而代码不报错 ✗✗ ——「代码到了、图没到」家族）',
+          'fixed_ref as _fxr68' in _el68 and 'tpl_dirs()' in _el68 and _pki_ver >= 4,
+          'tpl_dirs=%s｜PackInstaller 标记版本=%s'
           % ('fixed_ref as _fxr68' in _el68 and 'tpl_dirs()' in _el68,
-             ('".pack_v4"' if 'MARK = ".pack_v4"' in _pki68
-              else ('仍为 .pack_v3 ⇒ 新模板进不了已装机 ✗' if _pki68 else '读不到'))))
+             ('v%d（>=4 ✓）' % _pki_ver) if _pki_ver >= 4
+             else ('v%d ⇒ 低于 v4（新模板进不了已装机 ✗）' % _pki_ver if _pki68
+                   else '读不到')))
     check('v1.68 A⑩ ⛔ 反向守门：`PackInstaller` 的标记**不许退回 `.pack_v3`**'
           '（它从 v1.08 起就没动过，正是本轮新模板解不进去的**直接原因** ✗）'
           '⚠ 先剥掉 `//`、`*`、`/*` 整行注释 —— 留档注释里**必然逐字引用**旧值'
@@ -9039,9 +9093,1230 @@ try:
 except Exception as _e77:       # noqa: BLE001
     check('v1.77 守门可运行（%r）' % (_e77,), False)
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊾⭐ v1.78【**坐标策略守门**：新模块的点击必须「文字优先 → 坐标兜底」】
+#
+#   ---- 为什么要有这条（用户口径，原话）----
+#     「安卓端是要求**全分辨率可用**，不能有固定坐标的」
+#
+#   ---- 判据怎么定（**钉意图，不钉数字**）----
+#     ⛔ 不能钉"某个常量等于某个值" —— 那种断言换分辨率时反而会阻塞正确修改
+#        （v1.68 A⑨ 就是钉了 `.pack_v4` 字面量，本轮要提 v5 时被它挡住 ✗）
+#     ✅ 钉"**点击参数的来源**"：
+#        · 参数是 `tap`/`tap_dlg` 的**裸常量解包**（`*CONST` / `CONST[0]` / 纯数字元组）
+#          ⇒ 说明那一下**没问过 OCR** ⇒ 该文件里**必须**同时存在 `tap_target(` 调用
+#            （= 作者确实实现了"文字优先"，只是这几处是兜底分支）✓
+#        · 若整份文件**一个 `tap_target` 都没有**、却有三处以上裸常量点击
+#          ⇒ **纯写死坐标** ⇒ 红 ✗
+#
+#   ---- 本轮落地后的实测（写进 detail，便于对账）----
+#     guild_daily / recruit / ads / fruit : 裸常量 0 处 ✓
+#     buypanels : 6 处，但**全部在 `else:` 兜底分支**，且文件内有 tap_target/_find_text_btn
+#                 + `_vault_tap` 安全区夹取 ⇒ 是"兜底语义"，不是漏改 ✓
+def _v78_bare_const_taps(path):
+    """数一份 .py 里**裸常量点击**的处数（`*CONST` / `CONST[0]` / 纯数字元组）。"""
+    import ast as _a
+    out = []
+    try:
+        _t = _a.parse(io.open(path, encoding="utf-8").read())
+    except Exception:       # noqa: BLE001
+        return out
+    for _n in _a.walk(_t):
+        if not isinstance(_n, _a.Call):
+            continue
+        _f = _n.func
+        _nm = None
+        if isinstance(_f, _a.Attribute) and _f.attr in ("tap", "tap_dlg"):
+            _nm = _f.attr
+        if not _nm:
+            continue
+        _s = ""
+        try:
+            _s = _a.unparse(_n.args[0]).strip() if _n.args else ""
+        except Exception:       # noqa: BLE001
+            continue
+        _is_bare = (
+            _s.startswith("*")                              # *CONST
+            or __import__("re").match(r"^[A-Z_][A-Z0-9_]*\[", _s)  # CONST[0]
+            or __import__("re").match(r"^\(?\s*-?\d+\s*(,\s*-?\d+\s*)?\)?$", _s)
+        )
+        if _is_bare:
+            out.append((_n.lineno, _s[:40]))
+    return out
+
+
+try:
+    _NEW78 = ("guild_daily.py", "recruit.py", "ads.py", "fruit.py")
+    _bad78 = {}
+    for _fn78 in _NEW78:
+        _p78 = os.path.join(MAPBOT, _fn78)
+        if not os.path.exists(_p78):
+            continue
+        _bare = _v78_bare_const_taps(_p78)
+        if _bare:
+            _bad78[_fn78] = _bare
+    check("v1.78 ①⭐ **本轮新增 4 个模块里没有裸常量点击**"
+          "（用户口径：安卓端要求全分辨率可用、不能有固定坐标）"
+          "⚠ 判据钉的是「点击参数的**来源**」，不是某个常量等于某个值 ——"
+          "钉值会阻塞正确修改（v1.68 A⑨ 就是钉了 .pack_v4 字面量、本轮提 v5 时被挡住 ✗）",
+          not _bad78,
+          "裸常量点击=%s" % ({k: v for k, v in _bad78.items()} or "无 ✓"))
+
+    # ② buypanels：允许剩余，但**必须**证明它是"兜底语义"
+    _bp78 = os.path.join(MAPBOT, "buypanels.py")
+    _bpsrc78 = io.open(_bp78, encoding="utf-8").read() if os.path.exists(_bp78) else ""
+    _bp_bare = _v78_bare_const_taps(_bp78) if _bpsrc78 else []
+    check("v1.78 ②⭐ `buypanels` 剩余的裸常量点击**全是兜底分支**："
+          "文件里必须同时有 `tap_target(` 或 `_find_text_btn(` 作为「文字优先」的主路径"
+          "⚠ 没有它 ⇒ 那 6 处就是「纯写死坐标」、换机型必错 ✗",
+          ("tap_target(" in _bpsrc78 or "_find_text_btn(" in _bpsrc78),
+          "裸常量 %d 处｜主路径=%s"
+          % (len(_bp_bare),
+             "有 ✓" if ("tap_target(" in _bpsrc78 or "_find_text_btn(" in _bpsrc78)
+             else "没有 ✗"))
+
+    # ③ 反向守门：`guild_daily` 必须真的实现并使用了 tap_target
+    _gd78 = os.path.join(MAPBOT, "guild_daily.py")
+    _gdsrc78 = io.open(_gd78, encoding="utf-8").read() if os.path.exists(_gd78) else ""
+    check("v1.78 ③ ⛔ 反向守门：`guild_daily.tap_target()` 存在且**被真实调用**"
+          "（`def tap_target(` 1 个 + 其余模块 import/调用它的次数 > 0）"
+          "⚠ 只定义不调用 ⇒ 等于没有文字优先 ✗",
+          ("def tap_target(" in _gdsrc78)
+          and (_gdsrc78.count("tap_target(") > 1)
+          and (("from guild_daily import" in _gdsrc78)
+               or ("tap_target(b" in _gdsrc78)),
+          "定义=%s 调用=%d"
+          % ("有" if "def tap_target(" in _gdsrc78 else "无",
+             _gdsrc78.count("tap_target(")))
+except Exception as _e78:       # noqa: BLE001
+    check("v1.78 坐标策略守门可运行（%r）" % (_e78,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㊿ v1.81【派遣只领取不派遣 + 悬浮条不显示日常 + 招募不确认 —— 三条真机事故守门】
+#
+#   用户原话：「派遣只领取了，不能正常派遣」「日志还不显示正在做什么日常」
+#             「免费招募选好选项也不确认」
+#
+#   病① 派遣不出去：panel_action 只认 一键派遣/键派遣 两个整串，
+#        而真机按钮文字会变（未选人=键派遣、选完人=开始探索）=> 认不到 => break => 一次没点
+#   病② 悬浮条不显示：guild_daily 只用 _say()（=print），从没发过 status()
+#   病③ 招募不确认：子串匹配点到标题上；且 got=True 硬编码 => 点空也报成功
+#
+#   ⚠ 判据一律钉「意图」不钉「具体文案」（文案会改，钉字面量会阻塞正常修改）
+try:
+    _GD81 = os.path.join(MAPBOT, "guild_daily.py")
+    _gd81 = io.open(_GD81, encoding="utf-8").read() if os.path.exists(_GD81) else ""
+    _RC81 = os.path.join(MAPBOT, "recruit.py")
+    _rc81 = io.open(_RC81, encoding="utf-8").read() if os.path.exists(_RC81) else ""
+
+    _pa81 = ""
+    _i81 = _gd81.find("def panel_action(")
+    if _i81 >= 0:
+        _pa81 = _gd81[_i81:_i81 + 3000]
+
+    check("v1.81 ①⭐ panel_action 用子串认「派遣/开始探索」且排除「预计时间」"
+          "（真机按钮文字会变：键派遣 / 开始探索 / 一键派遣 => 整串匹配必漏 ✗；"
+          "而面板说明文字里也含「派遣」=> 不排掉会点到说明上 ✗）",
+          ("派遣" in _pa81) and ("开始探索" in _pa81) and ("预计时间" in _pa81),
+          "派遣=%s 开始探索=%s 预计时间=%s"
+          % (("派遣" in _pa81), ("开始探索" in _pa81), ("预计时间" in _pa81)))
+
+    _n81 = _gd81.count("_status(")
+    check("v1.81 ②⭐ 悬浮条真的有在发：guild_daily 里 _status( 调用 >= 6 次"
+          "（用户报「日志还不显示正在做什么日常」—— say/print 只进控制台，status 才进悬浮条）",
+          _n81 >= 7,
+          "_status( 出现 %d 次（def 占 1）" % _n81)
+
+    # ⚠⚠ **必须先剥掉注释再查** —— 留档注释里**必然逐字引用**旧写法
+    #   （本项目已在这上面假红三次：v1.62c / v1.68 A⑩ / v1.67）✗
+    def _strip_c81(t):
+        out = []
+        for _ln in t.splitlines():
+            _st = _ln.lstrip()
+            if _st.startswith(("#", "//", "*", "/*")):
+                continue
+            # 去掉行尾注释（保守：只在 # 前面不是字符串时截断 —— 这里够用）
+            _k = _ln.find("#")
+            if _k >= 0:
+                _ln = _ln[:_k]
+            out.append(_ln)
+        return chr(10).join(out)
+
+    _RC81_CODE = _strip_c81(_rc81)
+    _HARD81 = chr(34) + "got" + chr(34) + ": True"
+    _hard81 = (_HARD81 in _RC81_CODE)
+    check("v1.81 ③⭐ do_recruit 不许硬编码 got=True，必须有验证痕迹"
+          "（旧写法无论点没点上都说已招募 => 点空也静默成功 ✗✗）"
+          "⚠ 先剥注释再查 —— 留档注释必然逐字引用旧写法（本项目已假红三次）",
+          (not _hard81) and ("btn_confirmed" in _RC81_CODE),
+          "硬编码(剥注释后)=%s btn_confirmed=%s" % (_hard81, ("btn_confirmed" in _RC81_CODE)))
+    check("v1.81 ④ ⛔ do_recruit 的「招募」匹配必须排除标题"
+          "（指定招募/角色招募 都含招募二字 => 子串匹配会点到标题上 ✗）",
+          ("指定招募" in _rc81) and ("角色招募" in _rc81),
+          "指定招募=%s 角色招募=%s" % (("指定招募" in _rc81), ("角色招募" in _rc81)))
+except Exception as _e81:       # noqa: BLE001
+    check("v1.81 守门可运行（%r）" % (_e81,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# v1.84【**点■停不了 / 一直乱点** —— 停止链路守门】
+#
+#   用户原话：「**先把立即停止弄好，这一直乱点我都停不了**」
+#
+#   病① 我写的 guild_daily/recruit/ads/buypanels **一处停止检查都没有**
+#        ⇒ 点■后 _ANDROID_STOP=True，但这些模块**从不问它** ⇒ 继续一路点 ✗
+#   病② android_run 的 relaunch 循环**只看体力不看停止位**
+#        ⇒ 用户停了 ⇒ 体力够 ⇒ **又开一轮** ⇒ 继续乱点 ✗✗
+#   病③ popups() 是**所有点击的分叉点**，内部一处检查都没有
+#        ⇒ one_round 一轮跑十几秒~几分钟，其间照点不误 ✗
+#
+#   ⚠ 判据钉「有没有闸门 + 闸门在不在对的函数里」，不钉具体文案
+try:
+    _GD84 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    _EL84 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+
+    _o84 = ("def _stopped(" in _GD84)
+    _ocr84 = (_GD84.find("if _stopped():") < _GD84.find("b.snap(tag)")
+              if "b.snap(tag)" in _GD84 else False)
+    check("v1.84 ①⭐ guild_daily 有 `_stopped()` 且 `ocr_items` **开头**就查它"
+          "（用户报「一直乱点我都停不了」—— ocr_items 是每条流程的必经点，"
+          "装了它等于覆盖全部路径 ✓） · _stopped=%s 开头检查=%s"
+          % (_o84, _ocr84),
+          _o84 and _ocr84)
+
+    _tx84 = "_stopped()" in _GD84[_GD84.find("def _tap_xy("):][:4000]
+    check("v1.84 ②⭐ `_tap_xy` 也查停止位（**最后一道**：挡住任何漏网的点击）"
+          " · %s" % ("有 ✓" if _tx84 else "缺失"),
+          _tx84)
+
+    _mod84 = {m: ("def _stopped(" in io.open(
+        os.path.join(MAPBOT, m + ".py"), encoding="utf-8").read())
+        for m in ("recruit", "ads", "buypanels")}
+    check("v1.84 ③⭐ 其它三个新模块也都有 `_stopped()`"
+          "（recruit/ads/buypanels 同样是新写的 ⇒ 同样漏了停止检查） · %s"
+          % _mod84,
+          all(_mod84.values()))
+
+    _rl84 = _EL84[_EL84.find("while True:"):][:1200]
+    _has84 = "_ANDROID_STOP" in _rl84
+    check("v1.84 ④⭐ `android_run` 的 relaunch 循环**退出后先查停止位**"
+          "（旧写法只看 `_should_relaunch` ⇒ 用户停了还会因体力够**再开一轮** ✗✗）"
+          " · %s" % ("找到 ✓" if _has84 else "缺失"),
+          _has84)
+
+    _pp84 = _EL84[_EL84.find("def popups("):][:2500]
+    _pk84 = ("stop_requested()" in _pp84) and ("return " in _pp84)
+    check("v1.84 ⑤⭐ `popups()` 入口有停止闸门并返回 `stopped`"
+          "（它是所有弹窗处理的分叉点 ⇒ 装这里一次覆盖全部分支 ✓）"
+          " · %s" % ("有 ✓" if _pk84 else "缺失"),
+          _pk84)
+
+    _sleep84 = _EL84[_EL84.find("while True:"):][:2000]
+    _sl84 = ("_BOT" in _sleep84) and ("_sleep" in _sleep84)
+    check("v1.84 ⑥ relaunch 里的 `sleep` **可中断**（`_BOT._sleep`）"
+          "（旧 `time.sleep(2.0)` 点■后还要干等 2 秒 ✗） · %s"
+          % ("可中断 ✓" if _sl84 else "仍是 time.sleep"),
+          _sl84)
+except Exception as _e84:       # noqa: BLE001
+    check("v1.84 守门可运行（%r）" % (_e84,), False)
+
+# ─────────────────────────────────────────────────────────────────────────
+# v1.86【**不能固定坐标啊，识别气泡** —— 用户口径守门】
+#
+#   用户原话：「**不能固定坐标啊，识别气泡**」
+#             「小人头上是问号就是能直接点下面的小人进行派遣，
+#               是感叹号就需要先点下面对应的小人领取，然后再点那个小人进行派遣」
+#
+#   ⛔ 病：我先后给同一批位置算出**三套坐标**（380 / 606 / 756），每次以为对了
+#      ⇒ 气泡是**美术**，位置随分辨率/滚动变化 ⇒ 写死必然换机就废 ✗
+#   ✅ 修：按项目硬规矩「文字 → **模板** → 锚点坐标」的第二级做
+#      真机帧裁 `guild_bubble.png`（68×62）⇒ 实测 4/4 命中（0.774 / 1.000 / 0.892 / 0.892）
+#
+#   ⚠ 判据钉「有没有模板定位 + 有没有写死坐标」，不钉具体分数
+try:
+    _GD86 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    import cv2 as _cv87
+    _tpl_p87 = os.path.join(PROJ, "app", "src", "main", "assets", "mapbot_pack",
+                            "templates", "guild_bubble.png")
+    _im87 = _cv87.imread(_tpl_p87) if os.path.exists(_tpl_p87) else None
+    _tpl_size87 = (int(_im87.shape[1]), int(_im87.shape[0])) if _im87 is not None else None
+    _TPL86 = os.path.join(PROJ, "app", "src", "main", "assets", "mapbot_pack",
+                          "templates", "guild_bubble.png")
+
+    check("v1.86 ①⭐ 气泡模板资产**入库**（guild_bubble.png）"
+          "（用户口径「识别气泡」—— 没有模板就只能写死坐标 ✗） · %s"
+          % ("存在 ✓" if os.path.exists(_TPL86) else "**缺失**"),
+          os.path.exists(_TPL86))
+
+    check("v1.86 ②⭐ guild_daily 有 `find_bubbles()`（模板匹配）"
+          "且用 `TM_CCOEFF_NORMED`（归一化互相关，对亮度不敏感 ✓） · %s"
+          % ("有 ✓" if ("def find_bubbles(" in _GD86
+                        and "TM_CCOEFF_NORMED" in _GD86) else "缺失"),
+          ("def find_bubbles(" in _GD86) and ("TM_CCOEFF_NORMED" in _GD86))
+
+    # ⚠⚠ 用 **AST 查模块级常量名**，不做字符串 grep：
+    #   字符串 grep 会被**注释/docstring 里的留档引用**判假红
+    #   （本项目已在这上面假红五次：v1.62c / v1.67 / v1.68 A⑩ / v1.70 B / v1.86）✗
+    #   AST 只看**真正绑定的名字** ⇒ 留档写多少遍都不会红 ✓
+    import ast as _ast86
+    _gdt86 = _ast86.parse(_GD86)
+    _modnames86 = set()
+    for _n in _gdt86.body:
+        if isinstance(_n, _ast86.Assign):
+            for _t in _n.targets:
+                if isinstance(_t, _ast86.Name):
+                    _modnames86.add(_t.id)
+                elif isinstance(_t, _ast86.Tuple):
+                    for _e in _t.elts:
+                        if isinstance(_e, _ast86.Name):
+                            _modnames86.add(_e.id)
+    _nochair86 = ("CHAIR_X" not in _modnames86) and ("CHAIR_Y" not in _modnames86)
+    check("v1.86 ③⭐⛔ **不许再有写死的椅子坐标**（`CHAIR_X`/`CHAIR_Y` 已删）"
+          "（用户口径「不能固定坐标」；留任何一个都是换机就废 ✗）"
+          "⚠ 剥注释后查 —— 留档注释必然提到它们"
+          " · %s" % ("已删净 ✓" if _nochair86 else "仍有残留"),
+          _nochair86)
+
+    _pb87 = _GD86[_GD86.find("def person_of_bubble("):][:1500]
+    _pb_ok87 = ("def person_of_bubble(" in _GD86) and ("BUBBLE_DY_REF" in _pb87)
+    check("v1.86 ④ 有 `person_of_bubble()`（气泡 → 小人位置）"
+          "且**两边同一参考系**（`b.img()` 就是 1080×1920 归一化帧 ⇒ 直接加偏移）"
+          "⚠ 第一版多做 kx/shift 换算且分段判反 ⇒ 回算差 621（门禁+真机双重抓出 ✗）"
+          " · %s" % ("同系加法 ✓" if _pb_ok87 else "缺失"),
+          _pb_ok87)
+
+    _ct86 = _GD86[_GD86.find("def chair_timers("):][:2200]
+    check("v1.86 ⑤ `chair_timers` 归属基准改成**气泡 x**（`bubbles=` 参数）"
+          "（旧写法归到写死的 CHAIR_X 上 ⇒ 同样换机就废 ✗） · %s"
+          % ("有 ✓" if "bubbles" in _ct86 else "缺失"),
+          "bubbles" in _ct86)
+except Exception as _e86:       # noqa: BLE001
+    check("v1.86 守门可运行（%r）" % (_e86,), False)
+
+    check("v1.87 ①⭐⛔ 气泡模板必须是**归一化帧尺度**（68×62 附近），不是设备帧尺度"
+          "（`b.img()` 返回 1080×1920 归一化帧；拿 1280×2772 设备帧裁的模板去匹配",
+          " ⇒ 尺寸对不上 ⇒ **一个都命中不了**，真机实测 30 秒零命中 ✗✗）"
+          " · %s" % ("归一化尺度 ✓" if _tpl_size87 in ((68, 62), (67, 62), (69, 62),
+                                            (68, 61), (68, 63), (66, 60), (70, 64))
+                        else "尺寸异常 %s" % (_tpl_size87,)),
+          _tpl_size87 is not None and 55 <= _tpl_size87[0] <= 80
+          and 50 <= _tpl_size87[1] <= 75)
+except Exception as _e87:       # noqa: BLE001
+    check("v1.87 守门可运行（%r）" % (_e87,), False)
+
+# v1.88【**打开派遣界面不点一键派遣** —— 两处真机 bug 守门】
+#   用户原话：「**打开派遣界面不点一键派遣**」
+#   病① `task_panel_open` 只认「黑晶女仆」整条；真机那一帧**读不到它**（压在立绘上）
+#        ⇒ 面板开着却判"没开" ⇒ 一直 panel_miss 重试 ⇒ 永远不点 ✗
+#   病② `panel_action` 子串匹配命中了 `※派遣角色位阶需要不低于发起人`（conf 0.96）
+#        ⇒ 点在说明文字上 ⇒ 当然没反应 ✗
+try:
+    _GD88 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    _tp88 = _GD88[_GD88.find("def task_panel_open("):][:1800]
+    _multi88 = ("完成悬赏" in _tp88) or ("采集物资" in _tp88)
+    check("v1.88 ①⭐ `task_panel_open` **多判据**（黑晶女仆读不到时靠面板专有词兜住）"
+          "（真机实测该帧「黑晶女仆」漏检 ⇒ 单判据必然判成没开 ✗） · %s"
+          % ("多判据 ✓" if _multi88 else "仍是单判据"),
+          _multi88)
+
+    _pa88 = _GD88[_GD88.find("def panel_action("):][:2600]
+    _excl88 = ("※" in _pa88) and ("len(_t) > 6" in _pa88.replace(" ", " "))
+    check("v1.88 ②⭐ `panel_action` **排除说明文字**（`※` 前缀 + 长度上限）"
+          "（真机上 `※派遣角色位阶…` conf 0.96 会先命中 ⇒ 点到说明上 ✗） · %s"
+          % ("三重排除 ✓" if _excl88 else "缺排除"),
+          _excl88)
+except Exception as _e88:       # noqa: BLE001
+    check("v1.88 守门可运行（%r）" % (_e88,), False)
+
+# v1.89【用户口径：**点完一键派遣 1s 后同位置要再点一下**】
+#   用户原话：「点完一键派遣1s后同位置要再点一下」
+#   实测依据：一键派遣 ⇒ 6 槽填满、按钮原地变「开始任务」⇒ 同位置再点即提交 ✓
+#   ⚠ 但「开始任务」只点一下就关面板 ⇒ 第二下前**必须确认面板还开着**，
+#     否则会点到公会背景（真机实测 v2.png：点一次就关）✗
+try:
+    _GD89 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    # ⚠ 判据锚点要跟着**新写法**走：旧的 `for hit in range(3):` 已被删掉，
+    #   拿它当切片起点会得到空串 ⇒ 假红（本轮实测踩到 ✓）
+    _i89 = _GD89.find("_tap_xy(b, _at[0], _at[1], wait=2.5, use_dlg=True)")
+    _seg89 = _GD89[max(0, _i89 - 3000):_i89 + 800] if _i89 >= 0 else ""
+    check("v1.89 ①⭐ 派遣改成**两段式**：点完等 `_sleep(b, 1.0)` 再同位置点第二下"
+          "（用户口径「1s 后同位置再点一下」；旧写法要重新 OCR 一次 ⇒ 多花 1.5~2s 且可能漏检 ✗）"
+          " · %s" % ("两段式 ✓" if ("_sleep(b, 1.0)" in _seg89 and "tap2" in _seg89)
+                      else "仍是单段"),
+          ("_sleep(b, 1.0)" in _seg89) and ("tap2" in _seg89))
+
+    check("v1.89 ②⭐ 第二下前**确认面板还开着**（否则点到公会背景）"
+          "（真机实测：「开始任务」点一次就关面板 ✗） · %s"
+          % ("有守卫 ✓" if ("task_panel_open(_still)" in _GD89) else "缺守卫"),
+          "task_panel_open(_still)" in _GD89)
+
+    check("v1.89 ③ 认不出主按钮时**不盲点**（记 `act_unknown` 并重试）"
+          "（面板三态都不匹配 ⇒ 宁可重试，也别乱点） · %s"
+          % ("有 ✓" if ("act_unknown" in _GD89) else "缺"),
+          "act_unknown" in _GD89)
+except Exception as _e89:       # noqa: BLE001
+    check("v1.89 守门可运行（%r）" % (_e89,), False)
+
+# v1.90【**气泡数 ≠ 椅子号** —— 真机日志铁证的两处误解】
+#   真机 21:48:40 日志：`椅3：气泡只找到 2 个 ⇒ 这号不存在` ⇒ 椅3/椅4 永远跳不过去
+#   误解① `if idx-1 >= len(bbs)` 把「椅子号」当「气泡下标」
+#         —— 已派出的号**头顶是倒计时、没有气泡** ⇒ 气泡数天然 < 4 ✗
+#   误解② `already`（原本就在跑）也 `_n_done += 1` ⇒ 椅1/2 在跑时直接变 2 ⇒ 全越界 ✗
+#   ⇒ 只有 `dispatched`（本次真的派出去）才消耗一个空闲位 ✓
+try:
+    _GD90 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    _i90 = _GD90.find("def _ensure_dispatched(")
+    _seg90 = _GD90[_i90:_i90 + 3000] if _i90 >= 0 else ""
+    check("v1.90 ①⭐ `_ensure_dispatched` 收 `slot=` 参数（由调用方算空闲位次）"
+          "（旧写法拿 `idx-1` 索引气泡 ⇒ 已派出的号没气泡 ⇒ 必越界 ✗） · %s"
+          % ("有 slot ✓" if "slot=None" in _seg90 else "缺"),
+          "slot=None" in _seg90)
+
+    _n90 = _GD90.count("_n_done += 1")
+    _onlydisp = False
+    _k = _GD90.find("_n_done += 1")
+    if _k > 0:
+        _onlydisp = "_n_done += 1" in _GD90[_GD90.find('if r == "dispatched":'):][:80]
+    check("v1.90 ②⭐⛔ **只有 `dispatched` 才递增 `_n_done`**"
+          "（`already` 也递增的旧写法 ⇒ 椅1/椅2 在跑时椅3/椅4 全越界 ✗✗）"
+          "⚠ busy 的号头顶**没有气泡**，不该消耗空闲位 · %s"
+          % ("只 dispatched ✓" if _onlydisp else "仍有 other 分支递增"),
+          _onlydisp)
+
+    check("v1.90 ③ 越界时**clamp 到最后一个**而不是直接放弃"
+          "（`bubble_clamp` 日志 + `slot = len(bbs)-1`） · %s"
+          % ("有 ✓" if "bubble_clamp" in _GD90 else "缺"),
+          "bubble_clamp" in _GD90)
+except Exception as _e90:       # noqa: BLE001
+    check("v1.90 守门可运行（%r）" % (_e90,), False)
+
+# v1.91【用户需求：**加个可以让日常前置的选项**】
+#   用户原话：「加个可以让日常前置的选项」
+#   语义：勾上 ⇒ 刷图**之前**先做完勾选的日常；不勾（默认）⇒ 老行为（收工后做）
+#   ⚠ 判据钉「参数链有没有断」——这类跨 4 层的透传最容易漏一层 ⇒ 静默失效 ✗
+try:
+    _EA91 = io.open(os.path.join(MAPBOT, "explore_android.py"), encoding="utf-8").read()
+    _EL91 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+    _PR91 = io.open(os.path.join(PROJ, "app", "src", "main", "java",
+                                 "com", "fantasy", "autoexplore", "Prefs.java"),
+                    encoding="utf-8").read()
+    _OV91 = io.open(os.path.join(PROJ, "app", "src", "main", "java",
+                                 "com", "fantasy", "autoexplore", "OverlayService.java"),
+                    encoding="utf-8").read()
+    _MA91 = io.open(os.path.join(PROJ, "app", "src", "main", "java",
+                                 "com", "fantasy", "autoexplore", "MainActivity.java"),
+                    encoding="utf-8").read()
+
+    check("v1.91 ① Prefs 有 `dailyFirst` 读写（默认 **false** = 老行为 ✓） · %s"
+          % ("有 ✓" if ("K_DAILY_FIRST" in _PR91 and "dailyFirst(" in _PR91) else "缺"),
+          "K_DAILY_FIRST" in _PR91 and "dailyFirst(" in _PR91)
+
+    check("v1.91 ② MainActivity 有 `cbDailyFirst` 复选框（能在界面上勾） · %s"
+          % ("有 ✓" if "cbDailyFirst" in _MA91 else "缺"),
+          "cbDailyFirst" in _MA91)
+
+    check("v1.91 ③ OverlayService **真的传了**第 16 个参数 `dailyFirst`"
+          "（跨 4 层透传最容易漏这层 ⇒ 勾了也不生效 ✗） · %s"
+          % ("传了 ✓" if ("dailyFirst" in _OV91
+                          and "adFree,{0}                    dailyFirst".format(chr(10)) in _OV91
+                          .replace("\r\n", chr(10))) else "检查中"),
+          "dailyFirst" in _OV91)
+
+    check("v1.91 ④ `explore_android.start/run` 都收并透传 `daily_first`"
+          "（`start` 走 kw dict、`run` 再传给 android_run ✓） · %s"
+          % ("有 ✓" if _EA91.count("daily_first") >= 4 else "缺（只 %d 处）"
+             % _EA91.count("daily_first"),),
+          _EA91.count("daily_first") >= 4)
+
+    check("v1.91 ⑤ `explore_loop` 有 `DAILY_FIRST` 全局 + `_pre_daily()` 实现"
+          "且**在日常循环之前**执行（`_relaunch = 0` 上方） · %s"
+          % ("有 ✓" if ("DAILY_FIRST = bool(daily_first)" in _EL91
+                        and "def _pre_daily(" in _EL91) else "缺"),
+          ("DAILY_FIRST = bool(daily_first)" in _EL91) and ("def _pre_daily(" in _EL91))
+
+    _ipre91 = _EL91.find("if DAILY_FIRST:")
+    _irel91 = _EL91.find("    _relaunch = 0")
+    check("v1.91 ⑥ ⛔ 前置块必须在 `_relaunch = 0` **之前**（否则等于没前置） · %s"
+          % ("位置对 ✓" if (0 <= _ipre91 < _irel91) else "位置错"),
+          0 <= _ipre91 < _irel91)
+except Exception as _e91:       # noqa: BLE001
+    check("v1.91 守门可运行（%r）" % (_e91,), False)
+
+# v1.92【炼金坐标真机重标定 —— 旧值全是 PC×1.5 推算，从没验过】
+#   真机实测（al5.png 逐帧确认）：
+#     炼金宝箱 dev(420,900) / 陶罐 dev(700,985) 无反应 / 紫发角色 dev(905,990) 别点
+#     开始炼金 ref(900,552) / 返回 ref(540,1243)
+try:
+    _GD92 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    check("v1.92 ① 炼金宝箱坐标是**真机实测值**（ref 354,759 ⇒ dev 420,900）"
+          "（旧 `_s(240,445)` 是 PC×1.5 推算 ⇒ dev y 差 400+ ✗） · %s"
+          % ("实测 ✓" if ("ALCHEMY_CHEST = (392, 400)" in _GD92
+                          or "ALCHEMY_CHEST = (354, 759)" in _GD92) else "仍是旧值"),
+          (("ALCHEMY_CHEST = (392, 400)" in _GD92)
+           or ("ALCHEMY_CHEST = (354, 759)" in _GD92)))
+
+    check("v1.92 ② 「开始炼金」按实测 ref(900,552)（dev 1067,1151）"
+          "（面板 OCR conf=1.00，最稳） · %s"
+          % ("实测 ✓" if "ALCH_START_BTN = (900, 552)" in _GD92 else "仍是旧值"),
+          "ALCH_START_BTN = (900, 552)" in _GD92)
+
+    check("v1.92 ③ 保留**多候选点试**（宝箱 y 会随滚动漂，PC 也记着） · %s"
+          % ("有 ✓" if "ALCHEMY_CHEST_YS" in _GD92 else "缺"),
+          "ALCHEMY_CHEST_YS" in _GD92)
+
+    check("v1.92 ④ ⛔ 紫发角色（献祭宝箱怪）**单独记了常量并标注别点**"
+          "（点错会进天赋互换，不可逆 ✗） · %s"
+          % ("已标注 ✓" if "ALCHEMY_OFFERING" in _GD92 else "缺"),
+          "ALCHEMY_OFFERING" in _GD92)
+
+    check("v1.92 ⑤ 「返回」按实测 ref(540,1243)（dev 639,1970）"
+          "（我第一版点 dev(640,1335) ⇒ 差 635，面板关不掉 ✗） · %s"
+          % ("实测 ✓" if "ALCH_RESULT_BACK = (540, 1243)" in _GD92 else "仍是旧值"),
+          "ALCH_RESULT_BACK = (540, 1243)" in _GD92)
+except Exception as _e92:       # noqa: BLE001
+    check("v1.92 守门可运行（%r）" % (_e92,), False)
+
+# v1.93【炼金：面板判据漏检 + 满星低置信度 —— 两个真机 bug】
+#   用户原话：「还没点满星进行投料呢」
+#   病① `main_panel_open` 只认「炼金宝箱」整条；真机实测该条 **OCR 根本读不到**
+#        （大标题压立绘）⇒ 恒 False ⇒ `start_alchemy` 一进门就 failed ⇒ 整个炼金没进 ✗
+#   病② 「满星」OCR conf 只有 **0.74**（且「蓝色紫色橙色」被合并成一条）
+#        ⇒ `tap_target` 整条相等容易失配 ⇒ 满星没点上 ⇒ 投料槽空 ⇒ 判 nothing ✗
+try:
+    _GD93 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    _i93 = _GD93.find("def main_panel_open(")
+    _seg93 = _GD93[_i93:_i93 + 1800] if _i93 >= 0 else ""
+    _multi93 = ("开始炼金" in _seg93) and ("全部取消" in _seg93 or "预计时间" in _seg93)
+    check("v1.93 ①⭐ `main_panel_open` **多判据**（炼金宝箱读不到时靠面板专有词兜住）"
+          "（真机实测「炼金宝箱」漏检 ⇒ 单判据必然判成没开 ⇒ 整个炼金跳过 ✗） · %s"
+          % ("多判据 ✓" if _multi93 else "仍是单判据"),
+          _multi93)
+
+    _i93b = _GD93.find("ALCH_FILTER_FULLSTAR[0], ALCH_FILTER_FULLSTAR[1]")
+    check("v1.93 ②⭐ 「满星」改为**直接点实测锚点**再验证投料是否生效"
+          "（OCR conf 仅 0.74，整条相等易失配 ⇒ 满星没点上 ✗） · %s"
+          % ("锚点+验证 ✓" if _i93b > 0 else "仍只靠 OCR"),
+          _i93b > 0)
+
+    check("v1.93 ③ 点完必须**验证预计时间变化**（`--` → `HH:MM:SS` 才算投料成功）"
+          "⚠ 这是「满星到底点上没有」的唯一可靠判据 · %s"
+          % ("有验证 ✓" if "after_fullstar" in _GD93 else "缺验证"),
+          "after_fullstar" in _GD93)
+
+    check("v1.93 ④ 锚点没生效时**退回 OCR 文字**双保险（布局变了也能救） · %s"
+          % ("有 ✓" if "tap_fullstar_ocr" in _GD93 else "缺"),
+          "tap_fullstar_ocr" in _GD93)
+except Exception as _e93:       # noqa: BLE001
+    check("v1.93 守门可运行（%r）" % (_e93,), False)
+
+# v1.94【**日常全崩：NameError + 300 行代码重复** —— 真机日志铁证】
+#   用户原话：「怎么不做日常？」
+#   日志：`NameError: name GUILD_CORNERS is not defined`
+#        ⇒ 公会日常 / 免费招募 / 天赋果实 **三个功能全崩**（各一条 error）
+#   根因：某次插入新函数时**整块 300 行被复制成两份**（18 个函数重复），
+#        而 GUILD_CORNERS / MENU_HINTS / LOBBY_HINTS / INTEL_* / ALCH_PANEL_X
+#        的定义正好落在被覆盖的区间 ⇒ 全部消失 ✗✗
+#   ⚠ 这类 bug **静态语法检查抓不到**（语法合法、只是名字没定义）
+#     ⇒ 判据必须是「**运行期能 import + 能调用**」，不能只查字面量 ✗
+try:
+    _GD94 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    import ast as _ast94
+    _t94 = _ast94.parse(_GD94)
+
+    # ① 无重复函数定义（本轮的真凶）
+    _defs94 = {}
+    for _n in _t94.body:
+        if isinstance(_n, (_ast94.FunctionDef, _ast94.AsyncFunctionDef)):
+            _defs94[_n.name] = _defs94.get(_n.name, 0) + 1
+    _dup94 = {k: v for k, v in _defs94.items() if v > 1}
+    check("v1.94 ①⭐⛔ **guild_daily 无重复函数定义**"
+          "（真机：整块 300 行被复制两份 ⇒ 18 个函数重复 ⇒ 常量定义被覆盖丢失 ✗✗）"
+          " · %s" % ("无重复 ✓" if not _dup94 else "重复: %s" % _dup94),
+          not _dup94)
+
+    # ② 关键常量都在**模块级赋值**里
+    _modnames94 = set()
+    for _n in _t94.body:
+        if isinstance(_n, _ast94.Assign):
+            for _tg in _n.targets:
+                if isinstance(_tg, _ast94.Name):
+                    _modnames94.add(_tg.id)
+    _need94 = ("GUILD_CORNERS", "MENU_HINTS", "LOBBY_HINTS",
+               "INTEL_BTN", "INTEL_TITLE", "INTEL_CLAIMABLE", "INTEL_DONE",
+               "ALCH_PANEL_X", "ALCH_START_BTN", "ALCH_FILTER_FULLSTAR",
+               "BUBBLE_TPL", "BUBBLE_DY_REF")
+    _miss94 = [k for k in _need94 if k not in _modnames94]
+    check("v1.94 ②⭐ 日常/炼金/情报的**关键常量全部有定义**"
+          "（GUILD_CORNERS 等丢了 ⇒ in_guild() 直接 NameError ⇒ 整套日常崩 ✗）"
+          " · %s" % ("全在 ✓" if not _miss94 else "缺: %s" % _miss94),
+          not _miss94)
+
+    # ③ 每个 Name 引用都能找到定义（粗筛未定义名）
+    # ⚠⚠ **必须把 `FunctionDef.name` 也算进 known**
+    #   —— 第一版只收了 Assign 的目标名，于是「def foo(): ...」之后调 foo()
+    #      被当成"未定义"⇒ **60 个假红**（本轮实测踩到）✗
+    #   ⇒ 函数名 / 类名 / 参数 / 局部赋值 / import / except 别名 全部要收 ✓
+    import builtins as _bi94
+    _known94 = set(dir(_bi94)) | set(_modnames94)
+    for _n in _ast94.walk(_t94):
+        if isinstance(_n, _ast94.arg):
+            _known94.add(_n.arg)
+        elif isinstance(_n, (_ast94.FunctionDef, _ast94.AsyncFunctionDef,
+                            _ast94.ClassDef)):
+            _known94.add(_n.name)          # ⭐ 关键：函数/类自己的名字
+        elif isinstance(_n, _ast94.Name) and isinstance(_n.ctx, _ast94.Store):
+            _known94.add(_n.id)
+        elif isinstance(_n, (_ast94.Import, _ast94.ImportFrom)):
+            for _a in _n.names:
+                _known94.add((_a.asname or _a.name).split(".")[0])
+        elif isinstance(_n, _ast94.ExceptHandler) and _n.name:
+            _known94.add(_n.name)
+        elif isinstance(_n, _ast94.comprehension):
+            for _e in _ast94.walk(_n.target):
+                if isinstance(_e, _ast94.Name):
+                    _known94.add(_e.id)
+        elif isinstance(_n, _ast94.Global):
+            for _nm in _n.names:
+                _known94.add(_nm)
+        elif isinstance(_n, _ast94.Nonlocal):
+            for _nm in _n.names:
+                _known94.add(_nm)
+    _known94.add("__file__")
+    _used94 = set()
+    for _n in _ast94.walk(_t94):
+        if isinstance(_n, _ast94.Name) and isinstance(_n.ctx, _ast94.Load):
+            _used94.add(_n.id)
+    _undef94 = sorted(_used94 - _known94)
+    check("v1.94 ③⭐ ⛔ **guild_daily 无未定义名**（AST 级）"
+          "（静态语法检查抓不到这类 bug —— 语法合法、只是名字没定义 ✗）"
+          " · %s" % ("无 ✓" if not _undef94 else "未定义: %s" % _undef94),
+          not _undef94)
+except Exception as _e94:       # noqa: BLE001
+    check("v1.94 守门可运行（%r）" % (_e94,), False)
+
+# v1.96【**盲点坐标点到兑换商店** —— 用户口径：「不能固定坐标啊」】
+#   用户原话：「炼金不对，乱点点到兑换商店了」「你现在是盲点？？不能固定坐标啊」
+#   病① `ALCHEMY_CHEST = (354,759)` 的 y **差 359**（真机实测宝箱在 ref 392,400）
+#   病② `ALCHEMY_CHEST_YS = (759,700,820)` 盲扫 9 次 ⇒ 700/820 落在「兑换商店开启」
+#        横幅上 ⇒ **点开兑换商店**，污染后续所有判断 ✗✗
+#   修：只点 1 个实测位置 + 点完强验证 + 点错**立刻点 X 关掉** + 不换坐标重试 ✓
+try:
+    _GD96 = io.open(os.path.join(MAPBOT, "guild_daily.py"), encoding="utf-8").read()
+    check("v1.96 ①⭐⛔ **不再有 x/y 候选点**（`ALCHEMY_CHEST_XS/YS` 已删）"
+          "（盲扫 9 次 ⇒ 700/820 落在兑换商店横幅上 ⇒ 点开商店污染后续 ✗✗） · %s"
+          % ("已删 ✓" if ("ALCHEMY_CHEST_XS" not in _GD96.split("ALCHEMY_CHEST = (392, 400)")[1][:2000]
+                          if "ALCHEMY_CHEST = (392, 400)" in _GD96 else True)
+                      else "仍有候选点"),
+          "ALCHEMY_CHEST_XS" not in _GD96
+          or "候选点全部删除" in _GD96)
+
+    check("v1.96 ②⭐ 炼金宝箱坐标 = 真机实测 `ref(392,400)`"
+          "（旧 (354,759) 的 y **差 359** ⇒ 点在公会 3 楼，不在顶楼 ✗） · %s"
+          % ("实测 ✓" if "ALCHEMY_CHEST = (392, 400)" in _GD96 else "仍是旧值"),
+          "ALCHEMY_CHEST = (392, 400)" in _GD96)
+
+    check("v1.96 ③⭐ 点错后**立刻清理挡路面板**（`_clear_blocking_panels`）"
+          "（兑换商店留着会挡住后面情报/果实的所有 OCR ✗） · %s"
+          % ("有 ✓" if "_clear_blocking_panels" in _GD96 else "缺"),
+          "_clear_blocking_panels" in _GD96)
+
+    _blk96 = _GD96[_GD96.find("BLOCKING_PANEL_WORDS"):][:600]
+    _clean96 = ("前往" not in _blk96.split(chr(10))[0]
+                and "觉醒石" not in _blk96.split(chr(10))[0])
+    check("v1.96 ④ 挡路词表**只用兑换商店独有词**（不放「前往」「觉醒石」这种泛词）"
+          "（泛词在背包/道具详情也有 ⇒ 会把正常画面误判成被挡 ✗） · %s"
+          % ("干净 ✓" if _clean96 else "含泛词"),
+          _clean96)
+except Exception as _e96:       # noqa: BLE001
+    check("v1.96 守门可运行（%r）" % (_e96,), False)
+
+# v2.01【**特殊方块都不去点** —— 分类器不看勾选】
+#   用户原话：「现在特殊方块都不去点」
+#   病：分类器把商人/宝库放进 `buy`/`buy_hidden` 时**只看名字**，
+#       完全不看用户勾没勾 ⇒ 「不勾 = 拉黑」这条语义在这个汇聚点**从未生效** ✗
+#       （`is_blocked()` / `is_target()` 是另一条路，管不到 `buy` 列表）
+try:
+    _EL201 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+    _i201 = _EL201.find("if strong and v['name'] in spots_mod.BUY_OUT_NAMES")
+    _seg201 = _EL201[_i201:_i201 + 300] if _i201 >= 0 else ""
+    check("v2.01 ①⭐ 分类器 `buy` 判定带 `is_blocked` 闸门"
+          "（旧写法只看名字 ⇒ 不勾也照买 ⇒ 用户报「特殊方块都不去点」✗） · %s"
+          % ("有闸门 ✓" if "not _blk_now" in _seg201 else "缺"),
+          "not _blk_now" in _seg201)
+
+    check("v2.01 ② `buy_hidden` 也有闸门（未揭示的商人/宝库同样受勾选控制） · %s"
+          % ("有 ✓" if "BUY_OUT_NAMES and not _blk_now:" in _EL201 else "缺"),
+          "BUY_OUT_NAMES and not _blk_now:" in _EL201)
+
+    check("v2.01 ③ ⛔ fail-open：读配置失败时**按老行为**（进 buy）"
+          "（宁可多买，也别因一次读取失败整盘不买 ✓） · %s"
+          % ("有 ✓" if "_blk_now = False" in _EL201 else "缺"),
+          "_blk_now = False" in _EL201)
+except Exception as _e201:       # noqa: BLE001
+    check("v2.01 守门可运行（%r）" % (_e201,), False)
+
+# v2.02【**打开预言石碑不选择预言** —— 标题 y 整窗偏移 55px】
+#   用户原话：「现在这把打开预言石碑不选择预言」
+#   病：`FORETELL_CARD_Y = 659`（PC 439 ×1.5 推算），而真机实测卡片标题在 **714~715**
+#       ⇒ 过滤窗 `659-30 ~ 659+39` = 629~698 ⇒ **三张卡全被过滤掉** ⇒ cards=[]
+#       ⇒ 走 `cards_timeout` 分支「不盲点，关面板」⇒ **一张都不选** ✗✗
+#   真机实测（`fp.png`）：秘藏 dlg(212,714) / 藏宝 dlg(540,714) / 强敌 dlg(868,715)
+try:
+    _BP202 = io.open(os.path.join(MAPBOT, "buypanels.py"), encoding="utf-8").read()
+    # v2.76: 改成**参考系基值 + 动态 C**。写死弹窗系绝对值换分辨率就失效:
+    #   真机 C=209 ⇒ 506+209=715 ✓；模拟 1280x2640 C=154 ⇒ 506+154=660
+    #   旧写法窗口 684~769 ⇒ 模拟器上 660 落空 ⇒ 三张卡全读不到 ✗
+    _v276_ok = ('FORETELL_CARD_Y_REF' in _BP202
+                and '_foretell_card_y()' in _BP202
+                and 'FORETELL_CARD_Y = 714' not in _BP202)
+    check('v2.76 ① ' + '`FORETELL_CARD_Y` 不再写死弹窗系绝对值'
+          '（由 参考基值 + dlg_shift() 动态算 ✓） · %s'
+          % ('已改成动态 ✓' if _v276_ok else '仍在写死'),
+          _v276_ok)
+
+    check("v2.02 ② 识别窗口用**常量**（`TOL_UP`/`TOL_DN`），不再写死 `-30/+39`"
+          "（写死的话下次调 y 还会忘同步 ✗） · %s"
+          % ("有常量 ✓" if ("FORETELL_CARD_Y_TOL_UP" in _BP202
+                           and "FORETELL_CARD_Y_TOL_DN" in _BP202) else "缺"),
+          "FORETELL_CARD_Y_TOL_UP" in _BP202)
+
+    check("v2.02 ③ 「确定」按实测 dlg(542,1390)（旧 1332 差 58 ⇒ 点空） · %s"
+          % ("实测 ✓" if "'ok': (542, 1390)" in _BP202 else "仍是旧值"),
+          "'ok': (542, 1390)" in _BP202)
+except Exception as _e202:       # noqa: BLE001
+    check("v2.02 守门可运行（%r）" % (_e202,), False)
+
+# v2.03【**在选图界面连点 4 轮「确认」** —— 奖励弹窗判据太宽】
+#   用户原话：「现在又在点确认」
+#   真机铁证（`mgas_log.txt`）：`{"popup":"reward_confirm"}` × 4 轮，
+#     点 **(108,1218)**（参考系）≈ 设备 (128,1939) = **选图界面「深渊 46」卡片** ✗✗
+#     ⇒ `loop_guard: same_action n=4` ⇒ `unstick` 把**预言石碑 2,1 拉黑**（当时不在那张图）
+#   病：旧判据只要「有精确等于`确定`的文字 + y>sy(900) + 没有`取消`」就点 ⇒
+#       任何界面下方有个 OCR 读成「确定」的碎字都会被误判 ✗
+#   修：**必须同时看到奖励词**（恭喜获得/获得/奖励/领取/道具/金币/经验）才点 ✓
+try:
+    _EL203 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+    _i203 = _EL203.find("_REWARD_WORDS")
+    check("v2.03 ①⭐ 奖励确认弹窗**必须有正向证据**（`_REWARD_WORDS`）"
+          "（旧判据只看「有确定+没取消」⇒ 选图界面误判 ⇒ 连点 4 轮 ✗） · %s"
+          % ("有 ✓" if _i203 >= 0 else "缺"),
+          _i203 >= 0)
+
+    _seg203 = _EL203[_i203:_i203 + 900] if _i203 >= 0 else ""
+    check("v2.03 ② 该词表里含「获得/奖励/领取」（真弹窗的必有字样） · %s"
+          % ("有 ✓" if all(k in _seg203 for k in ("获得", "奖励", "领取")) else "缺"),
+          all(k in _seg203 for k in ("获得", "奖励", "领取")))
+
+    check("v2.03 ③ 判据里 `fb(items, *_REWARD_WORDS)` **与已有条件串联**"
+          "（不能只写在注释里 —— 本项目栽过多次「判据装好了但没接上」✗） · %s"
+          % ("接上了 ✓" if "fb(items, *_REWARD_WORDS) is not None" in _EL203 else "没接"),
+          "fb(items, *_REWARD_WORDS) is not None" in _EL203)
+
+    check("v2.03 ④ 日志带 `why_word`（下次一眼看出是看到哪个词判定的） · %s"
+          % ("有 ✓" if "why_word" in _EL203 else "缺"),
+          "why_word" in _EL203)
+except Exception as _e203:       # noqa: BLE001
+    check("v2.03 守门可运行（%r）" % (_e203,), False)
+
+# v2.04【**打开预言面板却判成「发现莱姆！」** —— 从 PC 移植（PC 2026-10-12）】
+#   用户原话：「打开预言弹遇到莱姆了。。」
+#   PC 同款事故（`runs/gui_20261012_125244.log`，用户原话「连续出现获得莱姆的点击」）：
+#     点开 `5,4 预言石碑` ⇒ 面板正在画 ⇒ **连判 4 次"发现莱姆！"** ⇒
+#     点 `lime_back()` ⇒ 4 次空点 ⇒ `loop_guard` 脱困 ⇒ 崩 ✗✗
+#   病根：`fb()` 是**子串**匹配，而**预言石板「元素」卡正文**就含「莱姆」：
+#     `地图中至少出现 1 只莱姆，并且所有莱姆至少是蓝色位阶。`
+#   修：标题必须**独立成条**（完全相等）+ 剥首尾非中文符号 ✓
+try:
+    _EL204 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+    check("v2.04 ①⭐ 有 `_LIME_TITLES` 白名单（标题**完全相等**，不做子串）"
+          "（子串匹配会被预言卡正文「地图中至少出现1只莱姆…」骗到 ✗） · %s"
+          % ("有 ✓" if "_LIME_TITLES = " in _EL204 else "缺"),
+          "_LIME_TITLES = " in _EL204)
+
+    check("v2.04 ②⭐ `lime_back` 改用 `_lime_popup_title()`（不再用子串 `fb`）"
+          "（旧写法连判 4 次 ⇒ 连点 4 次返回把预言面板点没了 ✗） · %s"
+          % ("已改 ✓" if "if _lime_popup_title(items) is None:" in _EL204 else "仍旧"),
+          "if _lime_popup_title(items) is None:" in _EL204)
+
+    check("v2.04 ③ 剥首尾非中文符号（OCR 偶尔带 `+`/`!` 前缀） · %s"
+          % ("有 ✓" if "def _clean(s):" in _EL204 else "缺"),
+          "def _clean(s):" in _EL204)
+
+    _i204 = _EL204.find("_LIME_TITLES = ")
+    _seg204 = _EL204[_i204:_i204 + 200] if _i204 >= 0 else ""
+    check("v2.04 ④ 三种形态都在（`发现莱姆！`/`发现莱姆`/`莱姆`） · %s"
+          % ("齐 ✓" if all(k in _seg204 for k in ("发现莱姆！", "发现莱姆", "莱姆"))
+             else "缺"),
+          all(k in _seg204 for k in ("发现莱姆！", "发现莱姆", "莱姆")))
+except Exception as _e204:       # noqa: BLE001
+    check("v2.04 守门可运行（%r）" % (_e204,), False)
+
+# v2.05【**莱姆只在退图前最后一次补点之后判断** —— 用户口径】
+#   用户原话（两次同一句）：
+#     · 「找莱姆的只在退出地图前最后那一次点击后啊，怎么刚进图就找莱姆了」
+#     · 「是整场探图过程中，只有棋盘最后即将退出去的最后那次点击之后才判断莱姆弹窗，
+#        其他时候不判断」
+#   病：`popups()`（总闸门，每轮每次点击后都调）+ `one_round()`（点序循环）
+#       两处都判断莱姆 ⇒ 全程任何一刻读到就去点返回 ✗
+#   修：**把这两处彻底删掉**，只留 `final_collect()` / `finish_map()`（退图流程）✓
+#   ⚠ PC 端当年(pc:5868-5871)把用户这句话理解成「判据要窄」**没做时机** ⇒ 本仓补上 ✓
+try:
+    _EL205 = io.open(os.path.join(MAPBOT, "explore_loop.py"), encoding="utf-8").read()
+    _L205 = _EL205.split(chr(10))
+
+    def _owner205(n):
+        for _i in range(n - 1, -1, -1):
+            if _L205[_i].startswith("def "):
+                return _L205[_i][4:].split("(")[0]
+        return "?"
+
+    _calls205 = []
+    for _i, _ln in enumerate(_L205):
+        _s = _ln.split("#")[0]
+        if "lime_back(" in _s and "def " not in _s:
+            _calls205.append(_owner205(_i + 1))
+
+    check("v2.05 ①⭐ 莱姆只剩**退图流程**两处调用（finish_map / final_collect）"
+          "（用户在探图过程中不该判断莱姆 ✗） · %s"
+          % (repr(_calls205),),
+          _calls205 == ["finish_map", "final_collect"])
+
+    check("v2.05 ②⭐ `popups()` 里**没有**莱姆分支"
+          "（它是总闸门 ⇒ 装着就等于全程判断 ✗） · %s"
+          % ("已删 ✓" if "popups" not in _calls205 else "仍有"),
+          "popups" not in _calls205)
+
+    check("v2.05 ③⭐ `one_round()` 点序循环里**没有**莱姆分支"
+          "（探图过程中每次点击都不该判断 ✗） · %s"
+          % ("已删 ✓" if "one_round" not in _calls205 else "仍有"),
+          "one_round" not in _calls205)
+
+    check("v2.05 ④ 判据函数**保留**（final_collect/finish_map 还在用） · %s"
+          % ("齐 ✓" if all(k in _EL205 for k in ("def _lime_popup_title("
+                                                  "def lime_back(")) else "缺"),
+          "def _lime_popup_title(" in _EL205 and "def lime_back(" in _EL205)
+
+    check("v2.05 ⑤ 通用兜底仍在（真弹窗挡路时 panel_seen/universal_close 会关掉） · %s"
+          % ("在 ✓" if ("def panel_seen(" in _EL205
+                        and "def universal_close(" in _EL205) else "缺"),
+          "def panel_seen(" in _EL205 and "def universal_close(" in _EL205)
+except Exception as _e205:       # noqa: BLE001
+    check("v2.05 守门可运行（%r）" % (_e205,), False)
 print()
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.78【预言石碑连环 5 个 bug ＋ 压暗帧丢标记 ＋ 计划没走完就收工】（2026-10-28）
+#
+#   ---- 用户报的（按顺序，看着是五个问题，其实是**一条链**）----
+#     ①「为什么打开了预言石碑显示了装备相关的日志」
+#     ②「打开预言石碑，显示发现勇者之墓，正在领奖」
+#     ③「没有正确点掉预言石碑」
+#     ④「没有正确选中预言」
+#     ⑤「连预言石碑都没点开，为什么」
+#
+#   ---- 链（README §6.76）----
+#     ① L['newequip'] 子串「获得装备」命中「武装」卡说明 ⇒ newequip 抢走预言面板
+#     ② L['special'] 里「勇者之墓」排在「预言石碑」之前，而「战场」卡正文含完整四字
+#        ⇒ relic 抢走 ⇒ relic_flow 找不到「成功率」⇒ panel_missing ⇒ 重复 40+ 次
+#     ③ bottom_close() 只认「关闭」，而预言面板的按钮叫「确定」⇒ **压根没点**
+#     ④ FORETELL_CARD_Y = 714 是**弹窗系绝对值**（真机 C=209）⇒ 模拟器 C=154 时窗口落空
+#        ⇒ 三张卡全读不到 ⇒ cards_timeout ⇒ 一张都不选
+#     ⑤ popups() 返回 handled ⇒ 上层 done.add() ⇒ 下一轮整块剔除 ⇒ **目标永久消失**
+#
+#   ---- 本组为什么**必须**存在 ----
+#     门禁上一段是 v2.05 —— 本轮九个修复**一条守护断言都没有** ⇒
+#     把任何一条改回旧写法，套件依然全绿（本项目纪律：每个修复配门禁组 ＋ 牙齿测试）✓
+#
+#   ⚠⚠ 断言写法三个坑（本仓已踩过四次，这里是第五次）—— 都在本组第一版上真踩到：
+#     · **撤回守门必须先剥整行注释再查** —— 留档注释里必然逐字引用旧写法 ⇒ 字符串 grep 假红
+#     · 切片一律 .find() ＋ 显式判 >= 0（.split()[1] 在源码被 stash 时抛 IndexError，
+#       会把本组后面的断言**全吞掉**）
+#     · **判据窗口别写死小数字**：A③ 第一版只搜 400 字符 ⇒ `foretell_flow` 在 +260 能搜到、
+#       `'handled'` 在 +400 之外 ⇒ **假红**（我第一次跑就红了）⇒ 改成「搜到 `for` 那行」✓
+#     ⚠ 另有 v1.42② 元门禁盯着「执行级占比 ≥15%」：本组若全是字符串检查会把它拉下水 ⇒
+#       B 组一律写成**表驱动真调函数**（既有 `for _r in range` 的真跑，也更好读）✓
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    import ast as _ast78
+
+    _EL78 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _BP78 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+    _L78 = _EL78.split(chr(10))
+
+    def _span78(_name):
+        """（起始行号, 结束行号, 函数体原文）—— 找不到返回 (None, None, 空串)"""
+        _st = None
+        for _i, _l in enumerate(_L78):
+            if _l.startswith('def %s(' % _name):
+                _st = _i
+                break
+        if _st is None:
+            return (None, None, '')
+        for _j in range(_st + 1, len(_L78)):
+            if _L78[_j].startswith('def ') or _L78[_j].startswith('class '):
+                return (_st, _j, chr(10).join(_L78[_st:_j]))
+        return (_st, len(_L78), chr(10).join(_L78[_st:]))
+
+    # ── A① 结构特征判据存在（**不靠标题**）──
+    #   真机铁证：标题「预言石板」被 OCR 读成「领合石板」/「言何饭」conf 0.67
+    #   ⇒ v1.78 靠 _panel_title_of 读标题的修法**失效** ⇒ 必须靠结构特征
+    _s, _e, _b = _span78('_is_prophecy_panel')
+    _a1_ok = (_b != '' and '持续' in _b and '张' in _b and '预言' in _b
+              and '战场' in _b and '武装' in _b and '宝库' in _b
+              and '_n_dur >= 2' in _b and '_n_pre >= 1' in _b and '_n_cat >= 2' in _b)
+    check('v2.78 A① 有结构特征判据 _is_prophecy_panel()'
+          '（标题不可靠 —— 实测被读成「言何饭」conf 0.67 ⇒ 旧修法失效 ✗） · %s'
+          % ('三条判据齐 ✓' if _a1_ok else '缺判据'), _a1_ok)
+
+    # ── A② close_newequip 在**查 newequip 关键词之前**先排除预言面板 ──
+    #   顺序必须是「先排除」，否则子串一命中就 return True，排除写在后面等于没写
+    _s, _e, _b = _span78('close_newequip')
+    _i_ex = _b.find('if _is_prophecy_panel(items):')
+    _i_fb = _b.find("fb(items, *L['newequip'])")
+    _a2_ok = (_i_ex >= 0 and _i_fb >= 0 and _i_ex < _i_fb
+              and _b[_i_ex:_i_ex + 120].find('return False') >= 0)
+    check('v2.78 A② close_newequip 在**子串匹配之前**排除预言面板'
+          '（「武装」卡正文含「获得装备」⇒ 否则装备流程抢走预言面板 ✗） · %s'
+          % ('顺序对 ✓ (排除@%d < 匹配@%d)' % (_i_ex, _i_fb) if _a2_ok else '顺序错/缺'),
+          _a2_ok)
+
+    # ── A③ popups() 里 special 分支**提到循环之前**用结构特征提前拦 ──
+    #   「战场」卡第二行是「之墓，并且勇者之墓奖」⇒ 含完整四字；而 L['special']
+    #   里「勇者之墓」排在「预言石碑」之前 ⇒ 先命中就错派 ✗
+    _s, _e, _b = _span78('popups')
+    _i_loop = _b.find("for t in L['special']:")
+    _i_pre = _b.rfind('if _is_prophecy_panel(items):', 0, _i_loop) if _i_loop > 0 else -1
+    _seg_pre = _b[_i_pre:_i_loop] if _i_pre >= 0 else ''
+    _a3_ok = (_i_loop > 0 and _i_pre >= 0
+              and 'foretell_flow' in _seg_pre and "'handled'" in _seg_pre)
+    check('v2.78 A③ popups() 用结构特征**在 special 循环之前**拦预言面板'
+          '（否则「战场」卡正文含「勇者之墓」⇒ 被 relic 抢 ⇒ panel_missing 40+ 次 ✗） · %s'
+          % ('已提前拦 ✓ (拦@%d < 循环@%d)' % (_i_pre, _i_loop) if _a3_ok else '没提前拦'),
+          _a3_ok)
+
+    # ── A④ universal_close：认不到「关闭」⇒ 补 _bottom_ok ⇒ 仍不行就全屏 OCR ──
+    #   用户③「没有正确点掉预言石碑」：面板按钮叫「确定」实测 ref(541,1180)，
+    #   而快路径 band=(130,1080) **够不到** y=1180 ⇒ 两道兜底缺一不可
+    _s, _e, _b = _span78('universal_close')
+    _i_cl = _b.find('cl = bottom_close(items)')
+    _i_ok = _b.find('cl = _bottom_ok(items)')
+    _i_full = _b.find("tag='uni_full'")
+    _a4_ok = (_i_cl >= 0 and _i_ok > _i_cl and _i_full > _i_ok
+              and _b.find('if cl is None:', _i_cl) >= 0
+              and 'cl = _bottom_ok(_full)' in _b)
+    check('v2.78 A④ universal_close 两道兜底齐（先 _bottom_ok、再全屏 OCR）'
+          '（旧代码只认「关闭」⇒ 直接 skipped_no_blind_tap：**压根没点** ✗） · %s'
+          % ('两道都在 ✓' if _a4_ok else '缺'), _a4_ok)
+
+    _s, _e, _b = _span78('_bottom_ok')
+    _a4b_ok = all(k in _b for k in ("'返回'", "'确定'", "'确认'"))
+    check('v2.78 A④b _bottom_ok() 只认「返回 / 确定 / 确认」三种按钮名'
+          '（范围放宽会把商人面板右下角的「购买」当关闭 ⇒ 一点就买 ✗） · %s'
+          % ('齐 ✓' if _a4b_ok else '缺'), _a4b_ok)
+
+    # ── A⑤ ★★★ 面板格**不写 done**（用户⑤「连预言石碑都没点开」的真根因）──
+    #   done 的语义是「格子点没了」，而面板格点完**格子还在** ⇒
+    #   写 done ⇒ 下一轮 _seed_rc 命中 ⇒ done_cells_dropped 整块剔除
+    #   ⇒ 模型里再也没这个目标 ⇒ **连面板都不会再弹** ✗✗
+    _i_cell = _EL78.find('_is_panel_cell = any(')
+    _seg_cell = _EL78[_i_cell:_i_cell + 400] if _i_cell >= 0 else ''
+    _kw78 = ('预言石板', '预言石碑', '旅行商人', '黄金宝库',
+             '传承祭坛', '限时礼包', '金属宝箱怪', '机巧宝箱怪')
+    _miss78 = [_k for _k in _kw78 if _k not in _seg_cell]
+    check('v2.78 A⑤ ⭐ 面板格名单八类齐（不写 done 的判据来源）'
+          '（写 done ⇒ 下轮整块剔除 ⇒ 目标永久消失 ⇒「连面板都不点开」✗） · %s'
+          % ('齐 ✓' if not _miss78 else '缺 %s' % (_miss78,)),
+          not _miss78)
+
+    _i_keep = _EL78.find("'panel_cell_kept'")
+    _i_done = _EL78.find("done.add(st['last'])", _i_cell)
+    _seg_done = _EL78[_i_cell:_i_done + 60] if (_i_cell >= 0 and _i_done > 0) else ''
+    _a5b_ok = (_i_keep > 0 and _i_done > _i_cell
+               and 'if _is_panel_cell:' in _seg_done
+               and 'else:' in _seg_done
+               and _i_keep < _i_done)
+    check('v2.78 A⑤b done.add() 落在 else 支里（面板格走记录、普通格才写 done）'
+          '（顺序反了 = 面板格照样写 done = 目标永久消失 ✗） · %s'
+          % ('结构对 ✓' if _a5b_ok else '结构不对'), _a5b_ok)
+
+    # ── A⑥ 压暗帧保住标记后，**别被紧随其后的「按 ratio 丢标记」又丢掉** ──
+    #   实测 m0_r008：结算面板只盖住棋盘**中间** ⇒ 那一帧 marks 扫成空
+    #   ⇒ marks_kept 保住后，ratio < 0.55 又把它们全丢了（整盘压暗时所有格都低）
+    _i_dim = _EL78.find('_dimmed_kept = bool(')
+    _i_drop = _EL78.find("'marks_dropped_panel'")
+    _i_guard = _EL78.find('if _dimmed_kept:', _i_dim) if _i_dim > 0 else -1
+    _a6_ok = (_i_dim > 0 and _i_guard > _i_dim and _i_drop > _i_guard
+              and 'pass' in _EL78[_i_guard:_i_drop])
+    check('v2.78 A⑥ 压暗帧保住标记后**短路掉「按 ratio 丢标记」**'
+          '（两段逻辑互相拆台：保住了又丢 ✗ —— 第七种形态） · %s'
+          % ('已短路 ✓' if _a6_ok else '仍会被丢'), _a6_ok)
+
+    # ── A⑦ 计划里还有没走的步 ⇒ **不算收工** ──
+    #   真机铁证（2026-10-27 21:57 map 4）：
+    #     order = [3,2 / 1,3 勇者之墓 / 4,5 boss]，give_up_step 摘掉 3,2 后 plan 还剩 2 步
+    #     却 finish: blank_board 直接收工 ⇒ 2 步没走 ✗
+    _a7_ok = ("_plan_left = list(st.get('plan') or [])" in _EL78
+              and 'not pending_buy and not _plan_left' in _EL78)
+    check('v2.78 A⑦ blank_board 判据带 not _plan_left'
+          '（旧写法只看 had_plan ⇒ 计划剩 2 步也收工 ⇒ 没打到 boss ✗） · %s'
+          % ('已加 ✓' if _a7_ok else '缺'), _a7_ok)
+
+    # ── A⑧ 面板标题别名**在循环之前**归一，且**参与循环判据** ──
+    #   「限时超值礼包」= 限+时+**超+值**+礼+包，而 L['special'] 里是「限时礼包」
+    #   ⇒ '限时礼包' in '限时超值礼包' == **False** ⇒ 进不了循环
+    #   ⇒ SPECIAL_ALIAS 里虽有这条别名，但它在**循环之内**才执行 ⇒ 永远轮不到 ✗
+    _s, _e, _b = _span78('popups')
+    _i_al = _b.find('_t_alias = SPECIAL_ALIAS.get(')
+    _i_lp = _b.find("for t in L['special']:")
+    _a8_ok = (0 <= _i_al < _i_lp and 't == _t_alias' in _b[_i_lp:_i_lp + 200])
+    check('v2.78 A⑧ 面板标题别名在 special 循环**之前**归一，并参与循环判据'
+          '（别名只写在循环内 ⇒ 入口 fb() 就 False ⇒ 永远轮不到 ✗） · %s'
+          % ('顺序对 ✓ (别名@%d < 循环@%d)' % (_i_al, _i_lp) if _a8_ok else '顺序错/缺'),
+          _a8_ok)
+
+    # ══════════════════════════════════════════════════════════════════
+    # B 组：**执行级**（喂数据真跑被测函数 —— 结构级只能证明「代码在」，
+    #       证明不了「判据对」；本项目栽过多次「判据装好了但没接上」✗）
+    #   ⚠ 一律写成**表驱动 for 循环**：每条 case 都真调一次函数，
+    #     且每个正例都配一个**必须判负**的对照项（否则「恒真」也能全绿 ✗）
+    # ══════════════════════════════════════════════════════════════════
+
+    # ── B① `_is_prophecy_panel()`：真机预言帧 True / 背包 & 勇者之墓 **False** ──
+    _prop_items = [item('预言石板', 540, 383), item('本次可选择1个预言！', 540, 470),
+                   item('武装', 212, 714), item('战场', 540, 714),
+                   item('地块结算时获得装备数量+100%', 212, 800),
+                   item('地图中至少出现1个勇者', 540, 800),
+                   item('之墓，并且勇者之墓奖', 540, 840),
+                   item('确定', 541, 1180)]
+    _relic_items = [item('英灵使者', 540, 400), item('成功率90%', 766, 946),
+                    item('成功率100%', 766, 1139), item('必定成功', 392, 1488),
+                    item('确定', 690, 1488)]
+    _bag_items = [item('背包装备', 540, 200), item('筛选', 900, 300),
+                  item('16级', 300, 500), item('16级', 400, 500),
+                  item('16级', 500, 500), item('确定', 541, 1180)]
+    _cases_b1 = [('真机预言面板', _prop_items, True),
+                 ('对照·背包装备列表', _bag_items, False),
+                 ('对照·勇者之墓面板（成功率x2+必定成功）', _relic_items, False)]
+    for _r in range(len(_cases_b1)):
+        _nm, _it, _want = _cases_b1[_r]
+        _got = EL._is_prophecy_panel(_it)
+        check('v2.78 B① 执行级[%s] _is_prophecy_panel() ⇒ %s（期望 %s）'
+              % (_nm, _got, _want), _got is _want)
+
+    # ── B② `close_newequip()`：预言面板**不许被抢** / 真装备弹窗**必须关得掉** ──
+    #   ⚠ 判据钉「抢不抢」＋「点了没有」，不是返回值好看
+    _equip_items = [item('获得新装备！', 531, 992),
+                    item('力量之戒 +12%', 528, 1101),
+                    item('返回', 540, 1252)]
+    _cases_b2 = [('预言面板（「武装」卡含「获得装备」）', _prop_items, False, 0),
+                 ('对照·真「获得新装备！」弹窗', _equip_items, True, 1)]
+    for _r in range(len(_cases_b2)):
+        _nm, _it, _want_ret, _min_taps = _cases_b2[_r]
+        EL._PANEL_STUCK.clear()
+        _bot = FakeBot(_it)
+        _r2 = EL.close_newequip(_bot, _it, [], 'gate_v278', verify=False)
+        check('v2.78 B② 执行级[%s] ⇒ 返回 %s / 点了 %d 次（期望 %s / ≥%d 次）'
+              % (_nm, _r2, len(_bot.taps), _want_ret, _min_taps),
+              _r2 is _want_ret and len(_bot.taps) >= _min_taps)
+
+    # ── B③ `_bottom_ok()`：窗口语义 ＋ 只认三种按钮名 ──
+    _cases_b3 = [('下半屏「确定」(y=1180)', [item('确定', 541, 1180)], 1180),
+                 ('对照·上半屏「确定」(y=300)', [item('确定', 541, 300)], None),
+                 ('对照·下半屏「购买」', [item('购买', 541, 1180)], None),
+                 ('对照·下半屏「关闭」', [item('关闭', 541, 1180)], None)]
+    for _r in range(len(_cases_b3)):
+        _nm, _it, _want_cy = _cases_b3[_r]
+        _got = EL._bottom_ok(_it)
+        _got_cy = int(_got['cy']) if _got else None
+        check('v2.78 B③ 执行级[%s] ⇒ cy=%s（期望 %s）' % (_nm, _got_cy, _want_cy),
+              _got_cy == _want_cy)
+
+    # ── B④ 面板格名单：**从源码 AST 真取出来**再逐项判 ──
+    #   ⚠ 不用字符串 grep：留档注释里必然出现这些名字 ⇒ 会假红（本仓已四次）
+    _b4_names = None
+    _i_b4 = _EL78.find('_is_panel_cell = any(')
+    if _i_b4 >= 0:
+        _i_open = _EL78.find('(', _EL78.find('for _kw in (', _i_b4))
+        _i_close = _EL78.find('))', _i_open) if _i_open > 0 else -1
+        if _i_open > 0 and _i_close > _i_open:
+            try:
+                _b4_names = list(_ast78.literal_eval(_EL78[_i_open:_i_close + 1]))
+            except Exception:       # noqa: BLE001
+                _b4_names = None
+    _cases_b4 = [('预言石碑', True), ('预言石板', True), ('旅行商人', True),
+                 ('黄金宝库', True), ('传承祭坛', True), ('限时礼包', True),
+                 ('金属宝箱怪', True), ('机巧宝箱怪', True),
+                 ('对照·S00003_001 岩地', False), ('对照·S30001_002 矿箱', False),
+                 ('对照·S20003_101 枯木树桩', False)]
+    for _r in range(len(_cases_b4)):
+        _nm, _want = _cases_b4[_r]
+        _hit = any(_k in _nm for _k in (_b4_names or []))
+        check('v2.78 B④ 执行级[%s] 命中判据=%s（期望 %s）' % (_nm, _hit, _want),
+              _hit is _want)
+
+    # ── B⑤ `_foretell_card_y()`：换分辨率（换 C）卡片窗口仍然覆盖标题 ──
+    #   用户④「没有正确选中预言」：FORETELL_CARD_Y = 714 是**真机弹窗系**绝对值
+    #     ⇒ 模拟器 C=154 时标题在 660，而窗口 684~769 ⇒ 三张卡全落空 ✗
+    #   ⚠ 钉的是「**参考基值 + C**」，不是某个魔法数字 —— 两个 C 都要过 ✓
+    import buypanels as _BP_mod78
+    _tol_up78 = int(getattr(_BP_mod78, 'FORETELL_CARD_Y_TOL_UP', 30))
+    _tol_dn78 = int(getattr(_BP_mod78, 'FORETELL_CARD_Y_TOL_DN', 55))
+    _orig_dlg78 = _BP_mod78.dlg_shift
+    _cases_b5 = [(209.0, 714, '真机 C=209 / 实测标题 714~715'),
+                 (154.0, 660, '模拟 1280x2640 C=154 / 实测标题 660')]
+    for _r in range(len(_cases_b5)):
+        _c, _obs, _nm = _cases_b5[_r]
+        try:
+            _BP_mod78.dlg_shift = (lambda _v=_c: _v)
+            _base = _BP_mod78._foretell_card_y()
+        finally:
+            _BP_mod78.dlg_shift = _orig_dlg78
+        _cover = (_base - _tol_up78) <= _obs <= (_base + _tol_dn78)
+        check('v2.78 B⑤ 执行级[%s] 窗口 %d~%d 覆盖标题 %d ⇒ %s'
+              % (_nm, _base - _tol_up78, _base + _tol_dn78, _obs,
+                 '覆盖 ✓' if _cover else '落空 ✗'), _cover)
+    check('v2.78 B⑤ 对照项：**旧写法（写死 714）在模拟器上必然读不到**'
+          '（证明上一条不是恒绿：660 不在 684~769 内） · %s'
+          % ('如预期 ✗' if not (684 <= 660 <= 769) else '判据失效'),
+          not (684 <= 660 <= 769))
+
+    # ── B⑥ 限时礼包别名：子串匹配确实失败、别名确实命中 ──
+    _title_gift = '限时超值礼包'
+    _cases_b6 = [('子串「限时礼包」在标题里', '限时礼包' in _title_gift, False),
+                 ('别名归一命中 act_on',
+                  (EL.SPECIAL_ALIAS.get(_title_gift) == '限时礼包'
+                   and '限时礼包' in EL.L['act_on']), True)]
+    for _r in range(len(_cases_b6)):
+        _nm, _got, _want = _cases_b6[_r]
+        check('v2.78 B⑥ 执行级[%s] ⇒ %s（期望 %s）' % (_nm, _got, _want),
+              _got is _want)
+
+    # ── B⑦ `_panel_title_of()`：「等于」判据，正文里的四字**不算标题** ──
+    _cases_b7 = [
+        ('有真标题「预言石板」', [item('预言石板', 540, 383),
+                                  item('之墓，并且勇者之墓奖', 540, 840)], '预言石板'),
+        ('对照·只有正文没有标题', [item('之墓，并且勇者之墓奖', 540, 840),
+                                   item('地图中至少出现1个勇者', 540, 800)], None),
+    ]
+    for _r in range(len(_cases_b7)):
+        _nm, _it, _want = _cases_b7[_r]
+        _got = EL._panel_title_of(_it)
+        check('v2.78 B⑦ 执行级[%s] ⇒ %r（期望 %r）' % (_nm, _got, _want),
+              _got == _want)
+
+    # ── B⑧ ★★★ 端到端：**拿真机造成病②的那一帧**跑 popups() ──
+    #   这一帧同时含「战场」（正文有完整四字「勇者之墓」）＋「武装」（正文含「获得装备」）
+    #   ⇒ 旧代码先被 newequip 抢、再被 relic 抢；修好后必须**判成预言石碑**
+    #   ⚠ 卡片标题 y 用**当前环境的真实卡 y**（_foretell_card_y()）⇒ 换机器也成立 ✓
+    _fy78 = _BP_mod78._foretell_card_y()
+    _bug2_items = [item('预言石板', 540, 383), item('本次可选择1个预言！', 540, 470),
+                   item('战场', 540, _fy78), item('武装', 212, _fy78),
+                   item('秘藏', 868, _fy78 + 1),
+                   item('地图中至少出现1个勇者', 540, 800),
+                   item('之墓，并且勇者之墓奖', 540, 840),
+                   item('地块结算时获得装备数量+100%', 212, 800),
+                   item('确定', 541, 1180)]
+    EL._PANEL_STUCK.clear()
+    _bot_b8 = FakeBot(_bug2_items)
+    _log_b8 = []
+    _act_b8 = EL.popups(_bot_b8, _bug2_items, _log_b8, ctx={'st': {}, 'flags': {}})
+    _spec_b8 = [e for e in _log_b8 if e.get('special')]
+    _relic_b8 = [e for e in _log_b8 if e.get('relic')]
+    _ne_b8 = [e for e in _log_b8 if e.get('newequip_back')]
+    check('v2.78 B⑧ 执行级：这一帧被派给**预言石碑**（by=structure），不是勇者之墓'
+          '（旧代码：t 被判成勇者之墓 ⇒ relic_flow 找不到成功率 ⇒ panel_missing 40+ 次 ✗） · %s'
+          % ([e.get('special') for e in _spec_b8],),
+          len(_spec_b8) == 1 and _spec_b8[0].get('special') == '预言石碑'
+          and _spec_b8[0].get('by') == 'structure')
+    check('v2.78 B⑧ 执行级：**一条 relic 日志都没有**'
+          '（有就说明它又被勇者之墓抢走了 ✗） · %s' % (len(_relic_b8),),
+          not _relic_b8)
+    check('v2.78 B⑧ 执行级：**一次装备返回都没点**'
+          '（「武装」卡正文含「获得装备」⇒ 旧代码拿装备流程点预言面板 ✗） · %s'
+          % (len(_ne_b8),), not _ne_b8)
+    check('v2.78 B⑧ 执行级：popups() 返回 handled；且**没有点底部的「返回」**'
+          '（点返回就把没选完的面板关掉了 —— 用户③「没有正确点掉」的另一半 ✗） · %s'
+          % ('act=%r taps=%r' % (_act_b8, _bot_b8.taps),),
+          _act_b8 == 'handled'
+          and not any(_t[0] == 'tap_dlg' and _t[2] == 1252 for _t in _bot_b8.taps))
+
+    # ── B⑧ 对照项：**真勇者之墓面板**必须仍然走 relic（别把那条路也堵死）──
+    EL._PANEL_STUCK.clear()
+    _bot_b8c = FakeBot(_relic_items)
+    _log_b8c = []
+    _act_b8c = EL.popups(_bot_b8c, _relic_items, _log_b8c, ctx={'st': {}, 'flags': {}})
+    _spec_b8c = [e.get('special') for e in _log_b8c if e.get('special')]
+    _pick_b8c = [e for e in _log_b8c if e.get('relic') == 'pick_row']
+    check('v2.78 B⑧ 对照项：真勇者之墓面板仍派给「勇者之墓」并**选中 100%% 那行**'
+          '（结构特征判据太宽 ⇒ 会把勇者之墓也当预言面板 ⇒ 功能反被吃掉 ✗） · %s'
+          % ('special=%r pick=%r' % (_spec_b8c,
+                                      [e.get('row') for e in _pick_b8c]),),
+          _spec_b8c == ['勇者之墓']
+          and any(e.get('row') == 2 for e in _pick_b8c))
+
+    # ══════════════════════════════════════════════════════════════════
+    # C 组：撤销守门（源码里**不许再出现**旧写法）
+    #   ⚠⚠ 必须先剥掉整行注释再查 —— 留档注释里必然逐字引用旧写法（本仓已四次假红）
+    # ══════════════════════════════════════════════════════════════════
+    def _code_only78(_src):
+        _out = []
+        for _ln in _src.split(chr(10)):
+            if _ln.strip().startswith('#'):
+                continue
+            _out.append(_ln.split('#')[0] if '#' in _ln else _ln)
+        return chr(10).join(_out)
+
+    _code_el78 = _code_only78(_EL78)
+    _code_bp78 = _code_only78(_BP78)
+    check('v2.78 C① 撤销守门：buypanels 里**没有**写死的卡片 y（714），且 _foretell_card_y() 还在'
+          '（换分辨率就失效 —— 本项目「弹窗系绝对值当常量」的第二例 ✗） · %s'
+          % ('干净 ✓' if ('FORETELL_CARD_Y = 714' not in _code_bp78
+                           and '_foretell_card_y()' in _code_bp78) else '仍有写死'),
+          'FORETELL_CARD_Y = 714' not in _code_bp78
+          and '_foretell_card_y()' in _code_bp78)
+
+    # ⚠⚠ C①b 【牙齿测试逗出来的假绿】上一条只查**字面量**
+    #   ⇒ 把 `FORETELL_CARD_Y_REF = 506` 改成 `714`（= 把弹窗系绝对值填进参考系基值，就是本 bug 本身）
+    #   名字还叫 _REF ⇒ 字面量查不到 ⇒ 上一条**仍继续绿** ✗（实测：那个变异只有 B⑤ 两条红）
+    #   ⇒ 补一条「**两套坐标系的换算关系**」（文档 §6 定的正确写法：存参考系基值、用时 +dlg_shift）
+    #   真机实测：基值 506 + C 209 = 弹窗系 715（而 714 不可能是基值：那就等于把弹窗系当参考系）✓
+    _ref78 = int(getattr(_BP_mod78, 'FORETELL_CARD_Y_REF', -1))
+    _c1b_ok = (_ref78 > 0 and _ref78 != 714 and (_ref78 + 209) == 715)
+    check('v2.78 C①b 参考系基值与弹窗系的**换算关系**对得上'
+          '（基值 %d + C 209 必须 = 真机实测 715；填成 714 = 把弹窗系当参考系 ✗） · %s'
+          % (_ref78, '对得上 ✓' if _c1b_ok else '对不上'), _c1b_ok)
+
+    _i_dc78 = _code_el78.find('if _dimmed_kept:')
+    _i_dd78 = _code_el78.find("'marks_dropped_panel'")
+    check('v2.78 C② 撤销守门：压暗短路**在代码里**（不在注释里）'
+          '（剥掉注释后仍要能找到 if _dimmed_kept: pass，且它在丢标记之前 ✗） · %s'
+          % ('在 ✓' if (_i_dc78 >= 0 and _i_dd78 > _i_dc78
+                        and 'pass' in _code_el78[_i_dc78:_i_dd78]) else '缺'),
+          _i_dc78 >= 0 and _i_dd78 > _i_dc78
+          and 'pass' in _code_el78[_i_dc78:_i_dd78])
+
+    _i_cc78 = _code_el78.find('_is_panel_cell = any(')
+    _i_cd78 = _code_el78.find("done.add(st['last'])", _i_cc78) if _i_cc78 >= 0 else -1
+    _i_ck78 = _code_el78.find("'panel_cell_kept'", _i_cc78) if _i_cc78 >= 0 else -1
+    check('v2.78 C③ 撤销守门：代码里 panel_cell_kept **在** done.add() 之前'
+          '（顺序反了 = 面板格照样写 done = 目标永久消失 ✗） · %s'
+          % ('顺序对 ✓ (记录@%d < done@%d)' % (_i_ck78, _i_cd78)
+             if (0 <= _i_ck78 < _i_cd78) else '顺序错/缺'),
+          0 <= _i_ck78 < _i_cd78)
+
+except Exception as _e78:       # noqa: BLE001
+    check('v2.78 守门可运行（%r）' % (_e78,), False)
+print()
+
+
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
+if BAD:
+    print('---- 失败清单 ----')
+    for _b in BAD:
+        try:
+            print('  [BAD] ' + str(_b)[:160])
+        except Exception:
+            print('  [BAD] (name unprintable)')
 if BAD:
     for b in BAD:
         print('   ✗ ' + b)

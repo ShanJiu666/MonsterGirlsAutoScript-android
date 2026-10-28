@@ -14,6 +14,7 @@
 直接跑会 ANR）；`cmd=stop` 置 `_ANDROID_STOP`（`explore_loop.past_stop_time()` 每张图
 开头查一次 ⇒ **打完手上这张图**才收工，不会留半张图 ✓）。
 """
+import io
 import os
 import sys
 import threading
@@ -554,7 +555,9 @@ def classify_image(path, code='S00003', dump=True):
 
 def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
         opt_solver=True, bag_every=0, save_first=True, stop_at_5am=False,
-        auto_supply=False):
+        auto_supply=False,
+        guild_tasks=False, guild_alchemy=False, guild_intel=False,
+        recruit_free=False, ad_free=False, daily_first=False):
     """同步跑（阻塞）。一般请用 `start()` 起后台线程 ✓
 
     ⚠ 参数顺序 = Java 侧 `PyBridge.call("start", …)` 的位置参数顺序，
@@ -589,7 +592,15 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
     return EL.android_run(maps=maps, max_round=max_round, deadline=deadline,
                           min_stamina=min_stamina, opt_solver=opt_solver,
                           bag_every=bag_every, stop_at_5am=stop_at_5am,
-                          auto_supply=auto_supply)
+                          auto_supply=auto_supply,
+                          # ⭐ v1.78：收工日常五颗勾选（界面 Prefs 传进来 ✓）
+                          guild_tasks=bool(guild_tasks),
+                          guild_alchemy=bool(guild_alchemy),
+                          guild_intel=bool(guild_intel),
+                          recruit_free=bool(recruit_free),
+                          ad_free=bool(ad_free),
+                          # ⭐ v1.91：日常**前置**（刷图前先做，而不是只在收工后）
+                          daily_first=bool(daily_first))
 
 
 def _worker(kw):
@@ -612,7 +623,9 @@ def _worker(kw):
 
 def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
           opt_solver=True, bag_every=0, save_first=True, stop_at_5am=False,
-          auto_supply=False):
+          auto_supply=False,
+          guild_tasks=False, guild_alchemy=False, guild_intel=False,
+          recruit_free=False, ad_free=False, daily_first=False):
     """后台线程启动探索（幂等：已在跑就拒绝）
 
     ⚠ **签名必须与 `run()` 完全一致**（显式形参，不是 `**kw`）：
@@ -629,7 +642,15 @@ def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
               min_stamina=int(min_stamina), tag=str(tag or ''),
               opt_solver=bool(opt_solver), bag_every=int(bag_every),
               save_first=bool(save_first), stop_at_5am=bool(stop_at_5am),
-              auto_supply=bool(auto_supply))
+              auto_supply=bool(auto_supply),
+              # ⭐ v1.78：收工日常五颗勾选
+              guild_tasks=bool(guild_tasks),
+              guild_alchemy=bool(guild_alchemy),
+              guild_intel=bool(guild_intel),
+              recruit_free=bool(recruit_free),
+              ad_free=bool(ad_free),
+              # ⭐ v1.91：日常前置（刷图前先做）
+              daily_first=bool(daily_first))
     with _LOCK:
         if _STATE['running']:
             return 'already-running'
@@ -758,6 +779,163 @@ def summary():
     return ''
 
 
+def hud():
+    """界面三格读数：体力 / 幸运草 / 金币（JSON）。
+
+    ⚠ 为什么单独一个函数、而不是塞进 status()：
+      status() 每 2 秒被 UI 轮询一次，而这三项**只能 OCR 全屏读**（3.3 秒/次）
+      ⇒ 塞进 status() 会把界面拖死、还会跟推图抢截图通道 ✗
+
+    取值优先级（**全部是"读到的旧值"，不触发新 OCR**）：
+      ① 进程内 _STATE 记下的 stamina / clover / coin
+      ② explore_loop._GLOBAL_LOG 里最后一条带它们的事件
+      ③ last_summary.json 的 stats
+    都拿不到 ⇒ null，界面显示 "—"（**绝不瞎猜**）。
+    """
+    _bootstrap()
+    import json as _json
+    out = {"stamina": None, "clover": None, "coin": None}
+    try:
+        st = _STATE or {}
+        for k in ("stamina", "clover", "coin"):
+            v = st.get(k)
+            if v is None:
+                v = st.get("hud_" + k)
+            if isinstance(v, (int, float)):
+                out[k] = int(v)
+    except Exception:       # noqa: BLE001
+        pass
+    try:
+        import explore_loop as EL
+        g = getattr(EL, "_GLOBAL_LOG", None) or []
+        for e in reversed(g):
+            if not isinstance(e, dict):
+                continue
+            for k in ("stamina", "clover", "coin"):
+                if out[k] is None and isinstance(e.get(k), (int, float)):
+                    out[k] = int(e[k])
+            if all(out[k] is not None for k in out):
+                break
+    except Exception:       # noqa: BLE001
+        pass
+    if any(out[k] is None for k in out):
+        try:
+            import explore_loop as EL
+            for p2 in (getattr(EL, "SUMMARY_PATH", "") or "",
+                       os.path.join(_BOOTED["runs"], "last_summary.json")):
+                if not p2:
+                    continue
+                with open(p2, encoding="utf-8") as f:
+                    stats = (_json.load(f) or {}).get("stats") or {}
+                for k in ("stamina", "clover", "coin"):
+                    v = stats.get(k)
+                    if out[k] is None and isinstance(v, (int, float)):
+                        out[k] = int(v)
+                break
+        except Exception:       # noqa: BLE001
+            pass
+    return _json.dumps(out, ensure_ascii=False)
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ⭐ 调试探针：把**当前屏幕**的 OCR 条目与判据求值打进 logcat
+#   用法：adb shell am start -n com.fantasy.autoexplore/.MainActivity -e cmd probe
+#   目的：确认弹窗「确定」按钮**到底有没有被 OCR 认到**、在哪个坐标系、
+#         以及 `reward_confirm` 分支的**哪一条判据**没满足（不许再靠猜 ✗）
+def probe_popup():
+    """探针：导出当前帧的 归一化帧 OCR + 弹窗帧 OCR + reward_confirm 判据求值"""
+    _bootstrap()
+    out = {"ok": False}
+    try:
+        import json as _j
+        from mapbot import Bot
+        import explore_loop as EL
+        b = Bot(log_prefix="probe", serial=EL.INSTANCE_DEV,
+                tag=EL.INSTANCE_TAG or None)
+        # ① 归一化帧 OCR（整帧，不裁带 ⇒ 什么都不漏）
+        try:
+            items = b.ocr(min_conf=0.3, tag="probe_ref") or []
+        except Exception as _e:
+            items = []
+            out["ref_err"] = repr(_e)[:120]
+        out["ref_n"] = len(items)
+        out["ref_items"] = [{"t": (i.get("text") or "")[:14],
+                              "cx": i.get("cx"), "cy": i.get("cy"),
+                              "conf": round(float(i.get("conf") or 0), 2)}
+                             for i in items]
+        # ② 弹窗帧 OCR
+        try:
+            dl = b.ocr_dlg(min_conf=0.3, tag="probe_dlg") or []
+        except Exception as _e:
+            dl = []
+            out["dlg_err"] = repr(_e)[:120]
+        out["dlg_n"] = len(dl)
+        out["dlg_items"] = [{"t": (i.get("text") or "")[:14],
+                              "cx": i.get("cx"), "cy": i.get("cy"),
+                              "conf": round(float(i.get("conf") or 0), 2)}
+                             for i in dl]
+        # ③ reward_confirm 分支的**每一条判据**分别求值（这样一眼看出哪条挂了）
+        L = EL.L
+        ok = EL.exb(items, L["ok"])
+        cancel = EL.exb(items, L["cancel"])
+        rw = EL.fb(items, "恭喜获得", "获得", "奖励", "领取", "道具", "金币", "经验")
+        out["cond"] = {
+            "ok_found": bool(ok),
+            "ok_cy": (ok or {}).get("cy"),
+            "thr_sy900": EL.LAYOUT.sy(900),
+            "ok_gt_thr": bool(ok and ok["cy"] > EL.LAYOUT.sy(900)),
+            "cancel_found": bool(cancel),
+            "reward_word": (rw or {}).get("text"),
+        }
+        # ④ 弹窗系（+C）里有没有「确定」
+        try:
+            C = EL.dlg_c()
+        except Exception:
+            C = 0
+        di = EL.dlg_items(items)
+        out["C"] = C
+        # v2.63：勇者之墓判据实测（直接跑真实函数）
+        try:
+            import buypanels as _bp
+            out["relic_like"] = bool(_bp._relic_panel_like(di))
+            _succ = []
+            for _t in di:
+                _tx = str(_t.get("text") or "").replace(" ", "") 
+                if "成功率" in _tx:
+                    _succ.append({"y": int(_t["cy"]), "x": int(_t["cx"]), "t": _tx})
+            _succ.sort(key=lambda z: z["y"])
+            out["relic_succ"] = _succ
+            out["relic_pick"] = None
+            for _i, _z in enumerate(_succ):
+                if _z["t"].find("100%") >= 0:
+                    out["relic_pick"] = {"row": _i + 1, "at": [_z["x"], _z["y"]]}
+                    break
+        except Exception as _e:
+            out["relic_err"] = repr(_e)[:160]
+
+        out["dlg_items_ok"] = [{"t": (i.get("text") or "")[:14], "cx": i.get("cx"),
+                                 "cy": i.get("cy")}
+                                for i in di
+                                if (i.get("text") or "").strip() in ("确定", "确认", "返回")]
+        out["ok"] = True
+    except Exception as _e:
+        import traceback
+        out["err"] = traceback.format_exc()[-800:]
+    try:
+        from java import jclass
+        jclass("com.fantasy.autoexplore.AppLog").i("PROBE " + _j.dumps(out, ensure_ascii=False))
+    except Exception as _e2:
+        print("PROBE " + repr(out)[:2000], flush=True)
+    # v2.65：**写文件** —— logcat 单行有上限，探针 JSON 会被截断
+    try:
+        _p = '/sdcard/Download/autoexplore/probe.json'
+        with io.open(_p, 'w', encoding='utf-8') as _f:
+            _f.write(_j.dumps(out, ensure_ascii=False, indent=1))
+    except Exception:
+        pass
+    return _j.dumps(out, ensure_ascii=False)[:4000]
+
 def _cmd_run_snippet(code):
     """跑一段任意代码（调试用；结果打印到日志）"""
     _bootstrap()
@@ -778,8 +956,30 @@ def _cmd_run_snippet(code):
 #  ⭐ 语义（`targets_cfg` 顶部注释）：`types` 里 **true = 主动去处理**；
 #     缺/False ⇒ `is_blocked(name)` = True ⇒ **拉黑** ✓
 
-#: 界面上**可勾**的两个（其余锁定为"不勾 = 拉黑"，与 PC 端一致 ✓）
-SP_EDITABLE = ('旅行商人', '黄金宝库')
+#: 界面上**可勾**的方块 —— ⭐ v1.78 起 **全部开放**（与 PC 端一致 ✓）
+#
+#   ---- 为什么这里曾经只有 2 个（留档，别再回退）----
+#     手机端 v1.46 的时代，`popups()` 的 `act_on` 只有「旅行商人 / 黄金宝库」，
+#     其余特殊方块走"无视支"（盲点 X 关掉）⇒ 让用户勾上也没用，**勾了等于没勾** ✗
+#     ⇒ 当时把它们**锁定**是诚实的（不给你点一个不生效的框 ✓）
+#
+#   ---- 现在为什么能全开 ----
+#     PC 的 5 个面板流程（勇者之墓/限时礼包/预言石碑/金属·机巧宝箱怪/传承祭坛）
+#     已全部移植进 `buypanels.py`，并接进了 `popups()` 的 `act_on` + `elif` 分支
+#     ⇒ 勾上**真的会去做** ✓
+#     ⚠ 两类的「不勾」语义不同（`targets_cfg.BLOCK_NAMES` / `PICK_IF_BLOCKING`）：
+#        · **拉黑类**（商人/宝库/两个宝箱怪/传承祭坛）⇒ 不勾 = **完全拉黑**（不点、不借道）
+#        · **可点类**（勇者之墓/限时礼包/预言石碑）⇒ 不勾 = **不专门拿，挡路会点**
+#       界面上用 `〔不勾=拉黑〕` / `〔不勾=不专门拿〕` 标出来了 ✓
+#
+#   ⚠ 顺序**必须用 `targets_cfg.DISPLAY_ORDER`**（PC 用户报过：
+#     「**为什么特殊方块的勾选位置一直在变？**」⇒ Python 的 set 顺序每个进程都随机 ✗）
+SP_EDITABLE = (
+    # ── 拉黑类（花钱/花草，不勾就是不想为它花资源）──
+    "旅行商人", "金属宝箱怪", "机巧宝箱怪", "黄金宝库", "传承祭坛",
+    # ── 可点类（免费，挡路顺手点有收益）──
+    "勇者之墓", "限时礼包", "预言石碑",
+)
 
 
 def special_list():
@@ -794,14 +994,31 @@ def special_list():
         import targets_cfg as TC
         cfg = TC.current()
         items = []
-        # ⭐ 顺序：可勾的两个在前，其余按名字排（与 PC 端勾选排同款 ✓）
-        names = list(SP_EDITABLE) + sorted(
-            n for n in (TC.SPECIAL_NAMES or ()) if n not in SP_EDITABLE)
+        # ⭐⭐ v1.78 顺序：**用 targets_cfg.DISPLAY_ORDER**（固定，不再用 set 顺序）
+        #   PC 用户报过「**为什么特殊方块的勾选位置一直在变？**」——
+        #   `list(set)` 的顺序每个进程都随机（PEP 456）⇒ 用户记不住位置 ⇒ 点错框 ✗
+        #   ⚠ DISPLAY_ORDER 里没有的（数据表新增/冷门）**按名字排在最后**，绝不丢 ✓
+        # ⚠ **可勾的两个必须排最前**（v1.46 ⑥ 门禁与界面习惯都依赖这一点 ✓）
+        _order = tuple(getattr(TC, "DISPLAY_ORDER", ()) or ())
+        _all = list(TC.SPECIAL_NAMES or ())
+        names = (list(SP_EDITABLE)
+                 + [n for n in _order if n in _all and n not in SP_EDITABLE]
+                 + sorted(n for n in _all
+                          if n not in _order and n not in SP_EDITABLE))
         for nm in names:
+            # ⭐ v1.78：带上 describe（界面能看到「不勾」到底是拉黑还是"不专门拿"✓）
+            #   ⚠ 两类的「不勾」语义**不同**（拉黑类 / 可点类）⇒ 界面上必须看得见，
+            #     否则就是一整族「勾了没生效 / 不勾却被踩」的误解 ✗
+            try:
+                _desc = TC.describe(nm)
+            except Exception:       # noqa: BLE001
+                _desc = ""
             items.append({
                 'name': nm,
                 'on': bool(TC.enabled(nm, cfg)),
                 'locked': nm not in SP_EDITABLE,
+                'block_class': nm in (getattr(TC, 'BLOCK_NAMES', set()) or set()),
+                'desc': _desc,
             })
         return _json.dumps({'items': items,
                             'editable': list(SP_EDITABLE)},

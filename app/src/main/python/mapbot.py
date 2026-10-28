@@ -63,10 +63,15 @@ def dlg_shift():
     if _DLG_C is None:
         try:
             from java import jclass
-            _DLG_C = float(jclass('com.fantasy.autoexplore.RefMapper').dialogShift())
+            _v = float(jclass('com.fantasy.autoexplore.RefMapper').dialogShift())
+            # ⭐⭐⭐ v2.56：**只缓存非零值**（用户 2026-10-26「画面认不出」）
+            #   未锚定 / 映射被污染时 dialogShift() 返回 0，
+            #   而 0 一旦缓存就**整个会话**都是 0 ⇒ 弹窗系机制全废（战斗/宝库/商人面板全认不出）✗✗
+            #   ⇒ 0 与异常都**不缓存**，下次重试 ✓
+            _DLG_C = _v if _v else None
         except Exception:       # noqa: BLE001
-            _DLG_C = 0.0
-    return _DLG_C
+            _DLG_C = None      # ⚠ 异常也不缓存 ⇒ 下次重试
+    return _DLG_C or 0.0
 
 
 def dlg_items(items):

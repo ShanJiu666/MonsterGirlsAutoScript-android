@@ -74,6 +74,27 @@ MERCHANT = {'title': '旅行商人', 'x': (983, 602), 'buy': (895, 1255),
             'back': (539, 1212), 'times': 4}
 
 
+
+def _stopped():
+    """⏹ 停止位（与 guild_daily._stopped 同一实现，见那里的长注释）"""
+    try:
+        import sys as _sys
+        _el = _sys.modules.get("explore_loop")
+        if _el is not None and getattr(_el, "_ANDROID_STOP", False):
+            return True
+    except Exception:       # noqa: BLE001
+        pass
+    return False
+
+
+def _sleep(b, sec):
+    """可被「停止」中断的 sleep —— 与 guild_daily._sleep 同一实现（见那里的长注释）"""
+    try:
+        b._sleep(sec)
+        return
+    except Exception:       # noqa: BLE001
+        pass
+    time.sleep(sec)
 def _merchant_buy_btn(bot, log, i):
     """⭐ v1.37：找右下角那个「购买」钮（**OCR 定位，绝不写死** ✓）
 
@@ -265,20 +286,48 @@ def _present(bot, it):
     return bool(_has_dlg(bot, VAULT['title'], '黄全宝库'))
 
 
-def _confirm(bot, log, tag=''):
-    """处理可能的确认/奖励弹窗：只点「确定」，绝不点「取消」"""
-    for _ in range(2):
+def _confirm(bot, log, tag='', wait_rounds=6, wait_sec=0.7):
+    """处理可能的确认/奖励弹窗：只点「确定」，绝不点「取消」
+
+    v2.62 fix "tapped price but no confirm dialog":
+      Old code did ONE OCR then returned False (measured only ~0.7s),
+      but the dialog has an open animation -> not drawn yet -> always no dialog.
+      Now: poll up to wait_rounds x wait_sec (~4.2s), invalidating the frame
+      cache each round (Bot.ocr caches per frame stamp).
+
+    v2.62 also relaxes the predicate:
+      - strip spaces before compare (OCR may read with spaces)
+      - cy threshold 800 -> 600 (measured button at dlg 1169 / ref 960;
+        600 still excludes HUD rows cy<300)
+    """
+    for _rd in range(1, wait_rounds + 1):
+        if _rd > 1:
+            try:
+                _invalidate(bot)
+            except Exception:       # noqa: BLE001
+                pass
+            try:
+                _sleep(bot, wait_sec)
+            except Exception:       # noqa: BLE001
+                try:
+                    time.sleep(wait_sec)
+                except Exception:   # noqa: BLE001
+                    pass
         it = _items(bot)
         ok = None
         for t in it:
-            if t['text'].strip() == '确定' and t['cy'] > 800:
+            _s = str(t.get('text') or '').replace(' ', '').strip()
+            if _s == '确定' and (t.get('cy') or 0) > 600:
                 ok = t
                 break
-        if not ok:
-            return False
+        if ok is None:
+            continue
         bot.tap_dlg(ok['cx'], ok['cy'], wait=2.0)
-        log.append({'buy_confirm': tag, 'at': (ok['cx'], ok['cy'])})
-    return True
+        log.append({'buy_confirm': tag, 'at': (ok['cx'], ok['cy']), 'round': _rd})
+        return True
+    if log is not None:
+        log.append({'buy_confirm': 'not_found', 'tag': tag, 'rounds': wait_rounds})
+    return False
 
 def merchant_flow(bot, log):
     """旅行商人：点右下角「购买」→ 逐档推进 → 认到"全买完"就停（2026-10-02 真机重写）
@@ -357,7 +406,15 @@ def merchant_flow(bot, log):
         back = _has(it, '返回')
         at = (back['cx'], back['cy']) if back else MERCHANT['back']
         bot.tap_dlg(at[0], at[1], wait=1.6)
-    bot.tap_dlg(*MERCHANT['x'], wait=2.0)
+    # ⭐ 商人面板 X **文字优先**（× / X / 关闭），读不到才用 MERCHANT['x'] 兜底 ✓
+    _mx = _find_text_btn(bot, ('×', 'X', 'x', '✕', '✖', '关闭'))
+    if _mx:
+        bot.tap_dlg(_mx[0], _mx[1], wait=2.0)
+        log.append({'merchant': 'close_x', 'at': [_mx[0], _mx[1]], 'src': 'ocr'})
+    else:
+        bot.tap_dlg(*MERCHANT['x'], wait=2.0)
+        log.append({'merchant': 'close_x', 'at': list(MERCHANT['x']),
+                    'src': 'anchor_fallback'})
     log.append({'merchant': 'done', 'bought': bought})
     return bought
 
@@ -1225,7 +1282,12 @@ def vault_flow(bot, log):
         log.append({'vault': 'leave'})
     it = _items(bot)
     if _present(bot, it):
-        bot.tap_dlg(*VAULT['x'], wait=2.0)
+        # ⭐ 宝库 X **文字优先**，读不到才用 VAULT['x'] 兜底 ✓
+        _vx = _find_text_btn(bot, ('×', 'X', 'x', '✕', '✖', '关闭'))
+        if _vx:
+            bot.tap_dlg(_vx[0], _vx[1], wait=2.0)
+        else:
+            bot.tap_dlg(*VAULT['x'], wait=2.0)
         log.append({'vault': 'x_close'})
     _confirm(bot, log, 'vault_after')
     log.append({'vault': 'done', 'acts': acts})
@@ -1250,3 +1312,1498 @@ def ensure_closed(bot, log):
     if closed:
         log.append({'ensure_closed': closed})
     return closed
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ⭐ v1.78【从 PC 端移植：五个特殊地块面板流程】
+#   PC 源码位置（**PC 仓只读、未改动**）：mapbot_pc/buypanels.py
+#     · 勇者之墓 relic_flow        @2256（PC）
+#     · 限时礼包 gift_flow         @2376（PC）
+#     · 预言石碑 foretell_flow     @2508（PC）
+#     · 金属/机巧宝箱怪 mimic_flow @2974（PC）
+#     · 传承祭坛 shrine_flow       @3142（PC）
+#   ⚠ 移植口径（**不是照抄**，理由逐条写在各常量旁）：
+#     ① **坐标不用 PC 的 720 系，一律换算到手机的 1080×1920 弹窗系**
+#        —— PC 那份是 720×1280 设备系（经 _s() 折算过），直接搬来会整体错位 ✗
+#        两端同为 9:16 ⇒ **纯等比 ×1.5**。交叉验证：PC 宝库返回 (359,827) ×1.5
+#        = (539,1241)，而手机端实测 VAULT_BACK_ZONE = (539,1240) ⇒ **只差 1px** ✓
+#     ② 全部走 bot.tap_dlg()（弹窗系）+ _items()（已含 dlg_items 换算）
+#     ③ OCR 找按钮的路径**保留**（PC 硬教训：结果框位置随文案行数变，写死就点空 ✗）
+#     ④ 手机端没有 RapidOCR（端侧是 Kotlin OcrEngine、固定 0.75 倍口径）
+#        ⇒ 宝箱怪那个「放大 3 倍再 OCR」改走 _ocr() 吃临时 PNG（与 read_qty 同款 ✓）
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ⭐ v1.78【同帧缓存 + 点击作废代理 —— 从 PC 移植】
+#   PC 原文（为什么需要它）：
+#     bot.ocr() 在 PC 上用 b.img() = **上一次 snap() 的缓存帧**，**不会自己重抓**。
+#     凡是「轮询看画面有没有变」的循环，**每轮都必须先 b.snap()**，
+#     而「点了一下 ⇒ 画面已经变了」时，**之前那份 OCR 结果必须作废** ——
+#     否则下一步读到的是**点击前**的画面 ⇒ 判据全错 ✗
+#     （PC 踩过三次：start_fight / _tap_verified / claim_back_poll）
+#
+# ⚠ 手机端口径差异（**如实写清**）：
+#   手机端 Bot.ocr() 走 api.ocrJson **自己抓当前帧**（ocr_grabs=True）⇒
+#   `_items()` 里那句 `if not ocr_grabs: snap()` **不会执行**（省掉一次 snap ✓）
+#   ⇒ 这里的「作废」在手机上是**语义占位**：真正保证新鲜度的是 frameStamp 缓存
+#     （Bot.ocr 的 _ocr_cache 按帧戳失效 ✅）。保留这套代理是**为了 PC 对拍与门禁一致**，
+#     且它**没有任何副作用**（只是点完后丢弃一份 dict 里的引用）✓
+#   ⛔ 别因为「手机上用不到」就删掉：PC 那份 `_items()` 还会被门禁按 PC 口径驱动
+#      （`MAPBOT_ROOT` 指向 PC 仓时 C=0），删了就对不上了 ✗
+def _cache_of(bot):
+    """每台 bot 一份 OCР 缓存槽（挂在 bot 上，天然多开隔离 ✓）"""
+    c = getattr(bot, '_bp_cache', None)
+    if c is None:
+        c = {'luma': None, 'items': None}
+        try:
+            bot._bp_cache = c
+        except Exception:                                   # noqa: BLE001
+            pass
+    return c
+
+
+def _invalidate(bot=None):
+    """作废「同一帧的 OCR 结果」—— **点完/截图后必须调** ✓"""
+    if bot is not None:
+        try:
+            _cache_of(bot)['items'] = None
+        except Exception:                                   # noqa: BLE001
+            pass
+        return
+    for _c in (_CACHE,):
+        _c['items'] = None
+        _c['luma'] = None
+
+
+_CACHE = {'items': None, 'luma': None}
+
+
+class _TapProxy(object):
+    """包一层 Bot：**每次 tap/tap_dlg/snap 都自动作废 OCR 缓存** ✓
+
+    ⚠ 用 object.__setattr__/__getattribute__ —— 不能走普通属性，
+      否则 `self._b = bot` 会被自己的 `__getattr__` 绕进去（无限递归 ✗）
+    """
+
+    def __init__(self, bot):
+        object.__setattr__(self, '_b', bot)
+
+    def __getattr__(self, k):                             # 其余属性原样转发
+        return getattr(object.__getattribute__(self, '_b'), k)
+
+    def tap_dlg(self, *a, **kw):
+        _invalidate(object.__getattribute__(self, '_b'))
+        return object.__getattribute__(self, '_b').tap_dlg(*a, **kw)
+
+    def tap(self, *a, **kw):
+        _invalidate(object.__getattribute__(self, '_b'))
+        return object.__getattribute__(self, '_b').tap(*a, **kw)
+
+    def snap(self, *a, **kw):
+        _invalidate(object.__getattribute__(self, '_b'))
+        return object.__getattribute__(self, '_b').snap(*a, **kw)
+
+
+def _proxy(bot):
+    """把 Bot 包成 `_TapProxy`（**幂等**：已经包过就原样返回 ✓）"""
+    if getattr(bot, '_bp_proxied', False):
+        return bot
+    try:
+        bot._bp_proxied = True
+    except Exception:                                       # noqa: BLE001
+        pass
+    return _TapProxy(bot)
+
+# 万能关闭点（= explore_loop.UNIVERSAL_CLOSE；PC 的 720 值 (361,1260) ×1.5）✓
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v1.78【本文件坐标策略：**文字优先 → 坐标兜底**，全分辨率可用】
+# ══════════════════════════════════════════════════════════════════════════
+#   ---- 为什么会有"写死坐标"，为什么它仍然全分辨率可用 ----
+#     手机端有 `RefMapper`：`tap()` 走「顶块锚顶 + 其余锚底」，`tap_dlg()` 走「弹窗锚屏幕中心」。
+#     两者都把 **1080×1920 参考系常量**换算成设备像素 ⇒ 常量**不是设备像素**，
+#     换分辨率时是**纯平移（+微缩放）**，不是重新标定 ✓
+#     （`tools/audit_hardcoded_coords.py` 把这类叫 `ref` / `dlg`，只有 `devpx` 才是"换分辨率必错"）
+#
+#   ---- 那为什么还要"文字优先" ----
+#     RefMapper 只保证**几何**自适应；面板的**文案行数**会变 ⇒ 同一颗按钮的 y 会漂
+#     （PC 记过：「事件成功后的确认不是固定位置」「结果框的返回随文案行数变高变矮」）
+#     而 OCR 读到的是**这一帧的真实位置** ⇒ 永远比常量准 ✓
+#     ⇒ 本文件口径：**能 OCR 到文字的一律先 OCR**，常量只做兜底。
+#
+#   ---- 剩下这 6 处为什么可以保留（逐条，别以为是漏改）----
+#     ① `MERCHANT["x"]` / `VAULT["x"]`：**在 `else:` 分支里** —— 上面已经先 `_find_text_btn`
+#        找过 ×/X/关闭，找不到才走这里 ⇒ 这就是兜底本身 ✓
+#     ② `VAULT["blank"]`（2 处）：「点面板内**安全空白**收起详情」—— 空白处**没有文字可认**，
+#        本质就是坐标操作。且它经 `_vault_tap()` 的**面板安全矩形夹取**（把坐标夹进
+#        panel x[49,670] y[238,1038]）⇒ **结构性保证点不出去** ✓
+#     ③ `VAULT["buy"]`：同样在兜底分支（`if not (label and 选择/领取)`），
+#        正常路径点的是 `_btn(it)` 从 OCR 读到的按钮 ✓
+#     ④ `UNIV_CLOSE`：**万能关闭位**是用户明确指定的兜底（「点中间最下面可以关闭几乎所有
+#        弹窗」「那边点了非常安全」）⇒ 它本身就是"兜底"语义；且 `_univ_close` 已改成
+#        **先按文字找按钮、找不到才用它** ✓
+#
+#   ⚠ 想再加新面板？**先写 OCR 判据，坐标只作 fallback**，并在 `tools/panel_consts.py`
+#     登记常量（登记即契约，漏登记 `scan_unregistered()` 会红 ✓）
+# ══════════════════════════════════════════════════════════════════════════
+UNIV_CLOSE = (541, 1890)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v2.53【面板收尾：不再用「标题在归一化帧可见」当闸门】
+# ══════════════════════════════════════════════════════════════════════════
+#   用户 2026-10-26：「怎么现在连 boss 格子都打不了，点开就限时被面板挡住了」
+#
+#   ---- 病根（读代码即可证）----
+#     手机端 `RefMapper.toRef()` 会**丢掉屏幕弹性区**，而**所有面板标题都在那个丢带里**
+#     ⇒ 任何「标题可见」的判据在真机**恒 False**
+#     ⇒ 而 6 个面板流程的收尾都写着 `if _has(_items(b), 标题): _univ_close(...)`
+#        ⇒ **面板永远关不掉** ⇒ 残留面板盖住棋盘
+#        ⇒ **后面的格子（boss/商人/…）点不动**（点击落在面板上）✗✗
+#     ⇒ 手机端自己的注释早就写过这句（v0.32 那次）：
+#        「任何 `_has(it, 标题)` 的判据在真机上是**恒 False** 的」
+#
+#   ---- 修法 ----
+#     ① `panel_still_open()`：**弹窗帧**判（`ocr_dlg`）—— 弹窗帧只裁屏幕中心，
+#        **面板标题在里面看得见** ⇒ 这个判据在真机是**真的** ✓
+#        （PC / 9:16 无弹窗帧 ⇒ 退回原来的归一化帧标题判据，行为不变 ✓）
+#     ② `close_panel()`：**确认面板还开着才动手**（绝不盲点万能点位到棋盘上）
+#        顺序：X 关闭符 → 文字按钮（返回/确定/关闭）→ 万能点位
+def panel_still_open(bot, title=None):
+    """面板**是否还开着** —— 用**弹窗帧**判（标题在归一化帧的丢弃带里，真机恒不可见 ✗）"""
+    try:
+        _C = dlg_shift()
+    except Exception:       # noqa: BLE001
+        _C = 0
+    if _C and hasattr(bot, 'ocr_dlg'):
+        try:
+            _dl = list(bot.ocr_dlg(min_conf=0.3, tag='panel_open') or [])
+        except Exception:       # noqa: BLE001
+            _dl = []
+        if _dl:
+            # 面板级按钮 = 「返回/关闭/取消」⇒ 面板（或结果框）确实开着 ✓
+            _panelish = any((t.get('text') or '').strip() in ('返回', '关闭', '取消')
+                            for t in _dl)
+            if title:
+                _titles = (title,) if isinstance(title, str) else tuple(title)
+                if any(any(t in (x.get('text') or '') for x in _dl)
+                       for t in _titles):
+                    return True
+                # 标题没匹配上，但**有面板级按钮**也算开着（结果框换了一层）
+                return _panelish
+            return _panelish
+        # 弹窗帧一条都没读到（OCR 失败）⇒ 退回归一化帧标题判据（保守）
+    if title:
+        try:
+            return _has(_items(bot), title)
+        except Exception:       # noqa: BLE001
+            return False
+    return False
+
+
+def close_panel(bot, log=None, tag='panel', title=None):
+    """**保证把面板关掉**（不依赖标题在归一化帧里可见）✓
+
+    ⚠ 只在**确认面板还开着**时才动手 ⇒ 绝不在棋盘上盲点万能点位 ✓
+    """
+    try:
+        if not panel_still_open(bot, title):
+            return 0
+    except Exception:       # noqa: BLE001
+        return 0
+    n = 0
+    try:
+        n += int(ensure_closed(bot, log) or 0)
+    except Exception:       # noqa: BLE001
+        pass
+    if not n:
+        try:
+            if _univ_close(bot, log, tag, items=_items(bot)):
+                n += 1
+        except Exception:       # noqa: BLE001
+            pass
+    if log is not None:
+        log.append({tag: 'close_panel', 'n': n, 'title': title})
+    return n
+
+def _univ_close(bot, log, what='', wait=1.6, items=None):
+    """关面板：**先认文字按钮 → 再退万能点位** ✓
+
+    ⚠ 万能点位（`UNIV_CLOSE`）是**设计上的固定兜底**（用户口径：「点击中间最下面就可以
+      关闭几乎所有弹窗」+「那边点了非常安全，不会有变化」）⇒ 它本身就是"兜底"语义，
+      不是我这里图省事写死的坐标 ✓
+    ⭐ 但既然调用方通常**手上就有这一帧的 items**，那就先按文字找
+      「返回 / 确定 / 关闭 / × 」—— 认到就点它（更准），认不到才用万能点位 ✓
+      （传 `items=None` ⇒ 行为与 PC 完全一致，向后兼容 ✓）
+    """
+    try:
+        if items:
+            _hit = None
+            for _t in items:
+                _s = str(_t.get('text') or '').strip().replace(' ', '')
+                if _s in ('返回', '确定', '关闭', '×', 'X', 'x', '✕', '✖'):
+                    _hit = _t
+                    break
+            if _hit is not None:
+                bot.tap_dlg(int(_hit['cx']), int(_hit['cy']), wait=wait)
+                log.append({'close': 'by_text', 'text': _hit.get('text'),
+                            'at': (int(_hit['cx']), int(_hit['cy'])), 'what': what})
+                return True
+        # v2.59: **不再盲点 UNIV_CLOSE**。
+        #   UNIV_CLOSE=(541,1890) 走 tap_dlg 换算到真机是 **设备 y≈2488 = 棋盘内**
+        #   （弹窗锚屏幕中心：1386+(1890-960)*1.1852），盲点它就是点一个棋盘格
+        #   ⇒ 揭格/开面板/白花体力，且 caller 以为"已关面板"⇒ 判据连锁错 ✗✗
+        #   认不到文字按钮 ⇒ **如实返回 False**，交给上层判"没关掉"✓
+        log.append({'close': 'no_text_btn', 'what': what,
+                    'note': '认不到返回/确定/关闭 ⇒ **不盲点**（万能位在本机落在棋盘内）'})
+        return False
+    except Exception:       # noqa: BLE001
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐⭐⭐ v2.52【模态框「确定/确认」按钮 —— **纯 OCR 识别，不写死坐标**】
+# ══════════════════════════════════════════════════════════════════════════
+#   用户口径（2026-10-26）：
+#     「点了勇者之墓，最后的确认弹窗没有识别点击」
+#     「不要用固定坐标啊。要识别确认按钮并点击」
+#     「安卓端要的是全分辨率啊，不用死坐标，用图片识别等方法点击」
+#
+#   ---- 为什么**不能**用固定坐标 ----
+#     · PC 原文教训：「**事件成功后的确认不是固定位置**」
+#       （面板上那个「确定」与结果框那个「确定」差近 200px；
+#         结果框的「返回」还随**文案行数/奖励条目数**变高变矮）
+#     · 真机实测（2026-10-26 / Redmi 1280×2772 探索地图，**离线复刻端侧 OCR**，
+#       同一套 PP-OCRv4 onnx 模型，参考帧 1080×1920）：
+#         '事件成功' (540,642) conf=0.997
+#         '你获得了勇者的认可。' (528,766) conf=0.994
+#         '获得[无色神石]×1' (539,847) conf=0.978
+#         **'确定' (539,1002) conf=0.9998**
+#       ⇒ 端侧 OCR **完全认得到**「确定」；它在参考系 y=1002（弹窗系 1211、
+#         设备像素 1683），**位置随文案行数浮动** ⇒ 只能现场认，不能写死 ✓
+#
+#   ---- 为什么优先用**弹窗帧**（`ocr_dlg`）而不是归一化帧 ----
+#     弹窗帧 = `RefMapper.toDlg()`：把**屏幕中心**裁成 1080×1920（弹窗系坐标）
+#     ⇒ ① 模态框自己的按钮一定在里面
+#        ② 底层面板的同名「确定」更靠下 ⇒ 可用「离结果标题最近」挑对
+#        ③ **不需要写死 y 带**（旧代码的 840~1350 就是硬写的，文案一变就失效 ✗）
+#
+#   ---- 返回 ----
+#     (x, y, src)：src ∈ {'dlg','ref'}
+#       'dlg' ⇒ **弹窗系**坐标 ⇒ 必须 `tap_dlg()` 点
+#       'ref' ⇒ **参考系**坐标 ⇒ 用 `tap()` 点
+#     找不到 ⇒ None
+def find_modal_confirm(bot, near_cy=None, words=('确定', '确认', '返回')):
+    """在**当前模态框**里找「确定/确认」按钮 —— **纯 OCR，不写死坐标** ✓
+
+    `near_cy`（**弹窗系**）：结果标题的 y ⇒ 按钮就在它下面 ⇒ 取最近的那个 ✓
+    """
+    b = _proxy(bot)
+    # ① 弹窗帧（弹窗系坐标）—— 模态框自己的按钮 ⇒ 不会被底层面板混淆 ✓
+    try:
+        _C = dlg_shift()
+    except Exception:       # noqa: BLE001
+        _C = 0
+    if _C and hasattr(b, 'ocr_dlg'):
+        try:
+            _dl = list(b.ocr_dlg(min_conf=0.3, tag='modal_ok') or [])
+        except Exception:       # noqa: BLE001
+            _dl = []
+        _cands = [t for t in _dl
+                  if (t.get('text') or '').strip() in words]
+        if _cands:
+            if near_cy is not None:
+                _below = [t for t in _cands if (t.get('cy') or 0) >= near_cy - 40]
+                _pick = min(_below or _cands,
+                            key=lambda t: abs((t.get('cy') or 0) - near_cy))
+            else:
+                _pick = _cands[0]
+            return (int(_pick['cx']), int(_pick['cy']), 'dlg')
+    # ② 归一化帧（参考系坐标）兜底
+    try:
+        _it = list(b.ocr(min_conf=0.3, tag='modal_ok_ref') or [])
+    except Exception:       # noqa: BLE001
+        _it = []
+    for t in _it:
+        if (t.get('text') or '').strip() in words:
+            return (int(t['cx']), int(t['cy']), 'ref')
+    return None
+
+def _find_text_btn(bot, texts, ymin=0, ymax=1920):
+    """OCR 找**某个按钮文字**的真实坐标（**不写死** —— 结果框位置会变）
+
+    ⚠ PC 真机教训（原话）：「**事件成功后的确认不是固定位置**」
+      · 面板上的「确定」与结果框的「确定」**差近 200px**（720 系）
+      · 结果框的「返回」随**文案行数/奖励条目数**变高变矮
+    ⇒ 凡是"结果框/奖励框"里的按钮，**必须每帧 OCR 找** ✓
+    """
+    if isinstance(texts, str):
+        texts = (texts,)
+    _best = None
+    try:
+        it = _items(bot)
+    except Exception:       # noqa: BLE001
+        return None
+    for t in it:
+        s = (t.get('text') or '').strip()
+        if s not in texts:
+            continue
+        cy = t.get('cy') or 0
+        if not (ymin <= cy <= ymax):
+            continue
+        score = abs(cy - (ymin + ymax) / 2)
+        if _best is None or score < _best[0]:
+            _best = (score, t['cx'], t['cy'], s)
+    if _best is None:
+        return None
+    return (_best[1], _best[2], _best[3])
+
+
+def _tap_text_btn(bot, log, texts, fallback=None, ymin=0, ymax=1920, tag='', wait=2.0):
+    """点一个"文字按钮"：**优先 OCR 找**，找不到才用 fallback（写死坐标）
+
+    -> (x, y, src)；src = 'ocr' | 'fallback' | None
+    """
+    p = _find_text_btn(bot, texts, ymin, ymax)
+    if p:
+        bot.tap_dlg(p[0], p[1], wait=wait)
+        log.append({tag: 'tap_text', 'text': p[2], 'at': [p[0], p[1]], 'src': 'ocr'})
+        return (p[0], p[1], 'ocr')
+    if fallback:
+        bot.tap_dlg(fallback[0], fallback[1], wait=wait)
+        log.append({tag: 'tap_text', 'text': str(texts), 'at': list(fallback),
+                    'src': 'fallback'})
+        return (fallback[0], fallback[1], 'fallback')
+    log.append({tag: 'tap_text_none', 'text': str(texts)})
+    return (None, None, None)
+
+
+def _ocr_zoom_file(bot, y0, y1, scale, tag):
+    """把当前**弹窗帧**的 y 带裁出来放大 scale 倍再 OCR -> [(cx, text, cy, conf)]
+
+    ⚠ 为什么要放大（PC 原话）：「价格数字太小，整屏 OCR 漏检」
+      · PC 实测整屏只读到 2/4 个价格；**放大 3 倍后 4 个全读到** ✓
+    ⚠ 端侧 Bot.ocr(img=…) 那条路会把图当**整帧**（缩放 + 贴黑底）⇒ 坐标全错 ✗
+      ⇒ 必须走 _ocr() 直吃临时 PNG（与 read_qty 同款 ✓），并把坐标 ÷scale 反算回来 ✓
+    """
+    import cv2
+    from mapbot import _ocr
+    try:
+        img = bot.img_dlg()
+    except Exception:       # noqa: BLE001
+        return []
+    if img is None or getattr(img, 'size', 0) == 0:
+        return []
+    band = img[max(0, int(y0)):int(y1), :]
+    if band.size == 0:
+        return []
+    big = cv2.resize(band, None, fx=float(scale), fy=float(scale),
+                     interpolation=cv2.INTER_CUBIC)
+    tmp = _qty_tmp_path().replace('_qty.png', '_zoom_%s.png' % str(tag))
+    try:
+        cv2.imencode('.png', big)[1].tofile(tmp)
+    except Exception:       # noqa: BLE001
+        return []
+    try:
+        res, _sec = _ocr()(tmp)
+    except Exception:       # noqa: BLE001
+        return []
+    out = []
+    for it in (res or []):
+        try:
+            box, txt, conf = it[0], it[1], float(it[2])
+        except Exception:       # noqa: BLE001
+            continue
+        xs = [q[0] for q in box]
+        ys = [q[1] for q in box]
+        out.append((int(sum(xs) / 4.0 / scale),
+                    str(txt),
+                    int(sum(ys) / 4.0 / scale) + int(y0),
+                    conf))
+    return out
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ① 勇者之墓（SpecialSpot=3）→ 面板标题「**英灵使者**」
+#    PC 实测：**零成本**（不花钱不花体力），三行任选 → 确定 → 事件成功 + 奖励
+#    用户口径（PC 记录的原文）：「**三行都能点，优先点成功率100%的**」
+# ──────────────────────────────────────────────────────────────────────────────
+RELIC = {
+    'title': '英灵使者',
+    # v2.64：**全部换成真机实测值**（弹窗系）
+    #   旧值是 PC 720 系 ×1.5 推算的，实测全部错位：
+    #     旧 rows 落点 dev y = 1215/1446/1678，而真行在 dev y ≈ 947/1139/1333（弹窗系）
+    #     旧 ok  落点 dev y = 1955，而「确定」实在 dev y = 2012（差 57px）
+    #   ⚠ 这些只是**兜底**（正常路径走 OCR 找到的坐标）
+    'rows': [(766, 947), (766, 1139), (767, 1333)],   # 三栏「成功率 N%」文字中心
+    'ok': (690, 1488),          # 「确定」按钮中心（实测 conf 1.000）
+    'must': (392, 1488),        # 「必定成功」（不该点，仅供诊断）
+    'close_x': (983, 453),      # 右上关闭 X
+}
+# 「成功率 N%」文字的行 y（PC 720 系 593/722/851 ×1.5）—— 把成功率**归到行** ✓
+RELIC_SUCC_Y = {890: 0, 1083: 1, 1277: 2}
+RELIC_SUCC_TOL = 21             # PC 容差 14 ×1.5
+RELIC_WAIT_ROUNDS = 4           # 结果框「确定」最多找几轮
+RELIC_WAIT_SEC = 0.8            # 每轮间隔（秒）
+
+
+def _relic_result_title_cy(bot):
+    """结果框的**标题行** y（弹窗系）—— 用来挑「离标题最近」的那个确定按钮 ✓
+
+    标题词：事件成功 / 事件大成功 / 事件失败 / 恭喜获得
+    """
+    try:
+        _dl = list(bot.ocr_dlg(min_conf=0.3, tag='relic_title') or [])
+    except Exception:       # noqa: BLE001
+        return None
+    best = None
+    for t in _dl:
+        s = (t.get('text') or '').strip()
+        if any(w in s for w in ('事件成功', '事件大成功', '事件失败', '恭喜获得')):
+            cy = t.get('cy') or 0
+            if best is None or cy < best:
+                best = cy
+    return best
+
+def _relic_close_result(bot, log=None):
+    """**带重试**点掉勇者之墓的「结果框」-> (x, y) 或 None
+
+    ⚠ PC 真机事故（原话教训）：「**勇者之墓不能用万能点位关，得点击确认按钮**」
+      · 结果框**正在弹出动画中**时，一次性 OCR 读不到「确定」⇒ 万能点位**对它无效** ✗
+      ⇒ 每轮**重新取帧 + OCR**，找到「确定/返回」就点 ✓；4 轮都找不到 ⇒ 返回 None
+        （**如实报没点掉**，不假装成功 ✓）
+    ⚠ 「确定」有**两个位置** ⇒ 搜索带必须**只框结果框那一段**（PC 560~900 ⇒ 手机
+      840~1350；面板上那个在 1440 ⇒ 排除掉 ✓）
+    """
+    for rd in range(1, RELIC_WAIT_ROUNDS + 1):
+        if rd > 1:
+            try:
+                _sleep(bot, RELIC_WAIT_SEC)
+            except Exception:       # noqa: BLE001
+                pass
+        try:
+            _invalidate(bot)
+        except Exception:           # noqa: BLE001
+            pass
+        # ⭐⭐⭐ v2.52：不再用**写死的 y 带**（840~1350）——
+        #   「事件成功后的确认不是固定位置」（PC 原文），且结果框按钮会随
+        #   **文案行数/奖励条目数**变高变矮 ⇒ 写死必失效 ✗
+        #   ⇒ 改成**弹窗帧 OCR 现场认**「确定/确认」，并用「离结果标题最近」挑对 ✓
+        _near = _relic_result_title_cy(bot)
+        p = find_modal_confirm(bot, near_cy=_near, words=('确定', '确认', '返回'))
+        if p:
+            if p[2] == 'dlg':
+                bot.tap_dlg(p[0], p[1], wait=2.0)
+            else:
+                bot.tap(p[0], p[1], wait=2.0)
+            if log is not None:
+                log.append({'relic': 'close_result', 'at': [p[0], p[1]],
+                            'text': '确定/确认', 'round': rd, 'src': p[2],
+                            'near_cy': _near})
+            return (p[0], p[1])
+    if log is not None:
+        log.append({'relic': 'close_result_fail', 'rounds': RELIC_WAIT_ROUNDS})
+    return None
+
+
+def _relic_panel_like(it):
+    """勇者之墓面板的**稳定特征**判据（不依赖读不到的标题）
+
+    v2.63（真机实测 2026-10-27）：
+      面板标题「英灵使者」在归一化帧里**读不到**（丢弃带）
+      ⇒ 只能靠结构特征认面板
+
+    实测 OCR（真正的勇者之墓面板，参考帧 1080x1920）：
+      「这些都是历代勇者遗留下来的宝物」（说明文案）
+      **「成功率90%」「成功率100%」** x3（三栏）← ★ 这是它**独有**的
+      「必定成功」「确定」（底部两个按钮）
+
+    ⚠⚠ 不能用「N级 + 筛选」当判据！（我第一版就是这么错的）
+      实测：背包的**装备列表**也是「N级x16 + 筛选x1」，但**成功率=0**
+      ⇒ 用那个判据会把**背包误判成勇者之墓** ✗✗
+
+    判据（两条都要）：
+      ① 至少 2 个「成功率 N%」（OCR 实测 3/3 全中）
+      ② 至少 1 个「必定成功」或「勇者」
+    """
+    try:
+        _n_succ = 0
+        _n_hero = 0
+        for _t in (it or []):
+            _s = str(_t.get('text') or '').replace(' ', '')
+            if '成功率' in _s:
+                _n_succ += 1
+            if '勇者' in _s or '必定成功' in _s:
+                _n_hero += 1
+        return _n_succ >= 2 and _n_hero >= 1
+    except Exception:       # noqa: BLE001
+        return False
+
+
+def relic_flow(bot, log):
+    """勇者之墓「英灵使者」：**三选一，零成本** -> acts（空 = 没走完）
+
+    ⚠ 面板存在性判据用**标题**（_has(it, 英灵使者)）而不是方块名「勇者之墓」——
+      图上是「勇者之墓」、面板上写「英灵使者」，两者不同名（PC SPECIAL_ALIAS 记着）✓
+    ⚠ 只认「成功率 100%」的行；**读不到任何 100% ⇒ 用默认第 1 行**（PC 同口径 ✓）
+      理由：不点 = 停在面板上 ⇒ 整盘被盖住 ⇒ 白跑一轮，比选错一行代价大得多
+    """
+    acts = []
+    b = _proxy(bot)
+    it = _items(b)
+    # v2.63: 标题读不到时靠结构特征兜底（与传承祭均同口径）
+    if not (_has(it, RELIC['title']) or _relic_panel_like(it)):
+        log.append({'relic': 'panel_missing',
+                    'texts': [(t.get('text') or '')[:12] for t in (it or [])][:12]})
+        return acts
+
+    # v2.63 CRITICAL: 不能用写死的 RELIC_SUCC_Y 归行!
+    #   实测（真机 2026-10-27，弹窗系）：
+    #     行0 成功率90%  dlg y=947   旧期望 890  差 +57
+    #     行1 成功率100% dlg y=1139  旧期望 1083 差 +56
+    #     行2 成功率100% dlg y=1333  旧期望 1277 差 +56
+    #   容差只有 21 ⇒ **三行一行都归不进** ⇒ succ 恒空
+    #   ⇒ 永远选「默认行1」= 成功率 90% 那行 ✗✗
+    #   ⇒ 改成**按 y 排序取索引**（不依赖任何绝对 y，换分辨率/版式都成立 ✓）
+    _succ_list = []
+    for t in it:
+        s = (t.get('text') or '').replace(' ', '')
+        if '成功率' not in s:
+            continue
+        _succ_list.append((int(t.get('cy') or 0),
+                          ('100%' in s or '100％' in s), s, t))
+    _succ_list.sort(key=lambda x: x[0])       # 按 y 从上到下
+    succ = {i: (v[1], v[2]) for i, v in enumerate(_succ_list)}
+    log.append({'relic': 'succ', 'rows': {str(k): v[1] for k, v in sorted(succ.items())},
+                'ys': [v[0] for v in _succ_list]})
+
+    # ② 选行：**第一个 100%** 的行；都没有 ⇒ 行 1（默认已选中）
+    pick = None
+    for r in (0, 1, 2):
+        if succ.get(r, (False,))[0]:
+            pick = r
+            break
+    if pick is None:
+        pick = 0
+        say('      · 勇者之墓：读不到 100%% 的行 ⇒ 用默认（行1）【%s】' % (succ,))
+    else:
+        say('      · 勇者之墓：选第 %d 行（成功率 100%%）' % (pick + 1))
+    # v2.63：**点哪一行用实测 OCR 坐标**（不再反查写死的 RELIC_SUCC_Y）
+    #   「成功率 N%」那条 OCR 的 (cx,cy) 就是那一行的实际位置
+    #   ⇒ 直接点它（PC 记过：行 y 会随文案行数变 ✗）
+    _row_item = None
+    if 0 <= pick < len(_succ_list):
+        _row_item = _succ_list[pick][3]      # 第 4 个元素是 OCR 条目
+    if _row_item is not None:
+        _rx, _ry = int(_row_item['cx']), int(_row_item['cy'])
+        b.tap_dlg(_rx, _ry, wait=1.6)
+        log.append({'relic': 'pick_row', 'row': pick + 1, 'at': [_rx, _ry],
+                    'src': 'succ_ocr'})
+    else:
+        log.append({'relic': 'pick_row_skipped', 'row': pick + 1,
+                    'note': '读不到任何「成功率」条目 ⇒ 不盲点（行1 本来就是默认选中）'})
+    acts.append('pick%d' % (pick + 1))
+
+    # ③ 点「确定」——**优先 OCR**，找不到才用标定坐标 ✓
+    # v2.63：只用 OCR找到的「确定」（实测 dlg 1489）；
+    #   找不到就多轮重试（面板有弹出动画），不盲点写死坐标 ✗
+    p = None
+    for _try in range(4):
+        if _try > 0:
+            try:
+                _sleep(b, 0.6)
+                _invalidate(b)
+            except Exception:       # noqa: BLE001
+                pass
+        p = _find_text_btn(b, ('确定',))
+        if p:
+            break
+    at = (p[0], p[1]) if p else RELIC['ok']
+    b.tap_dlg(at[0], at[1], wait=2.6)
+    log.append({'relic': 'ok', 'at': list(at), 'src': 'ocr' if p else 'fallback'})
+    acts.append('ok')
+
+    # ④ 读结果（只记日志，不影响流程 ✓）
+    it2 = _items(b)
+    txts = [(t.get('text') or '') for t in it2]
+    joined = ' '.join(txts)
+    ok = ('事件成功' in joined) or ('事件大成功' in joined) or ('获得了勇者的认可' in joined)
+    fail = '没能获得' in joined
+    big = '事件大成功' in joined
+    reward = [t for t in txts if '获得[' in t or '获得【' in t]
+    has_ok_btn = _find_text_btn(b, ('确定', '返回'), 840, 1590) is not None
+    log.append({'relic': 'result', 'ok': bool(ok), 'big': bool(big),
+                'fail': bool(fail), 'btn': bool(has_ok_btn), 'reward': reward[:4]})
+    say('      · 勇者之墓结果：%s%s'
+        % ('★★大成功' if big else ('★成功 ✓' if ok else
+                                  ('✗失败' if fail else '？未读到文案')),
+           ('  奖励=%s' % reward[:2]) if reward else ''))
+
+    # ⑤ 关结果框（**带重试**）；关不掉就**如实记**，不假装 ✓
+    if has_ok_btn or ok or fail or big:
+        p2 = _relic_close_result(b, log)
+        if p2:
+            acts.append('close_result')
+        else:
+            say('      · ⚠ %d 轮都没找到「确定」⇒ **结果框可能还开着**（如实记录，不冒充已关）'
+                % RELIC_WAIT_ROUNDS)
+    # ⑥ 收尾：面板还在 ⇒ 万能点位（PC 口径：三个新面板都吃这一下 ✓）
+    # v2.53：不靠「标题在归一化帧可见」⇒ 用**弹窗帧**判面板是否还开着
+    close_panel(b, log, 'relic_tail', title=RELIC['title'])
+    log.append({'relic': 'done', 'acts': acts})
+    return acts
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ② 限时礼包（SpecialSpot=5）→ 面板标题「**限时超值礼包**」
+#    用户口径（PC 原文）：「**720 分辨率下第一个免费按钮是固定坐标，只点最上面那个免费按钮**」
+#    ⇒ 只领第 1 档（免费）；第 2 档要 6 幸运草、第 3 档用户说不点 ⇒ **都不碰** ✓
+# ──────────────────────────────────────────────────────────────────────────────
+GIFT = {
+    'title': '限时超值礼包',
+    'free1': (770, 791),        # 第 1 档「免费」（PC (513,527) ×1.5）⇒ **只点这个** ✓
+    'free3': (770, 1260),       # 第 3 档「免费」（PC (513,840) ×1.5）—— **不点**
+    'paid2': (770, 1028),       # 第 2 档「6 草」（PC (513,685) ×1.5）—— **不点**
+    'result_back': (540, 1211),  # 结果框「返回」（PC (360,807) ×1.5；仍优先 OCR 找）
+}
+
+
+def gift_flow(bot, log):
+    """限时礼包「限时超值礼包」：**只点第 1 档免费** -> acts
+
+    ⚠ 「恭喜获得」是**结果框**，不是面板标题 ⇒ 用它判领到了，用它里面的「返回」收尾 ✓
+    """
+    acts = []
+    b = _proxy(bot)
+    it = _items(b)
+    if not _has(it, GIFT['title']):
+        log.append({'gift': 'panel_missing',
+                    'texts': [(t.get('text') or '')[:12] for t in (it or [])][:12]})
+        return acts
+
+    # ① 只点第 1 档（固定坐标 —— 用户口径明确说固定坐标 ✓）
+    # ⚠ 用户口径是「**720 分辨率下第一个免费按钮是固定坐标，只点最上面那个**」
+    #   ⇒ 固定坐标是**用户认可的**主路径。但既然能 OCR，就**先按文字找最上面那个「免费」**：
+    #     认到 ⇒ 点它（更准）；认不到 ⇒ 才用 GIFT['free1']（PC ×1.5、过 RefMapper）✓
+    _g1 = None
+    # ⚠⚠⚠ v2.48 修（用户 2026-10-26「打开限时礼包后不点免费领了红宝石就关掉」）：
+    #   旧判据是**精确等值** `text.strip() == "免费"`：
+    #     OCR 实际读到的是「免费领取」「免费获得」「免费 」这类**带后缀**的文本
+    #     ⇒ 精确等值**一个都匹配不到** ⇒ 走坐标兜底 GIFT["free1"]
+    #     ⇒ 而那个坐标在这台机上不准（点到了红宝石按钮）⇒ 花宝石 + 关面板 ✗✗
+    #   ⇒ 判据改成**包含「免费」且不含「宝石/钻石/购买」**（排除收费项），
+    #     再取**最上面**那个（用户口径「只点最上面那个免费按钮」✓）。
+    _FREE_BAD = ("宝石", "钻石", "购买", "¥", "元", "领取需")
+    for _t in it:
+        _tx = str(_t.get('text') or '').strip()
+        if '免费' not in _tx:
+            continue
+        if any(_b in _tx for _b in _FREE_BAD):
+            continue
+        if _g1 is None or (_t.get('cy') or 0) < (_g1.get('cy') or 0):
+            _g1 = _t
+    # ⚠⚠⚠ v2.49【**认不到「免费」就绝不用坐标兜底**】（用户 2026-10-26）
+    #   上一版即使认不到也点 GIFT["free1"]=(770,791)，而那个坐标在这台机上
+    #   落在「红宝石」按钮上 ⇒ **白花宝石**、还顺手关掉面板 ✗✗
+    #   用户口径是「只点最上面那个免费按钮」，从没说"认不到也要点"
+    #   ⇒ **fail-safe 方向：认不到 ⇒ 一下都不点**（宁可少领一个免费礼包，
+    #     也绝不误花宝石 ✓）。坐标兜底只保留给"有「免费」字样但位置拿不准"的场景。
+    if _g1 is None:
+        log.append({'gift': 'free_not_found',
+                    'texts': [(t.get('text') or '')[:10] for t in (it or [])][:12],
+                    'note': '没认出「免费」按钮 ⇒ 不点（防误点红宝石）'})
+        say('      · 限时礼包：没认出「免费」按钮 ⇒ 跳过（不点，防花宝石）')
+        # v2.53：**必须关掉**（否则残留面板盖住棋盘 ⇒ 后面格子全点不动 ✗）
+        close_panel(b, log, 'gift_nofree', title=GIFT['title'])
+        log.append({'gift': 'done', 'acts': acts})
+        return acts
+    _gx, _gy = int(_g1["cx"]), int(_g1["cy"])
+    bot.tap_dlg(_gx, _gy, wait=2.4)
+    log.append({'gift': 'tap_free1', 'at': [_gx, _gy], 'src': 'ocr_top_free'})
+    acts.append('free1')
+
+    # ② 读结果
+    it2 = _items(b)
+    txts = [(t.get('text') or '') for t in it2]
+    joined = ' '.join(txts)
+    got = '恭喜获得' in joined
+    reward = [t for t in txts if t.strip() in ('货币', '道具', '装备')]
+    log.append({'gift': 'result', 'got': bool(got), 'texts': txts[:8],
+                'reward': reward[:4]})
+    say('      · 限时礼包：%s' % ('★领到 ✓' if got else '（没看到恭喜获得，见日志）'))
+
+    # ③ 收结果框（**优先 OCR** —— 结果框高度随奖励条目数变 ✓）
+    if got:
+        _tap_text_btn(b, log, ('返回', '确定'), fallback=GIFT['result_back'],
+                      ymin=1050, ymax=1350, tag='gift', wait=2.0)
+    close_panel(b, log, 'gift_tail', title=GIFT['title'])
+    log.append({'gift': 'done', 'acts': acts})
+    return acts
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ③ 预言石碑（SpecialSpot=9）→ 面板标题「**预言石板**」
+#    用户口径（PC 原文）：
+#      「**优先选 地图中至少有1名敌人拥有<紫/橙>色位阶的掉宝加护这个加护。
+#        其他就按品阶排，优先品质高的**」
+#      「**这个预言（幸运）要加个按钮，是否停止脚本（类似出现红装标记）**」
+#      「**地图中必定出现金属宝箱怪也要单独拿出来弄个选项，遇到那个是否立即停止脚本**」
+#      「**预言石碑停止脚本加上橙色和紫色元素**」← 2026-10-09
+# ──────────────────────────────────────────────────────────────────────────────
+FORETELL = {
+    'title': '预言石板',
+    # PC 720 系 620 ⇒ 手机 930（三张卡的点击 y；x 由 OCR 标题给 ✓）
+    # 卡片点击 y：实测卡身在 dlg 750~1150 ⇒ 取中心 900（旧值 930 也在范围内，但 900 更正）
+    'cards_y': 900,
+    # ⭐ v2.02 真机实测：'确定' 在 dlg(542,1390)；旧值 1332 差 58（点空）
+    'ok': (542, 1390),          # 「确定」
+    'PRIO_DROP': '掉宝',        # ① 最高优先级
+    'PRIO_STOP': ('幸运', '和平', '元素'),   # ② 选了要停脚本的优先挑
+}
+FORETELL_NAMES = (
+    '丰收', '藏宝', '武装', '命运', '秘藏', '神兵', '强敌', '路标', '元素',
+    '掉宝', '奇遇', '勇者', '机遇', '宝库', '黄金', '传承', '魔法', '财富',
+    '伏击', '幸运', '祥和', '圣域', '战场', '精灵', '和平', '奇观',
+)
+# ⛔⛔ v2.02【**真机实测：卡片标题 y 是 714，不是 659**】
+#   ---- 病（用户报：「打开预言石碑不选择预言」）----
+#     旧值 `659` 是 **PC 439 ×1.5** 推算的。真机实测（`fp.png` 逐条 OCR）：
+#       `dlg(212,714) 秘藏` / `dlg(540,714) 藏宝` / `dlg(868,715) 强敌`
+#     而 `_foretell_read_cards()` 的过滤窗是 `659-30 ~ 659+39` = **629~698**
+#     ⇒ **三张卡全被过滤掉** ⇒ `cards=[]` ⇒ 走 `cards_timeout` 分支 ⇒
+#        「等了 6 轮仍没读到卡片 ⇒ 不盲点，关面板」⇒ **一张都不选** ✗✗
+#   ---- 修法 ----
+#     标题 y 改 **714**（实测），窗口 `+30/-55` 覆盖「秘藏/强敌」轻微的 y 差 ✓
+#   ⚠ 这个常量只用于**识别归属**（判断哪条文字是卡片标题），
+#     不影响点击（点击用 `FORETELL["cards_y"]`）✓
+# v2.76: 改成参考系基值 + 动态 C（不能写死弹窗系绝对值）
+#   真机 1280x2772 ⇒ C=209，标题弹窗系 506+209=715 ✓ 匹配旧值 714
+#   模拟 1280x2640 ⇒ C=154，标题弹窗系 506+154=660 ✗ 落在 684~769 外
+#   ⇒ 三张卡全读不到 ⇒ cards_timeout ⇒ 一张都不选 ✗
+FORETELL_CARD_Y_REF = 506       # 卡片标题的**参考系** y
+
+
+def _foretell_card_y():
+    """卡片标题在**当前弹窗系**的 y = 参考基值 + C"""
+    try:
+        return FORETELL_CARD_Y_REF + int(round(dlg_shift()))
+    except Exception:
+        return FORETELL_CARD_Y_REF + 209
+FORETELL_CARD_Y_TOL_UP = 30     # 标题识别窗口：上容差
+FORETELL_CARD_Y_TOL_DN = 55     # 标题识别窗口：下容差（实测强敌在 715，留余量）
+FORETELL_WAIT_ROUNDS = 6        # 等卡片的最多轮数
+FORETELL_WAIT_SEC = 0.8         # 每轮间隔（秒）
+
+_FORETELL_VALUE_TIER = {
+    '丰收': {100: 2, 200: 3, 300: 4, 500: 5},
+    '藏宝': {100: 2, 200: 3, 300: 4, 500: 5},
+    '武装': {100: 2, 200: 3, 300: 4, 500: 5},
+    '命运': {5: 2, 10: 3, 15: 4, 20: 5},
+}
+_FORETELL_WORD_TIER = {'蓝': 2, '紫': 3, '橙': 4}
+_FORETELL_FIXED_TIER = {
+    '掉宝': 4, '宝库': 4, '圣域': 3, '战场': 3, '精灵': 3, '财富': 3,
+    '黄金': 3, '传承': 5, '幸运': 5, '祥和': 2, '奇观': 2, '伏击': 4,
+    '勇者': 2, '机遇': 2, '魔法': 5, '和平': 3, '强敌': 2, '元素': 2,
+    '路标': 2, '秘藏': 2, '神兵': 2, '奇遇': 2,
+}
+
+
+def _foretell_tier(name, eff):
+    """一张卡片的**品阶**（数字越大越好）—— 数据表 Foretell 三档 ＋ 数值档
+
+    ⚠ 判据顺序（PC 同款，别调）：① 数值表（+N% / 至少为N点）② 色位阶词 ③ 名字固定表
+      ⇒ 都读不到就用 **2**（**不猜高**：猜高会把垃圾卡排到最优 ✗）
+    """
+    import re as _re
+    try:
+        m = _re.search(r'\+(\d+)%', eff or '')
+        if m and name in _FORETELL_VALUE_TIER:
+            return _FORETELL_VALUE_TIER[name].get(int(m.group(1)), 2)
+        m2 = _re.search(r'至少为(\d+)点', eff or '')
+        if m2 and name in _FORETELL_VALUE_TIER:
+            return _FORETELL_VALUE_TIER[name].get(int(m2.group(1)), 2)
+        for w, tv in _FORETELL_WORD_TIER.items():
+            if ('至少是%s' % w) in (eff or '') or ('%s色位阶' % w) in (eff or ''):
+                return tv
+        return _FORETELL_FIXED_TIER.get(name, 2)
+    except Exception:       # noqa: BLE001
+        return 2
+
+
+def _foretell_read_cards(bot, log=None):
+    """读面板上的三张卡（轮询等它们画出来）-> (cards, rounds)
+
+    ⚠ 必须 _invalidate + 重新取帧（PC 原话：「**必须作废同帧缓存**，否则读到旧帧 ✗」）
+      —— 卡片是**过动画才出来**的，第一帧常常只有面板底板 ✓
+    """
+    for rd in range(1, FORETELL_WAIT_ROUNDS + 1):
+        if rd > 1:
+            try:
+                _sleep(bot, FORETELL_WAIT_SEC)
+            except Exception:       # noqa: BLE001
+                pass
+        try:
+            _invalidate(bot)
+        except Exception:           # noqa: BLE001
+            pass
+        try:
+            it = _items(bot)
+        except Exception as _e:     # noqa: BLE001
+            if log is not None:
+                log.append({'foretell': 'cards_ocr_err', 'round': rd,
+                            'e': repr(_e)[:80]})
+            continue
+        _cY = _foretell_card_y()   # v2.76 动态 C ⇒ 换分辨率也能认到卡牌
+        cards = []
+        for t in it:
+            s = (t.get('text') or '').strip()
+            cy = t.get('cy') or 0
+            if s not in FORETELL_NAMES:
+                continue
+            # ⚠ 窗口用常量（方便现场调）—— 旧写法写死 `-30/+39`，
+            #   配合错误的 659 ⇒ 整窗偏移 55px ⇒ **一张卡都认不到** ✗
+            if not (_cY - FORETELL_CARD_Y_TOL_UP
+                    <= cy
+                    <= _cY + FORETELL_CARD_Y_TOL_DN):
+                continue
+            if any(c['name'] == s for c in cards):
+                continue                        # 同帧重复
+            cards.append({'name': s, 'x': t.get('cx'), 'y': FORETELL['cards_y']})
+        if cards:
+            cards.sort(key=lambda c: c['x'] or 0)
+            # 每张卡的**效果文字**（卡片下方、同一列）⇒ 用来读位阶/数值 ✓
+            for c in cards:
+                eff = []
+                for t in it:
+                    s2 = (t.get('text') or '')
+                    cy2 = t.get('cy') or 0
+                    cx2 = t.get('cx') or 0
+                    if cy2 <= 705 or cy2 > 1140:        # PC 470~760 ×1.5
+                        continue
+                    if abs(cx2 - (c['x'] or 0)) > 90:   # PC ±60 ×1.5
+                        continue
+                    eff.append(s2)
+                c['eff'] = ' '.join(eff)
+                c['tier'] = _foretell_tier(c['name'], c['eff'])
+            if log is not None:
+                log.append({'foretell': 'cards_ok', 'round': rd, 'n': len(cards),
+                            'names': [c['name'] for c in cards]})
+            return cards, rd
+    return [], FORETELL_WAIT_ROUNDS
+
+
+def foretell_flow(bot, log, flags=None):
+    """预言石碑「预言石板」：选卡 → 点确定 → 拿预言；命中要停的卡 ⇒ **不选卡直接停**
+
+    -> {'acts': [...], 'stop': None|'幸运'|'和平·金属宝箱怪'|'元素·紫色'|'元素·橙色',
+        'picked': [卡名...]}
+
+    ⭐⭐ 判停**提到点卡之前**（PC 原话：「判停提到点卡之前 => 面板保持原样 ✓」）
+      ⇒ 抽到幸运/和平/元素 并且用户开关开着 ⇒ **一张卡都不点**、面板原样留着给人工处理 ✓
+      （点了就等于替用户做了选择，还把面板关掉 ⇒ 现场没了 ✗）
+    ⚠ 三个停开关**都由 GUI 传进来**（flags），默认 **开**（用户点名的就是要停下来）✓
+    """
+    out = {'acts': [], 'stop': None, 'picked': []}
+    flags = flags or {}
+    b = _proxy(bot)
+    it = _items(b)
+    if not _has(it, FORETELL['title']):
+        log.append({'foretell': 'panel_missing',
+                    'texts': [(t.get('text') or '')[:12] for t in (it or [])][:12]})
+        return out
+
+    # ① 本次可选几个（面板上写着「可选择N个」）
+    import re as _re
+    maxpick = 1
+    for t in it:
+        s = (t.get('text') or '').replace(' ', '')
+        m = _re.search(r'可选择(\d+)个', s)
+        if m:
+            maxpick = max(1, int(m.group(1)))
+            break
+    log.append({'foretell': 'maxpick', 'n': maxpick})
+    say('      · 预言石碑：本次可选 %d 个' % maxpick)
+
+    # ② 读卡（等动画）
+    cards, _rounds = _foretell_read_cards(b, log)
+    if not cards:
+        log.append({'foretell': 'cards_timeout', 'rounds': _rounds})
+        say('      · ⚠ 等了 %d 轮仍没读到卡片 ⇒ 不盲点，关面板（下轮再来）' % _rounds)
+        close_panel(b, log, 'foretell_nocards', title=FORETELL['title'])
+        return out
+    say('      · 读到 %d 张卡（第 %d 轮）' % (len(cards), _rounds))
+    log.append({'foretell': 'cards', 'n': len(cards), 'round': _rounds,
+                'cards': [{'n': c['name'], 'tier': c['tier'],
+                           'eff': (c.get('eff') or '')[:28]} for c in cards]})
+
+    # ③ 排序：掉宝 → 要停的（幸运/和平/元素）→ 按品阶
+    def _key(c):
+        blob = c['name'] + c['eff']
+        if FORETELL['PRIO_DROP'] in blob:
+            return (0, 0)
+        if any(k in blob for k in FORETELL['PRIO_STOP']):
+            return (1, 0)
+        return (2, -c['tier'])
+    cards.sort(key=_key)
+    pick = cards[:maxpick]
+    say('      · 选卡：%s' % '、'.join(c['name'] for c in pick))
+
+    # ④ 判停（**在点卡之前**）
+    _stop_why = None
+    for _c in pick:
+        _blob = _c['name'] + _c['eff']
+        if '幸运' in _blob:
+            _stop_why = '幸运'
+            break
+        if '和平' in _blob and '金属宝箱怪' in _blob:
+            if bool(flags.get('stop_peace_metal', True)):
+                _stop_why = '和平·金属宝箱怪'
+            break
+        if '元素' in _c['name']:
+            _pf = bool(flags.get('stop_elem_purple', True))
+            _of = bool(flags.get('stop_elem_orange', True))
+            _tier11 = ('橙色' if '橙色' in _blob else
+                       ('紫色' if '紫色' in _blob else
+                        ('蓝色' if '蓝色' in _blob else '**未读到位阶词**')))
+            log.append({'foretell': 'elem_tier', 'name': _c['name'],
+                        'tier_word': _tier11, 'stop_purple': _pf,
+                        'stop_orange': _of, 'eff': (_c.get('eff') or '')[:40]})
+            if '橙色' in _blob and _of:
+                _stop_why = '元素·橙色'
+                break
+            if '紫色' in _blob and _pf:
+                _stop_why = '元素·紫色'
+                break
+    if _stop_why:
+        out['stop'] = _stop_why
+        out['picked'] = []              # ⭐ **一张都没点**（面板原样留着 ✓）
+        out['acts'] = ['stop_before_pick']
+        log.append({'foretell': 'stop_before_pick', 'why': _stop_why,
+                    'cards': [c['name'] for c in cards],
+                    'note': '判停提到点卡之前 => 面板保持原样 ✓'})
+        say('      · ⚠ 抽到【%s】⇒ **立即停止**（**不选卡、不点确定**，面板原样留着）'
+            % _stop_why)
+        return out
+
+    # ⑤ 点卡
+    for c in pick:
+        # ⚠ 卡片是**图形**，但卡片**标题**（丰收/掉宝/元素…）OCR 读得到，
+        #   x 就取它的 cx；y 用 FORETELL['cards_y']（卡面中心）—— 已是最接近自适应的做法 ✓
+        b.tap_dlg(c['x'], c['y'], wait=1.4)
+        log.append({'foretell': 'pick', 'name': c['name'],
+                    'at': [c['x'], c['y']], 'tier': c['tier']})
+        out['picked'].append(c['name'])
+
+    # ⑥ 点「确定」（优先 OCR；搜索带只框面板那个确定 ✓）
+    p = _find_text_btn(b, ('确定',), 1230, 1440)
+    at = (p[0], p[1]) if p else FORETELL['ok']
+    b.tap_dlg(at[0], at[1], wait=2.2)
+    log.append({'foretell': 'ok', 'at': list(at), 'src': 'ocr' if p else 'fallback'})
+    out['acts'] = ['pick%d' % len(pick), 'ok']
+
+    close_panel(b, log, 'foretell_tail', title=FORETELL['title'])
+    log.append({'foretell': 'done', 'picked': out['picked'], 'stop': out['stop']})
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ④ 金属宝箱怪 / 机巧宝箱怪（SpecialSpot=2）
+#    用户口径（PC 原文，**权威**）：
+#      「**一般只买 8 草的，宝箱怪默认不勾选，勾选就自动买 8 草的**」
+#    ⚠ 价格表（游戏源码 GetCloverPrice(step) = 1 << (Step-1)）：C=1/B=2/A=4/**S=8**
+#      （SS=16 但宝箱怪不出 SS ⇒ **8 就是最高档** ✓）
+#    ⚠⚠ 购买是**两步**（PC 真机实测，第一版猜错过）：
+#        点商品卡 ⇒ **弹详情页**（不是买）✗ ⇒ 点详情页**右下角价格按钮** ⇒ 才真买 ✓
+#    ⚠ 「取消追踪」(PC 160,1053) 是**追踪功能**，不是取消购买 ✗ 别点错
+# ──────────────────────────────────────────────────────────────────────────────
+MIMIC_CARD_X = (191, 407, 623, 839)     # 四列商品卡中心（PC 720 系 ×1.5）
+MIMIC_PRICE_X = (218, 435, 650, 867)    # 四列价格数字中心（放大 OCR 实测 ✓）
+MIMIC_CARD_Y = 1013                     # 商品卡点击 y（PC 675 ×1.5）
+MIMIC_PRICE_Y = 1095                    # 价格行 y（PC 730 ×1.5）
+MIMIC_BUY_BTN = (879, 1580)             # 详情页右下角价格按钮（PC (586,1053) ×1.5）
+MIMIC_BUY_Y_RANGE = (1245, 1665)        # 购买键 y 范围（PC 830~1110 ×1.5）
+MIMIC_REFRESH = (897, 1230)             # 「刷新 1 草」—— **不点**（用户口径）✓
+MIMIC_TARGET_PRICE = 8                  # ⭐ **只买 8 草的**
+MIMIC_EQUIP_COL = 0                     # ⭐ **从左数第一个必定是装备**（用户口径）✓
+MIMIC_OCR_SCALE = 3                     # 价格行放大倍数（放大才读得到左边两列 ✓）
+
+
+def _mimic_read_prices(bot, log=None, rounds=5, sec=0.8):
+    """读四列价格 -> ([(cx, 草数)...], rounds)
+
+    ⚠ 两级（PC 同款）：① **放大 3 倍**再 OCR（整屏只读到 2/4 个 ⇒ 必须放大）
+                     ② 放大失败 ⇒ 退回整帧 OCR 的纯数字条目
+    """
+    import re as _re
+    for rd in range(1, rounds + 1):
+        if rd > 1:
+            _sleep(bot, sec)
+        try:
+            _invalidate(bot)
+        except Exception:           # noqa: BLE001
+            pass
+        try:
+            bot.snap('bp')
+        except Exception:           # noqa: BLE001
+            pass
+
+        out = []
+        # ① 放大 OCR（走 _ocr() 直吃临时 PNG —— 端侧 bot.ocr(img=) 会把带当整帧 ✗）
+        try:
+            _zoom = _ocr_zoom_file(bot, MIMIC_PRICE_Y - 50, MIMIC_PRICE_Y + 53,
+                                   MIMIC_OCR_SCALE, 'mimic')
+        except Exception as _e:     # noqa: BLE001
+            _zoom = []
+            if log is not None:
+                log.append({'mimic': 'price_zoom_err', 'round': rd,
+                            'e': repr(_e)[:70]})
+        for (cx, txt, _cy, conf) in (_zoom or []):
+            m = _re.fullmatch(r'#?(\d{1,2})', str(txt).strip())   # 放大后常读成 #8
+            if not m:
+                continue
+            out.append((cx, int(m.group(1))))
+        # ② 整帧兜底
+        if not out:
+            try:
+                it = _items(bot)
+            except Exception:       # noqa: BLE001
+                it = []
+            for t in it:
+                s = (t.get('text') or '').strip()
+                cy = t.get('cy') or 0
+                if not _re.fullmatch(r'\d{1,2}', s):
+                    continue
+                if not (MIMIC_PRICE_Y - 39 <= cy <= MIMIC_PRICE_Y + 39):
+                    continue
+                out.append((t.get('cx') or 0, int(s)))
+        if out:
+            out.sort()
+            if log is not None:
+                log.append({'mimic': 'prices_ok', 'round': rd, 'prices': out,
+                            'zoomed': bool(_zoom)})
+            return out, rd
+    return [], rounds
+
+
+def _nearest_price_x(bot, card_x):
+    """从**价格行 OCR** 反推这一列的中心 x（读不到返回 None）
+
+    ⚠ 为什么不干脆点 MIMIC_CARD_X：那四个是 **PC 720 系 ×1.5** 的推算值，
+      而价格数字是**每帧现读**的 ⇒ 用它反推列心，天然自适应 ✓
+      （价格行与商品卡同列，实测 y 差 55 参考像素，x 基本一致 ✓）
+    """
+    try:
+        prices, _r = _mimic_read_prices(bot, None, rounds=1, sec=0.0)
+    except Exception:       # noqa: BLE001
+        return None
+    if not prices:
+        return None
+    try:
+        _x, _v = min(prices, key=lambda t: abs(t[0] - card_x))
+    except Exception:       # noqa: BLE001
+        return None
+    return int(_x) if abs(int(_x) - int(card_x)) <= 60 else None
+
+def _mimic_buy_one(bot, log, card_x):
+    """买**一件**：点卡 → 详情页 → 点右下角价格按钮 → 关结果框 -> bool
+
+    ⚠ 两道不盲点闸门（PC 口径，都是踩过的）：
+      · 详情页**没认出来** 且 **也没找到购买键** ⇒ **不点**（放弃这一件）
+        —— 面板还没打开时点 (879,1580) 会落在棋盘上 = 乱点 ✗
+      · 确定/返回 是**结果框**的按钮，**绝不当成购买键**（会白关一次结果框 ✗）
+    """
+    # ⚠ 商品卡是**美术格子**，但**价格数字 OCR 读得到**（`_mimic_read_prices` 已读）
+    #   ⇒ 价格行的 cx 就是那一列的中心 ⇒ **优先点认到的那一列**，读不到才用 MIMIC_CARD_X ✓
+    _px = _nearest_price_x(bot, card_x)
+    _tx = _px if _px is not None else card_x
+    bot.tap_dlg(_tx, MIMIC_CARD_Y, wait=2.0)
+    log.append({'mimic': 'tap_card', 'x': _tx, 'y': MIMIC_CARD_Y,
+                'src': 'price_ocr' if _px is not None else 'anchor_fallback'})
+
+    det = _find_text_btn(bot, ('尚未拥有', '已拥有', '未拥有'), 300, 750)
+
+    btn = None
+    for rd in range(1, 4):
+        if rd > 1:
+            try:
+                _sleep(bot, 0.7)
+            except Exception:       # noqa: BLE001
+                pass
+            try:
+                _invalidate(bot)
+            except Exception:       # noqa: BLE001
+                pass
+        it = _items(bot)
+        best = None
+        for t in it:
+            s = (t.get('text') or '').strip()
+            cy = t.get('cy') or 0
+            if s in ('确定', '返回'):
+                continue                    # ⚠ 别把结果框按钮当购买键 ✗
+            if s not in ('1', '2', '4', '8', '16', '免费'):
+                continue
+            if not (MIMIC_BUY_Y_RANGE[0] <= cy <= MIMIC_BUY_Y_RANGE[1]):
+                continue
+            if (t.get('cx') or 0) < 570:    # ⚠ 左边是「取消追踪」⇒ 排除 ✓（PC 380 ×1.5）
+                continue
+            best = (t.get('cx'), t.get('cy'), s)
+            break
+        if best:
+            btn = best
+            break
+    if btn:
+        at = (btn[0], btn[1])
+        src = 'ocr'
+    else:
+        at = MIMIC_BUY_BTN
+        src = 'fallback'
+    log.append({'mimic': 'detail', 'has_detail': bool(det),
+                'buy_at': list(at), 'src': src})
+    if det is None and not btn:
+        say('      · ⚠ 详情页没认出来、也没找到购买键 ⇒ **不盲点**（放弃这一件）')
+        return False
+
+    bot.tap_dlg(at[0], at[1], wait=2.4)
+    log.append({'mimic': 'tap_buy', 'at': list(at)})
+
+    # 关结果框（4 轮；关不掉**如实记**，但买是买到了 ✓）
+    for rd in range(1, 5):
+        if rd > 1:
+            try:
+                _sleep(bot, 0.8)
+            except Exception:       # noqa: BLE001
+                pass
+            try:
+                _invalidate(bot)
+            except Exception:       # noqa: BLE001
+                pass
+        p = _find_text_btn(bot, ('返回', '确定'), 840, 1350)
+        if p:
+            bot.tap_dlg(p[0], p[1], wait=2.0)
+            log.append({'mimic': 'close_reward', 'at': [p[0], p[1]],
+                        'text': p[2], 'round': rd})
+            return True
+    log.append({'mimic': 'close_reward_fail'})
+    return True         # 买是买到了；结果框没关掉**如实记**（不假装 ✓）
+
+
+def mimic_flow(bot, log, flags=None):
+    """金属/机巧宝箱怪：**只买第 1 列（装备）且只买 8 草**
+
+    -> {'acts': [...], 'bought': [...], 'skip': None|'no_prices'|...}
+
+    ⚠ 三条不买的出口（每条都关面板、都**算正常结束**，不是失败 ✓）：
+        · 读不到价格 ⇒ 不盲点
+        · 装备列价格 ≠ 8 ⇒ 不买（用户口径「只买 8 草的装备」）
+        · 幸运草 < 8 ⇒ 不买（钱不够游戏会弹充值面板 ✗）
+    ⚠ 幸运草读法走 explore_loop.clover_count（与摇色子闸门**同一份判据** ⇒ 不会两边漂移 ✓）
+    """
+    out = {'acts': [], 'bought': [], 'skip': None}
+    b = _proxy(bot)
+
+    prices, rounds = _mimic_read_prices(b, log)
+    if not prices:
+        log.append({'mimic': 'panel_missing_or_timeout', 'rounds': rounds})
+        say('      · ⚠ 宝箱怪面板读不到商品/价格 ⇒ 不盲点、关面板（下轮再来）')
+        close_panel(b, log, 'mimic_nopanel')
+        out['skip'] = 'no_prices'
+        return out
+    say('      · 宝箱怪面板：%d 件商品，价格（x,草）= %s' % (len(prices), prices))
+
+    eq_col = MIMIC_EQUIP_COL
+    eq_x = MIMIC_CARD_X[eq_col]
+    eq_price = None
+    if prices:
+        _px, _pv = min(prices, key=lambda t: abs(t[0] - eq_x))
+        eq_price = _pv
+    log.append({'mimic': 'equip_col', 'col': eq_col, 'card_x': eq_x,
+                'price': eq_price, 'prices': prices, 'need': MIMIC_TARGET_PRICE})
+
+    if eq_price != MIMIC_TARGET_PRICE:
+        say('      · 装备列（第 %d 列）价格是 %s，不是 %d 草 ⇒ **不买**'
+            % (eq_col + 1, eq_price, MIMIC_TARGET_PRICE))
+        out['skip'] = 'equip_not_target_price'
+        close_panel(b, log, 'mimic_price')
+        return out
+    say('      · 装备列（第 1 列 x=%d）= %d 草 ⇒ **买它**（只买装备 ✓）'
+        % (eq_x, eq_price))
+
+    # ⭐ 幸运草闸门（**与摇色子同一份判据**）
+    try:
+        import explore_loop as _EL
+        clv = _EL.clover_count(_items(b))
+    except Exception:       # noqa: BLE001
+        clv = None
+    log.append({'mimic': 'clover', 'now': clv, 'need': MIMIC_TARGET_PRICE})
+    if clv is not None and clv < MIMIC_TARGET_PRICE:
+        say('      · ⚠ 幸运草 %d < %d ⇒ **不买**（只关面板 ✓）'
+            % (clv, MIMIC_TARGET_PRICE))
+        out['skip'] = 'low_clover'
+        close_panel(b, log, 'mimic_lowclover')
+        return out
+
+    if _mimic_buy_one(b, log, eq_x):
+        out['bought'].append(eq_x)
+        out['acts'].append('buy@%d' % eq_x)
+        say('      · 买到一件（x=%d，%d 草）✓' % (eq_x, MIMIC_TARGET_PRICE))
+    else:
+        say('      · x=%d 这件没买成（见日志）' % eq_x)
+
+    # 收尾：面板还在 ⇒ 万能点位 ✓
+    close_panel(b, log, 'mimic_tail')
+    log.append({'mimic': 'done', 'bought': out['bought'], 'acts': out['acts']})
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ⑤ 传承祭坛（SpecialSpot=4）→ 面板标题「**传承祭坛**」
+#    用户口径（PC 原文，2026-10-11）：
+#      「**直接点右下角的三万买了就行**」
+#      「**识别一下，是30000就买，不然不买**」
+#    ⇒ 判据**只看右下角价格**：== 30000 就买（用默认选中的第 1 件），否则不买 ✓
+#    ⚠ 与勇者之墓的区别：那边是**三选一奖励**；这边是**选自己的装备 + 花金币激活传承**
+#    ⚠ 面板结构（PC 实采）：装备网格 3 行 × 6 列 = 18 件（**你已有的装备**，不是新商品 ✓）
+# ──────────────────────────────────────────────────────────────────────────────
+SHRINE_GX0 = 167            # 第 1 列中心（PC 111 ×1.5）
+SHRINE_GY0 = 933            # 第 1 行中心（PC 622 ×1.5）
+SHRINE_PITCH_X = 149        # 列距（PC 99 ×1.5）
+SHRINE_PITCH_Y = 150        # 行距（PC 100 ×1.5）
+SHRINE_ROWS = 3
+SHRINE_COLS = 6
+SHRINE_PRICE = 30000        # ⭐ **只买 30000 这档**（用户口径 ✓）
+SHRINE_PRICE_XY = (902, 1362)    # 「30000」文字中心（PC (601,908) ×1.5 ✓）
+SHRINE_BUY_XY = (891, 1364)      # 价格按钮**点击点**（PC (594,909) ×1.5）
+SHRINE_X_XY = (942, 503)         # ✗ 关闭（PC (628,335) ×1.5）
+SHRINE_FILTER_XY = (236, 1362)   # 「筛选」（**不点** —— 用户没说筛 ✓）
+SHRINE_REFRESH_XY = (375, 1362)  # ↻ 刷新（**不点** ✓）
+SHRINE_TITLE = '传承祭坛'
+
+
+def shrine_cells():
+    """18 个装备格的中心（3 行 × 6 列）—— 只用于诊断/门禁，流程用默认选中 ✓"""
+    return [(SHRINE_GX0 + c * SHRINE_PITCH_X, SHRINE_GY0 + r * SHRINE_PITCH_Y)
+            for r in range(SHRINE_ROWS) for c in range(SHRINE_COLS)]
+
+
+def _shrine_price_xy(bot):
+    """右下角那个价格数字的 (cx, cy)；读不到返回 (None, None)
+
+    ⚠ 复用 `_shrine_price` 的同一条窗口判据（x >= 840、按 |cx-902| 取最近），
+      只是这里要**坐标**而不是数值 ⇒ 不另立一套判据，避免两边漂移 ✗
+    """
+    try:
+        # v2.60: same fix as _shrine_price -- compute the band, do not hardcode
+        #   (SHRINE_PRICE_XY is DIALOG-frame; bot.ocr wants REFERENCE-frame).
+        _c2 = 0
+        try:
+            _c2 = int(dlg_shift() or 0)
+        except Exception:       # noqa: BLE001
+            _c2 = 0
+        _py2 = int(SHRINE_PRICE_XY[1]) - _c2
+        its = bot.ocr(band=(max(0, _py2 - 130), min(1920, _py2 + 130)),
+                      tag='shrine_price_xy')
+    except Exception:       # noqa: BLE001
+        return (None, None)
+    cands = []
+    for t in (its or []):
+        s = str(t.get('text') or '').strip()
+        cx = int(t.get('cx') or 0)
+        cy = int(t.get('cy') or 0)
+        if cx < 700:
+            continue
+        d = ''.join(ch for ch in s if ch.isdigit())
+        if not d:
+            continue
+        if int(d) != SHRINE_PRICE:
+            continue
+        cands.append((abs(cx - SHRINE_PRICE_XY[0]), cx, cy))
+    if not cands:
+        return (None, None)
+    cands.sort()
+    return (int(cands[0][1]), int(cands[0][2]))
+
+def _shrine_price(bot, log=None):
+    """读右下角价格（OCR）-> int 或 None
+
+    ⚠ 只认 x ≥ 840 的数字（PC 560 ×1.5）—— 左边「筛选/刷新」那片数字会干扰 ✓
+    ⚠ 多个候选按 |cx − 902| 排序取最近的（价格就写在那个位置 ✓）
+    """
+    # v2.58: band was a hardcoded 120px strip (1305,1425) -> any layout drift
+    #   made price unreadable -> price=None -> "not buying this round".
+    #   Widen to the whole lower half and pick the number nearest the anchor.
+    try:
+        # v2.60: the band MUST be computed, not guessed.
+        #   SHRINE_PRICE_XY is in the DIALOG frame (dlg y=1362).
+        #   bot.ocr(band=...) expects REFERENCE-frame y => 1362 - C = 1153.
+        #   The old band (1305,1425) was the dlg y used as ref y => missed it
+        #   by ~150px => price=None => "not buying this round".
+        _c = 0
+        try:
+            _c = int(dlg_shift() or 0)
+        except Exception:       # noqa: BLE001
+            _c = 0
+        _py = int(SHRINE_PRICE_XY[1]) - _c
+        _y0, _y1 = max(0, _py - 130), min(1920, _py + 130)
+        its = bot.ocr(band=(_y0, _y1), tag='shrine_price')
+    except Exception as e:      # noqa: BLE001
+        if log is not None:
+            log.append({'shrine': 'price_ocr_fail', 'e': repr(e)[:90]})
+        return None
+    cands = []
+    for t in (its or []):
+        s = str(t.get('text') or '').strip()
+        cx = int(t.get('cx') or 0)
+        if cx < 840:
+            continue
+        d = ''.join(ch for ch in s if ch.isdigit())
+        if d:
+            cands.append((abs(cx - SHRINE_PRICE_XY[0]), int(d), s, cx))
+    out = None
+    if cands:
+        cands.sort()
+        out = cands[0][1]
+    if log is not None:
+        log.append({'shrine': 'price_read', 'value': out, 'band': (_y0, _y1),
+                    'cands': [(c[1], c[3]) for c in cands][:4]})
+    return out
+
+
+def _shrine_close(bot, log, wait=1.6):
+    """关祭坛面板；**先确认它还在**（游戏买成功会自己 PopAllPopPanel ✓）"""
+    try:
+        _it = _items(bot)
+    except Exception as e:      # noqa: BLE001
+        log.append({'shrine': 'close_check_fail', 'e': repr(e)[:80]})
+        return
+    if not (_has(_it, SHRINE_TITLE) or _has(_it, '选择装备')):
+        log.append({'shrine': 'already_closed', 'note': '面板已自己关（源码 PopAllPopPanel ✓）'})
+        return
+    try:
+        # ⭐ 关闭符**文字优先**（× / X / 关闭），读不到才用 SHRINE_X_XY 兜底 ✓
+        _hit = None
+        for _t in (_it or []):
+            if str(_t.get('text') or '').strip().replace(' ', '') in (
+                    '×', 'X', 'x', '✕', '✖', '关闭'):
+                _hit = _t
+                break
+        if _hit is not None:
+            _ax, _ay = int(_hit['cx']), int(_hit['cy'])
+            _asrc = 'ocr'
+        else:
+            _ax, _ay = SHRINE_X_XY
+            _asrc = 'anchor_fallback'
+        bot.tap_dlg(_ax, _ay, wait=wait)
+        log.append({'shrine': 'close_x', 'at': [_ax, _ay], 'src': _asrc})
+    except Exception as e:      # noqa: BLE001
+        log.append({'shrine': 'close_x_fail', 'e': repr(e)[:80]})
+    try:
+        _it2 = _items(bot)
+        # v2.53：关面板**不靠标题可见**（弹窗帧判）⇒ 面板真能关掉
+        _closed = close_panel(bot, log, 'shrine_tail', title=SHRINE_TITLE)
+        if not _closed:
+            log.append({'shrine': 'close_ok', 'note': '面板已不在（无需关）'})
+    except Exception as e:      # noqa: BLE001
+        log.append({'shrine': 'close_verify_fail', 'e': repr(e)[:80]})
+        try:
+            close_panel(bot, log, 'shrine_tail2', title=SHRINE_TITLE)
+        except Exception:       # noqa: BLE001
+            pass
+
+
+def shrine_flow(bot, log, flags=None):
+    """传承祭坛：右下角是 **30000** 就买（默认选中的第 1 件），否则只关面板
+
+    ⚠ 「点价格 ⇒ 弹**确认框** ⇒ 点确定才真买」（游戏源码）⇒ **没等到确认框 = 没买到**
+      ⇒ 那种情况 bought=False 并记 no_confirm_dialog（**如实记账**，不冒充 ✓）
+      最常见的原因是**金币不够**（源码：钱不够会弹充值面板 ✗）
+    """
+    out = {'acts': [], 'bought': False, 'skip': None}
+    b = _proxy(bot)
+    it = _items(b)
+    _pl = [t.get('text') for t in (it or [])][:14]
+    if not _has(it, SHRINE_TITLE):
+        log.append({'shrine': 'panel_missing', 'texts': _pl})
+        say('      · ⚠ 读不到「传承祭坛」标题 ⇒ 不盲点、关面板（下轮再来）')
+        close_panel(b, log, 'shrine_nopanel', title=SHRINE_TITLE)
+        out['skip'] = 'no_panel'
+        return out
+
+    price = _shrine_price(b, log)
+    say('      · 传承祭坛面板：右下角价格 = %s（要 %d 才买）' % (price, SHRINE_PRICE))
+    if price != SHRINE_PRICE:
+        say('      · 价格不是 %d ⇒ **不买**（用户口径：是 %d 就买，不然不买 ✓）'
+            % (SHRINE_PRICE, SHRINE_PRICE))
+        out['skip'] = 'price_not_target'
+        log.append({'shrine': 'skip', 'why': 'price_not_target', 'price': price})
+        _shrine_close(b, log)
+        return out
+
+    log.append({'shrine': 'will_buy', 'at': list(SHRINE_BUY_XY), 'price': price})
+    say('      · 价格 = %d ⇒ **买**（点右下角 %s）' % (price, str(SHRINE_BUY_XY)))
+    try:
+        # ⭐ **价格文字优先**：`_shrine_price` 已经把「30000」那颗 OCR 出来了，
+        #   它的 cx/cy 就是按钮上的数字 ⇒ 点它比点 SHRINE_BUY_XY（PC ×1.5 推算）更准 ✓
+        #   读不到才退回 SHRINE_BUY_XY（1080 参考系、过 RefMapper）✓
+        # v2.61 FIX: _shrine_price_xy() returns REFERENCE-frame coords
+        #   (from bot.ocr), but tap_dlg() expects DIALOG-frame.
+        #   Measured: ref(903,1209) via tap() -> device y1929 OK;
+        #   via tap_dlg() -> y1681, off by 248px => tap lands nowhere
+        #   => no confirm dialog => bought=False.
+        _sx, _sy = _shrine_price_xy(b)
+        if _sx is None:
+            b.tap_dlg(SHRINE_BUY_XY[0], SHRINE_BUY_XY[1], wait=2.0)
+            _at, _src = tuple(SHRINE_BUY_XY), 'anchor_fallback'
+        else:
+            b.tap(_sx, _sy, wait=2.0)
+            _at, _src = (_sx, _sy), 'price_ocr'
+        log.append({'shrine': 'buy_at', 'at': _at, 'src': _src})
+        out['acts'].append('buy@%s' % (_at,))
+        out['bought'] = True
+        say('      · 已点购买 ⇒ 等结果')
+    except Exception as e:      # noqa: BLE001
+        log.append({'shrine': 'buy_tap_fail', 'e': repr(e)[:90]})
+        out['skip'] = 'tap_fail'
+        return out
+
+    _had_confirm = False
+    try:
+        _had_confirm = bool(_confirm(b, log, 'shrine_buy'))
+    except Exception as _ce:    # noqa: BLE001
+        log.append({'shrine': 'confirm_fail', 'e': repr(_ce)[:90]})
+    log.append({'shrine': 'confirm_step', 'got': _had_confirm,
+                'note': '源码：点价格 ⇒ 弹确认框 ⇒ 点「确定」才真买 ✓'})
+    if out['bought'] and not _had_confirm:
+        out['bought'] = False
+        out['skip'] = 'no_confirm_dialog'
+        say('      · ⚠ 点完价格**没等到确认框** ⇒ 多半金币不够（源码：钱不够弹充值）'
+            '⇒ **不算买到**（如实记账 ✓）')
+
+    _shrine_close(b, log)
+    log.append({'shrine': 'done', 'bought': out['bought'], 'acts': out['acts']})
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ⑥ 面板标题别名 → 规范方块名（PC SPECIAL_ALIAS 的等价物）
+#   ⚠ 为什么单独一张表：同一个面板在**图上**和**面板标题**上叫不同名字，
+#     而 popups() 里所有判据都是按名字比 ⇒ 不归一就必然漏 ✗
+#     PC 踩的连环坑（原文）：
+#       ① t not in act_on ⇒ 走无视支（盲点 X 关掉）✗
+#       ② 只把「石碑」加进 act_on ⇒ 还是不算（t 是「石板」）✗
+#       ③ elif '预言石碑' in t ⇒ 仍不匹配（**碑 ≠ 板**）⇒ 掉进 else
+#          ⇒ **拿旅行商人流程去点预言面板** ⇒ 真机日志显示**买了 4 次** ✗✗✗
+#   ⇒ 口径：alias → 规范名；规范名 = 数据表 Area_Spot.Name（= 图上那个名字 ✓）
+#   ⚠ 新增别名时**只改这张表**（act_on / elif / special 都不用动）✓
+# ──────────────────────────────────────────────────────────────────────────────
+SPECIAL_ALIAS = {
+    '预言石板': '预言石碑',      # 面板标题（真机 OCR conf=0.99）→ 方块名（数据表）
+    '英灵使者': '勇者之墓',      # 面板标题（relic_panel 实测）→ 方块名
+    '限时超值礼包': '限时礼包',   # 面板标题（gift_free1 实测）→ 方块名
+}
+
+
+def canon_name(t):
+    """面板/地块名 → **规范方块名**（见 SPECIAL_ALIAS；不在表里 ⇒ 原样返回 ✓）"""
+    s = str(t or '')
+    for _al, _ca in SPECIAL_ALIAS.items():
+        if _al in s:
+            return _ca
+    return s
