@@ -217,6 +217,9 @@ public class CaptureService extends Service {
         return dm.densityDpi;
     }
 
+    /** v2.87：慢路径中转缓冲（复用，见 onFrame 里那段注释） */
+    private byte[] sloBuf;
+
     /** ImageReader 回调：转 Bitmap（处理 rowStride 填充） */
     private void onFrame(ImageReader ir) {
         Image img = null;
@@ -254,8 +257,14 @@ public class CaptureService extends Service {
                     AppLog.i("取帧走**慢路径**（行距填充）：w=" + w + " rowStride=" + rowStride
                             + " 期望=" + (w * 4) + " ⇒ 已按同源转换（v1.31 修 R↔B 互换）");
                 }
-                byte[] tight = new byte[w * h * 4];
-                for (int y = 0; y < h; y++) {
+                // !! v2.87：慢路径的**中转缓冲复用**（原写法每帧 new 13.5 MB）
+                //   与 FrameStore 的退休队列一起，把每帧的分配从 27 MB 降到 0
+                //   （真机 00:24 被 lmkd 杀掉时 RSS 3.4 GB，见 FrameStore 那段注释）
+                if (sloBuf == null || sloBuf.length != w * h * 4) {
+                    sloBuf = new byte[w * h * 4];
+                }
+                byte[] tight = sloBuf;
+                java.util.Arrays.fill(tight, (byte) 0);                for (int y = 0; y < h; y++) {
                     int pos = y * rowStride;
                     if (pos >= buf.limit()) {
                         break;

@@ -39,13 +39,56 @@ public final class FrameStore {
     private static volatile Bitmap latest;
     private static volatile long stampMs;
 
+    // !! v2.87【帧 Bitmap 的**有界回收**】—— 2026-10-31 00:24 被 lmkd 杀掉的根因
+    //   ---- 真机铁证 ----
+    //     00:24:05 lowmemorykiller: Kill com.fantasy.autoexplore (11970),
+    //       oom_score_adj 100 to free 3438512kB rss  <= RSS 3.4 GB
+    //     00:24:06 ActivityManager: ... has died: vis FGS
+    //     设备 MemTotal 只有 4034432 kB（4 GB）
+    //   ---- 病 ----
+    //     CaptureService 每帧 Bitmap.createBitmap(1280x2640, ARGB_8888) = 13.5 MB，
+    //     只为塞进 latest；换帧时旧的那张**只是丢引用**，从不 recycle()，
+    //     而原生 Bitmap 内存要等 GC 才回，GC 又跟不上截图速率
+    //     => 3.4 GB / 13.5 MB 约 252 帧，正好是 22 分钟那个量级 X
+    //   ---- 修法 ----
+    //     退休帧进**有界环形队列**，超过 RETIRE_MAX 就 recycle() 最老的。
+    //     保留 6 代宽限（每帧 2~3 秒 => 约 15 秒）给正在读帧的线程，
+    //     内存上限 6 x 13.5 MB 约 81 MB（对比原来的无限增长）
+    //   !! 不能只保留 1~2 代：Python 侧一次 OCR 要 2 秒，宽限太短会踩到已 recycle 的帧 X
+    private static final int RETIRE_MAX = 6;
+    private static final java.util.ArrayDeque<Bitmap> RETIRED =
+            new java.util.ArrayDeque<Bitmap>();
+
+    /** 把上一帧挪进退休队列；超过上限就 recycle 最老的（必须在 set() 的同步块里调） */
+    private static void retireLocked(Bitmap old) {
+        if (old == null || old.isRecycled()) {
+            return;
+        }
+        RETIRED.addLast(old);
+        while (RETIRED.size() > RETIRE_MAX) {
+            Bitmap dead = RETIRED.pollFirst();
+            if (dead != null && dead != latest && !dead.isRecycled()) {
+                try {
+                    dead.recycle();
+                } catch (Throwable ignored) {
+                    // 已经被别处回收/正在用 => 放弃这一张，绝不因为回收抛异常
+                }
+            }
+        }
+    }
+
     private FrameStore() {
     }
 
     /** 写入最新帧（**自动涂掉悬浮条**）；返回真正存下来的那张 */
     public static void set(Bitmap bmp) {
-        latest = maskOverlay(bmp);
-        stampMs = System.currentTimeMillis();
+        // !! v2.87：换帧时把**上一帧**挪进退休队列（有界回收，见 RETIRE_MAX 那段）
+        synchronized (RETIRED) {
+            Bitmap prev = latest;
+            latest = maskOverlay(bmp);
+            stampMs = System.currentTimeMillis();
+            retireLocked(prev);
+        }
     }
 
     /** 没有帧时返回 null（调用方必须判空） */

@@ -2869,7 +2869,7 @@ try:
           'ByteBuffer rb = ByteBuffer.wrap(row);' not in _cap31
           and 'bmp.setPixels(pixels, 0, w, 0, 0, w, h);' not in _cap31)
     check('v1.31 ② 慢路径改成"去填充 + `copyPixelsFromBuffer()`"（与快路径同源 ✓）',
-          'byte[] tight = new byte[w * h * 4];' in _cap31
+          'byte[] tight = sloBuf;' in _cap31   # v2.87: 由每帧 new 改成复用（语义不变）
           and 'bmp.copyPixelsFromBuffer(ByteBuffer.wrap(tight));' in _cap31)
     check('v1.31 ③ 走哪条路 + 行距**暴露出来**（`CaptureService.slowPath()` / `slowRowStride()` ✓）',
           'public static boolean slowPath()' in _cap31
@@ -11294,6 +11294,66 @@ try:
           _run86(set()) == [(1, 1), (2, 2)])
 except Exception as _e86:       # noqa: BLE001
     check('v2.86 守门可运行（%r）' % (_e86,), False)
+print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.87【背包升星 UnboundLocalError(_tab) ＋ 帧 Bitmap 无界增长被 lmkd 杀掉】
+#
+#   ---- 事故 A：背包升星每次中断 ----
+#     真机铁证（2026-10-31 00:23:10）：
+#       ⚠ 背包升级异常：UnboundLocalError("local variable '_tab' referenced before assignment")
+#     病：_tab 只在 `if not _ok_tab:` 分支里赋值，可下一行 `if _tab:` 无条件读它
+#         => _bag_switch_tab 成功（_ok_tab=True）就抛异常 => 装备升星从来没跑成功
+#     与 v2.81（变量 c 在下面才赋值）同一族 => 局部变量必须先初始化
+#
+#   ---- 事故 B：跑 22 分钟后被系统杀 ----
+#     真机铁证：
+#       00:24:05 lowmemorykiller: Kill com.fantasy.autoexplore (11970), oom_score_adj 100
+#                to free 3438512kB rss   <= RSS 3.4 GB
+#       00:24:06 ActivityManager: ... has died: vis FGS
+#       设备 MemTotal 4034432 kB（4 GB）
+#     病：CaptureService 每帧 Bitmap.createBitmap(1280x2640 ARGB_8888)=13.5 MB，
+#         换帧只丢引用、从不 recycle；慢路径还有每帧一份 13.5 MB 的 byte[]
+#         3.4 GB / 13.5 MB 约 252 帧，正好是 22 分钟那个量级
+#     修：FrameStore 退休帧有界回收（保留 6 代宽限给读帧线程）＋ 慢路径缓冲复用
+try:
+    _src87 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _code87 = chr(10).join(_ln for _ln in _src87.split(chr(10))
+                           if not _ln.strip().startswith('#'))
+
+    _i_ok87 = _code87.find("_ok_tab = _bag_switch_tab")
+    _i_init87 = _code87.find('_tab = None', _i_ok87 if _i_ok87 >= 0 else 0)
+    _i_read87 = _code87.find('if _tab:', _i_ok87 if _i_ok87 >= 0 else 0)
+    _ord87 = (_i_ok87 >= 0 and _i_init87 > _i_ok87 and _i_read87 > _i_init87)
+    check('v2.87 A(1) _tab 在**使用点之前**初始化'
+          '（旧写法只在 if not _ok_tab 里赋值 => _ok_tab 成功就 UnboundLocalError X）'
+          ' · 位置 ok=%s init=%s read=%s' % (_i_ok87, _i_init87, _i_read87), _ord87)
+
+    _seg87 = _code87[_i_ok87:_i_init87] if _ord87 else ''
+    check('v2.87 A(2) 撤回守门：_ok_tab 之后、初始化之前**不能再有** if not _ok_tab 就赋值 _tab 的写法'
+          '（即 _tab 的赋值不能只发生在分支里）· %s'
+          % ('干净 OK' if ('_tab = _bag_find' not in _seg87) else '仍有'),
+          '_tab = _bag_find' not in _seg87)
+
+    # ── Java 侧（内存）：只做结构守门，行为由真机 MemInfo 观察 ----
+    _fs87 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/FrameStore.java'),
+                    encoding='utf-8').read()
+    _cs87 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/CaptureService.java'),
+                    encoding='utf-8').read()
+    check('v2.87 A(3) FrameStore 退休帧**有界回收**（RETIRE_MAX + recycle）'
+          '（否则每帧 13.5 MB 只丢引用 => 22 分钟后 RSS 3.4 GB 被 lmkd 杀 X）· %s'
+          % ('有 OK' if ('RETIRE_MAX' in _fs87 and '.recycle()' in _fs87) else '缺'),
+          'RETIRE_MAX' in _fs87 and '.recycle()' in _fs87)
+
+    check('v2.87 A(4) 退休队列保留 >= 3 代宽限'
+          '（只留 1~2 代 => 一次 OCR 要 2 秒，会踩到已 recycle 的帧 X）· RETIRE_MAX=%s'
+          % (('6' if 'RETIRE_MAX = 6' in _fs87 else '?'),), 'RETIRE_MAX = 6' in _fs87)
+
+    check('v2.87 A(5) 慢路径中转缓冲**复用**（不再每帧 new 13.5 MB）· %s'
+          % ('有 OK' if ('sloBuf' in _cs87 and 'byte[] tight = sloBuf;' in _cs87) else '缺'),
+          'sloBuf' in _cs87 and 'byte[] tight = sloBuf;' in _cs87)
+except Exception as _e87:       # noqa: BLE001
+    check('v2.87 守门可运行（%r）' % (_e87,), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

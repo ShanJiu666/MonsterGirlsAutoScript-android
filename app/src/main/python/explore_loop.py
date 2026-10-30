@@ -3067,6 +3067,17 @@ def bag_upgrade(b, log, tag='bag'):
         #    `_bag_switch_tab('装备')`（实测弹窗帧 @dlg(346,314) ✓）；旧写法在归一化帧里
         #    找「装备」恒失败 ⇒ 退锚点 (370,360)（真机上那里是别的东西 ✗））
         _ok_tab = _bag_switch_tab(b, '装备', log=log, tag=tag)
+        # !! v2.87 修【UnboundLocalError: local variable _tab】
+        #   真机铁证（2026-10-31 00:23:10）：
+        #     背包升级异常：UnboundLocalError(local variable _tab referenced before assignment)
+        #   ---- 病 ----
+        #     _tab 只在 not _ok_tab 那个分支里赋值，可下一行 if _tab 无条件读它
+        #     => 只要 _bag_switch_tab 成功（_ok_tab=True）就抛异常
+        #     => 装备升星每次都在这里中断（bag_every=10 那张图该升星没升）X
+        #   ---- 与 v2.81 同一族 ----
+        #     v2.81 是 c 在下面才赋值；本条是 _tab 只在 if 分支里赋值
+        #     => 教训：局部变量必须在使用点之前先初始化（本仓已第 2 次踩）
+        _tab = None
         if not _ok_tab:
             _tab = _bag_find(b, ('装备', '装备栏'), prefer='top', tag=tag + '_tab')
         if _tab:
