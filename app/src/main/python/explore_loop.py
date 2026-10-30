@@ -6482,6 +6482,32 @@ def popups(b, items, log, ctx=None):
                 else:
                     _panel_tap(b, 275, 1507, 'norm', log=log, what='返回(兜底)')
             return 'handled'
+        # !! v2.85【派遣成功 => 记住这一格，本图不再点它】
+        #   ---- 真机铁证（2026-10-30 12:25 那把，计划 5,6 3,2 1,1 3,3 1,5）----
+        #     r3-r4 第3步 1,1 紫金格 => 派出一支小队 (slots 3->2)
+        #     r5/r6/r7 每轮又是 purple_prefer_explore cell=1,1 + 点(275,736)
+        #       => panel_gone => return handled，slots 一直 2（没再派出）
+        #     r7 same_action_x4 脱困 => nogo_tagged 1,1
+        #     r8 依然 purple_prefer_explore cell=1,1  <= nogo 对这个分支无效
+        #   => 计划永远停在第 3 步，第 4 步（3,3=1,6）一次都没轮到 X
+        #   ---- 病 ----
+        #     紫格分支入口只有 _is_purple and _free_now>0，
+        #     没有任何「这格本图已派过队」的记忆，也不看 nogo/blocked；
+        #     而紫金格派完队不会从盘上消失 => 每轮都被当成新的紫格重入 X
+        #   ---- 修法（用户 2026-10-30 口径：派过一队就算处理完）----
+        #     ① st['purple_sent'] 记住该格 => 后续轮次不再进本分支
+        #     ② 同时写 done（计划层收口）=> 计划才会推进到下一步
+        try:
+            _fl85a = ctx.get('flags') if isinstance(ctx.get('flags'), dict) else {}
+            if _fl85a and _tapped:
+                _rc85 = cell_of(int(_tapped[0]), int(_tapped[1]))
+                if 1 <= _rc85[0] <= 5 and 1 <= _rc85[1] <= 7:
+                    _fl85a.setdefault('purple_sent', set()).add(_rc85)
+                    _fl85a.setdefault('done', set()).add((int(_tapped[0]), int(_tapped[1])))
+                    log.append({'dispatch': 'purple_sent_recorded', 'cell': '%d,%d' % _rc85,
+                                'note': '紫金格派过队 => 本图不再点它（否则每轮重入、计划永远停在原地 X）＋写 done 让计划推进'})
+        except Exception:       # noqa: BLE001
+            pass
         n_free = sum(1 for i in it2 if '空闲' in i['text'])
         say('       · 已派遣一支探索队（上方还剩 %d 个空闲槽）' % n_free)
         status('已派出小队（还剩 %d 个空位）' % n_free)
@@ -6545,10 +6571,26 @@ def popups(b, items, log, ctx=None):
     #       ⚠ 槽满时**不加**这一条 ⇒ 照旧落到战斗分支"槽满就开打" ✓（口径一致）
     #   ## ⚠ 用 `_is_purple`（= `_is_purple_cell`，与 v1.62 那条**同一个判据** ✓）
     #     顶层 sid 是垃圾猜测时靠本轮 `ev_tiles` 兜住 ✓
+    # !! v2.85【紫格分支入口闸门】—— 派过队的格 + nogo 格都不再进本分支
+    #   （r7 已经把 1,1 拉进 nogo，r8 照样重入 => 本分支必须自己看这两项）
+    _fl85 = ctx.get('flags') if isinstance(ctx.get('flags'), dict) else {}
+    _sent85 = _fl85.get('purple_sent') or set()
+    _nogo85 = _fl85.get('nogo_rc') or ()
+    _purple_seen85 = (_tc is not None) and ((_tc in _sent85) or (_tc in _nogo85))
+    if _purple_seen85:
+        _sk85 = _fl85.setdefault('purple_skip_logged', set())
+        if _tc not in _sk85:
+            _sk85.add(_tc)
+            try:
+                log.append({'popup': 'purple_already_handled', 'cell': '%d,%d' % _tc,
+                            'in_sent': _tc in _sent85, 'in_nogo': _tc in _nogo85,
+                            'note': '这格本图已派过队/已拉黑 => 不再走探索分支（否则每轮重入、计划永不推进 X）'})
+            except Exception:   # noqa: BLE001
+                pass
     _expl_entry63 = (fb(items, L['expl'])
                      or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))
-                     or (_is_purple and _free_now > 0))
-    if EXPLORE_DISPATCH and _is_purple and _free_now > 0 and _expl_entry63:
+                     or (_is_purple and _free_now > 0 and not _purple_seen85))
+    if EXPLORE_DISPATCH and _is_purple and _free_now > 0 and not _purple_seen85 and _expl_entry63:
         if not (fb(items, L['expl'])
                 or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))):
             # 命中的是 v1.63 新补的那一条 ⇒ 记一笔（便于日后对账 ✓）

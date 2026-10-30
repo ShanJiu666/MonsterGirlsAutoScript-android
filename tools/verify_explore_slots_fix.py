@@ -7121,7 +7121,10 @@ try:
           '（治"面板标题被认成「战斗事件」⇒ 探索分支的门不命中 ⇒ 掉进战斗分支"）'
           '＋ ⚠ 槽满时**不加**这一条（照旧落战斗分支"槽满就开打" ✓ 口径一致）',
           '_expl_entry63' in _el62
-          and 'or (_is_purple and _free_now > 0))' in _el62
+          # ⚠ v2.85 在这一条**后面**又追加了「这格本图已派过队」的闸门（not _purple_seen85）
+          #   ⇒ v1.63 的语义（紫格 + 有空闲槽 => 进探索分支）**仍然成立**，
+          #   只是多了一道「已处理就不重入」的闸门（不是改断言让它过）
+          and 'or (_is_purple and _free_now > 0' in _el62
           and "'popup': 'purple_prefer_explore'" in _el62)
 except Exception as _e63:       # noqa: BLE001
     check('v1.63 守门可运行（%r）' % (_e63,), False)
@@ -11107,6 +11110,124 @@ try:
               bool(_cp84) and int(_cp84[-1].get('n') or 0) >= 1)
 except Exception as _e84:       # noqa: BLE001
     check('v2.84 守门可运行（%r）' % (_e84,), False)
+print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.85【紫金格派过队后每轮重入 => 计划永远停在原地】
+#
+#   ---- 用户口径（2026-10-30）----
+#     「最初的规划是对的，是执行出问题了」＋ 选「派过一队就算处理完，本图不再点它」
+#   ---- 真机铁证（12:25 那把，计划 5,6 -> 3,2 -> 1,1 -> 3,3 -> 1,5）----
+#     r3-r4    第3步 1,1 紫金格 => 派出一支小队 OK（slots 3->2）
+#     r5/r6/r7 每轮又是 purple_prefer_explore cell=1,1 + 点(275,736) => handled
+#              slots 一直 2（没再派出）
+#     r7       same_action_x4 脱困 => nogo_tagged 1,1
+#     r8       依然 purple_prefer_explore cell=1,1  <= nogo 对这个分支无效
+#     => 计划永远停在第 3 步，第 4 步（3,3=1,6）一次都没轮到
+#   ---- 病 ----
+#     紫格分支入口只有 _is_purple and _free_now>0，
+#     没有「这格本图已派过队」的记忆，也不看 nogo/blocked；
+#     而紫金格派完队不会从盘上消失 => 每轮都被当成新紫格重入
+#   ---- 修法 ----
+#     ① st['purple_sent'] 记住该格 => 后续不再进本分支
+#     ② 同时写 done => 计划层收口，计划才会推进到下一步
+try:
+    import explore_loop as _EL85
+
+    _src85 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _code85 = chr(10).join(_ln for _ln in _src85.split(chr(10))
+                           if not _ln.strip().startswith('#'))
+
+    check('v2.85 A(1) 派遣成功处会记 purple_sent（否则每轮重入 X）· %s'
+          % ('有 OK' if "setdefault('purple_sent', set())" in _code85 else '缺'),
+          "setdefault('purple_sent', set())" in _code85)
+
+    _DONE85 = "setdefault('done', set()).add((int(_tapped[0]), int(_tapped[1])))"
+    check('v2.85 A(2) 记的同时写 done（计划层收口，否则计划永不推进）· %s'
+          % ('有 OK' if _DONE85 in _code85 else '缺'), _DONE85 in _code85)
+
+    check('v2.85 A(3) 紫格分支**两处**都加了 not _purple_seen85'
+          '（入口 _expl_entry63 + if 条件；只加一处 => 照样重入 X）· 出现 %d 次'
+          % _code85.count('_purple_seen85'), _code85.count('_purple_seen85') >= 4)
+
+    check('v2.85 A(4) 闸门同时看 purple_sent **和** nogo_rc'
+          '（r7 拉黑后 r8 照样重入 => 只看 sent 不够）· %s'
+          % ('有 OK' if ("_fl85.get('purple_sent')" in _code85
+                         and "_fl85.get('nogo_rc')" in _code85) else '缺'),
+          "_fl85.get('purple_sent')" in _code85 and "_fl85.get('nogo_rc')" in _code85)
+
+    # ── B 执行级：真跑 popups，喂「已派过队」的夹具 ──
+    import cv2 as _cv85
+    import numpy as _np85
+    _PNG85 = os.path.join(PROJ, '..', '_tmpman', 'plan2', 'frame.png')
+
+    class _B85(object):
+        ocr_grabs = True
+
+        def __init__(self):
+            self.taps = []
+
+        def img(self):
+            if os.path.exists(_PNG85):
+                return _cv85.imread(_PNG85)
+            return _np85.zeros((1920, 1080, 3), 'uint8')
+
+        def img_dlg(self):
+            return self.img()
+
+        def snap(self, *a, **k):
+            pass
+
+        def ocr(self, *a, **k):
+            return []
+
+        def ocr_dlg(self, *a, **k):
+            return []
+
+        def tap(self, x, y, wait=0.0):
+            self.taps.append((int(x), int(y)))
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append((int(x), int(y)))
+
+        def _sleep(self, s):
+            pass
+
+    _CELL85 = _EL85.cell_center(1, 1)
+
+    def _run85(_flags):
+        _lg = []
+        _ctx = {'tapped': _CELL85, 'st': {(1, 1): {'sid': 'S00003_221'}},
+                'slots_free': 2, 'ev_tiles': [], 'marks': {}, 'flags': _flags}
+        try:
+            _EL85.popups(_B85(), [], _lg, _ctx)
+        except Exception as _e:        # noqa: BLE001
+            _lg.append({'exc': repr(_e)})
+        return _lg
+
+    _lg_sent = _run85({'purple_sent': {(1, 1)}})
+    _lg_free = _run85({})
+    _lg_nogo = _run85({'nogo_rc': {(1, 1)}})
+
+    check('v2.85 B(1) 执行级：**已派过队**的格 => 不再出现 purple_prefer_explore'
+          '（事故里 r5/r6/r7/r8 连出 4 次）· log=%s'
+          % ([e.get('popup') for e in _lg_sent if 'popup' in e][:3],),
+          not any(e.get('popup') == 'purple_prefer_explore' for e in _lg_sent))
+
+    check('v2.85 B(2) 执行级：同上会落一条 purple_already_handled（可复盘）· %s'
+          % ([e.get('popup') for e in _lg_sent if 'popup' in e][:3],),
+          any(e.get('popup') == 'purple_already_handled' for e in _lg_sent))
+
+    check('v2.85 B(3) **对照项**：同一夹具去掉 purple_sent => 分支**照样命中**'
+          '（没有这条，B(1) 用"永远不进分支"也能绿 X）· log=%s'
+          % ([e.get('popup') for e in _lg_free if 'popup' in e][:3],),
+          any(e.get('popup') == 'purple_prefer_explore' for e in _lg_free))
+
+    check('v2.85 B(4) 执行级：nogo 里的格同样被挡（r7 拉黑、r8 仍重入 => 必须挡）· log=%s'
+          % ([e.get('popup') for e in _lg_nogo if 'popup' in e][:3],),
+          not any(e.get('popup') == 'purple_prefer_explore' for e in _lg_nogo))
+except Exception as _e85:       # noqa: BLE001
+    check('v2.85 守门可运行（%r）' % (_e85,), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
