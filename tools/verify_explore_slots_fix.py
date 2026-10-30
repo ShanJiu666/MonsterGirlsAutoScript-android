@@ -10993,6 +10993,121 @@ try:
 except Exception as _e83:       # noqa: BLE001
     check('v2.83 守门可运行（%r）' % (_e83,), False)
 print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.84【「限时礼包界面无限循环」—— 闭运算核 9x9 把 X 和红色标题栏粘成一块】
+#
+#   ---- 用户原话（2026-10-30）----
+#     「在限时礼包界面无限循环了」
+#   ---- 模拟器日志铁证（11:55~11:57）----
+#     › 发现限时礼包 · 正在领取…   （每 12 秒一次，连续 10+ 次）
+#     {"gift": "tap_free1", "at": [768, 790]}   <- 第 1 次，got:true（礼包1 领到 ✓）
+#     {"gift": "tap_free1", "at": [769, 1258]}  <- 之后 12 次全是这个坐标
+#     {"gift": "result", "got": false, ...}      <- 13 次 result 里只有 1 次 got=true
+#     {"close": "no_text_btn", "what": "gift_tail"}
+#     {"gift_tail": "close_panel", "n": 0}       <- **面板一次都没关掉**
+#
+#   ---- 病（两层）----
+#     (1) 礼包面板上**没有**「返回/确定/关闭」这类文字按钮
+#         （真机帧 OCR 实测：只有 限时超值礼包/超值礼包1~3/已领取/免费/剩余时间）
+#         => `_univ_close` 认不到 => v2.59 起又禁止盲点万能位 => n=0
+#     (2) v2.79 的 `panel_title_close_x()` 本该兜住这种情况，但它在礼包面板上
+#         **返回 None** => 等于没兜住 ✗
+#         根因：`MORPH_CLOSE` 用 9x9 核，而 X（红底白叉）**和红色标题栏连通** =>
+#           得到一个 734x93 的大连通域 => 被 `54 <= w <= 80` 的尺寸判据整条滤掉 X
+#         实测（同一帧 dlg(1080x1920)）：
+#           k=9 => 只剩 dlg(550,663) 734x93（标题栏+叉粘一起）=> 命中 0 个可用
+#           k=7 => X 独立出来 dlg(875,667) 白/红=0.27 => 正确命中 ✓
+#     => 面板关不掉 => 上层看到 gift_flow 返回非空 acts 就当「完成」
+#        （`acts.append('free1')` 只看"点了一下"，不看"领到没/关掉没"）
+#     => 下一轮又认成「发现限时礼包」=> **无限循环** X
+#
+#   ---- 为什么这跟 v2.79 是同一个坑的两半 ----
+#     v2.79 修「标题行右上角 X」时只在**礼包帧**上验证过（那帧 X 与标题栏分离），
+#     没覆盖「红色标题栏」这一族面板 => 核选大了就整族失效。
+#     !! 教训：形态学核尺寸是**几何判据的一部分**，换面板族必须重验。
+try:
+    _BP84 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+
+    # ── A 结构级：核必须是 7x7（撤回守门：别改回 9）──
+    _i84 = _BP84.find('def panel_title_close_x(')
+    _seg84 = _BP84[_i84:_i84 + 4500] if _i84 >= 0 else ''
+    check('v2.84 A(1) `panel_title_close_x` 的闭运算核是 **7x7**'
+          '（9x9 会把 X 和红色标题栏粘成一块 => 尺寸筛整条滤掉 => 返回 None X） · %s'
+          % ('7x7 OK' if '_np.ones((7, 7)' in _seg84 else '不是 7x7'),
+          '_np.ones((7, 7)' in _seg84)
+
+    check('v2.84 A(2) 撤回守门：那段里**没有** 9x9（改回去 => 礼包/所有红标题栏面板的 X 全消失）· %s'
+          % ('干净 OK' if '_np.ones((9, 9)' not in _seg84 else '仍有 9x9'),
+          '_np.ones((9, 9)' not in _seg84)
+
+    # ── B 执行级：礼包面板真帧 ──
+    _png84 = os.path.join(PROJ, '..', '_tmpman', 'gift_dlg.png')
+    if not os.path.exists(_png84):
+        skip('v2.84 B(1)~B(2) 执行级（缺 %s；复现：screencap 后缩放到 1080x1920）' % _png84)
+    else:
+        import cv2 as _cv84
+        import buypanels as _BPm84
+
+        _IMG84 = _cv84.imread(_png84)
+        _IT84 = [
+            ('限时超值礼包', 541, 666), ('超值礼包1', 278, 739), ('已领取', 771, 822),
+            ('超值礼包2', 278, 937), ('超值礼包3', 278, 1133), ('免费', 790, 1258),
+            ('剩余时间05:57:24', 540, 1341),
+        ]
+        _items84 = [item(_t, _cx, _cy) for _t, _cx, _cy in _IT84]
+
+        class _B84(object):
+            ocr_grabs = True
+
+            def __init__(self):
+                self.taps = []
+                self.state = 'open'
+
+            def img(self):
+                return _IMG84
+
+            def img_dlg(self):
+                return _IMG84
+
+            def snap(self, *a, **k):
+                pass
+
+            def ocr(self, *a, **k):
+                return [] if self.state == 'closed' else [dict(t) for t in _items84]
+
+            def ocr_dlg(self, *a, **k):
+                return [] if self.state == 'closed' else [dict(t) for t in _items84]
+
+            def tap(self, x, y, wait=0.0):
+                self.tap_dlg(x, y, wait)
+
+            def tap_dlg(self, x, y, wait=0.0):
+                self.taps.append((int(x), int(y)))
+                if (int(x), int(y)) == (875, 667):
+                    self.state = 'closed'
+
+            def _sleep(self, s):
+                pass
+
+        _b84 = _B84()
+        _got84 = _BPm84.panel_title_close_x(_b84, title='限时超值礼包', log=[])
+        check('v2.84 B(1) 执行级：礼包面板的 X 被定位到 **(875,667)**（实测白/红=0.27）'
+              '（修复前是 None => close_panel n=0 => 无限循环） · %r' % (_got84,),
+              _got84 == (875, 667))
+
+        _lg84 = []
+        _BPm84.gift_flow(_b84, _lg84)
+        _cp84 = [e for e in _lg84 if e.get('gift_tail') == 'close_panel']
+        check('v2.84 B(2) 端到端：`gift_flow` 跑完面板**真被关掉**（state=%s / taps=%s）'
+              % (_b84.state, _b84.taps),
+              _b84.state == 'closed' and (875, 667) in _b84.taps)
+        check('v2.84 B(2) 端到端：`close_panel` 的 **n >= 1**（事故日志里是 n=0）· %s'
+              % ((_cp84[-1] if _cp84 else None),),
+              bool(_cp84) and int(_cp84[-1].get('n') or 0) >= 1)
+except Exception as _e84:       # noqa: BLE001
+    check('v2.84 守门可运行（%r）' % (_e84,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

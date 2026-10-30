@@ -1580,7 +1580,15 @@ def panel_title_close_x(bot, title=None, log=None, tag='panel_x'):
         _cb0, _cg0, _cr0 = (img[:, :, 0].astype(int), img[:, :, 1].astype(int),
                             img[:, :, 2].astype(int))
         _red = ((_cr0 > 150) & (_cr0 - _cg0 > 70) & (_cr0 - _cb0 > 60)).astype(_np.uint8) * 255
-        _m = cv2.morphologyEx(_red, cv2.MORPH_CLOSE, _np.ones((9, 9), _np.uint8))
+        # !! v2.84【闭运算核 9x9 -> 7x7】—— 2026-10-30 真机铁证
+        #   礼包面板的 X（红底白叉）**和红色标题栏连成一个连通域**：
+        #     k=9 => 只得到 dlg(550,663) 734x93（标题栏+叉），宽 734 远超 80 上限
+        #          => 被尺寸判据整条滤掉 => panel_title_close_x 返回 **None**
+        #          => close_panel n=0 => 礼包面板永远关不掉 => **无限循环** X
+        #     k=7 => X 独立出来 dlg(875,667) 白/红=0.27（正是「标题行右侧」该在的位置）O
+        #   => 核必须**小于**标题栏与叉之间的连接宽度；7 实测分离、9 粘连
+        #   !! 别为了省事改回 9（那会让礼包/所有「红色标题栏面板」的 X 全部消失）
+        _m = cv2.morphologyEx(_red, cv2.MORPH_CLOSE, _np.ones((7, 7), _np.uint8))
         _n, _lb, _st, _ce = cv2.connectedComponentsWithStats(_m, 8)
         _cands = []
         for _i in range(1, _n):
