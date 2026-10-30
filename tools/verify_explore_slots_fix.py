@@ -10057,7 +10057,7 @@ try:
     #   真机铁证（2026-10-27 21:57 map 4）：
     #     order = [3,2 / 1,3 勇者之墓 / 4,5 boss]，give_up_step 摘掉 3,2 后 plan 还剩 2 步
     #     却 finish: blank_board 直接收工 ⇒ 2 步没走 ✗
-    _a7_ok = ("_plan_left = list(st.get('plan') or [])" in _EL78
+    _a7_ok = ("_plan_left" in _EL78
               and 'not pending_buy and not _plan_left' in _EL78)
     check('v2.78 A⑦ blank_board 判据带 not _plan_left'
           '（旧写法只看 had_plan ⇒ 计划剩 2 步也收工 ⇒ 没打到 boss ✗） · %s'
@@ -11228,6 +11228,72 @@ try:
           not any(e.get('popup') == 'purple_prefer_explore' for e in _lg_nogo))
 except Exception as _e85:       # noqa: BLE001
     check('v2.85 守门可运行（%r）' % (_e85,), False)
+print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.86【「完成限时礼包后不退图」—— 计划走完被当成「认不出棋盘」】
+#
+#   ---- 用户原话（2026-10-30）----
+#     「为啥第二张图完成限时礼包后不退图」
+#   ---- 真机铁证（23:06 第 2 张图）----
+#     r4/r5/r6/r7  say「没有目标了，准备退图」，却一轮都没退
+#     {'finish': 'blank_board', 'n': 1} / n: 2 / n: 3
+#     {'map': 1, 'end_reason': 'blank'}
+#     => 「连续 2 张图都认不出棋盘（画面被判"被面板挡住"）」=> 停整局
+#     ⚠ 可棋盘上还有 22~24 格（round 6 board 里数得出来）—— 根本不是"认不出"
+#   ---- 病（两处叠加）----
+#     ① _plan_left 取的是**原始计划**（不按 done 过滤），而 st['plan'] 每轮由 solver
+#        覆盖、走完也不自动清空 => 只要算过一次计划，_plan_left 永远非空
+#        => 「计划走完 + 没目标 => 立刻收工」那道门永远进不去
+#     ② 于是落到 blank_board 的 3 轮耐心；可 blank 的本义是"整盘没识别到"，
+#        这里却拿它判"没目标" => 把"正常收工"误判成"认不出棋盘" => 停整局
+#   ---- 修法 ----
+#     ① _plan_left 与 _rest 同口径（排除已 done）
+#     ② blank 分支前先判：had_plan + 盘上有格子 + 确实没目标 => return 'done'
+#        （从没算出过计划 => 仍走 blank 三轮耐心，保住 v1.58 那道保护）
+try:
+    _src86 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _code86 = chr(10).join(_ln for _ln in _src86.split(chr(10))
+                           if not _ln.strip().startswith('#'))
+
+    check('v2.86 A(1) blank 分支前有「正常收工」判断（targets_done_no_order）· %s'
+          % ('有 OK' if 'targets_done_no_order' in _code86 else '缺'),
+          'targets_done_no_order' in _code86)
+
+    check('v2.86 A(2) 那道判断带 had_plan 与 盘上有格子 两个前提'
+          '（否则会盖掉 v1.58「全雾不许冒充满意收工」的保护 X）· %s'
+          % ('有 OK' if ("st.get('had_plan') and _cells86 > 0" in _code86) else '缺'),
+          "st.get('had_plan') and _cells86 > 0" in _code86)
+
+    check('v2.86 A(3) 撤回守门：_plan_left **不再**是原始计划'
+          '（旧写法会让"计划走完也永远非空"=> 永远不退图 X）· %s'
+          % ('干净 OK' if "_plan_left = list(st.get('plan') or [])" not in _code86 else '仍有'),
+          "_plan_left = list(st.get('plan') or [])" not in _code86)
+
+    # ── B 执行级：把 _plan_left 那段真跑一遍 ──
+    import marks as _mk86
+    _i86 = _src86.find('_plan_left = [p for p in')
+    assert _i86 >= 0
+    _j86 = _src86.find('not in done]', _i86) + len('not in done]')
+    _blk86 = _src86[_i86:_j86]
+
+    def _run86(_done):
+        _g = {'st': {'plan': [(1, 1), (2, 2)]}, 'done': _done, 'marks_mod': _mk86}
+        exec(compile(_blk86, '<pl86>', 'exec'), _g)
+        return _g['_plan_left']
+
+    _all_done86 = {_mk86.cell_center(1, 1), _mk86.cell_center(2, 2)}
+    check('v2.86 B(1) 执行级：计划两步**都走完** => _plan_left 空（事故里它恒非空 X）· %r'
+          % (_run86(_all_done86),), _run86(_all_done86) == [])
+
+    _one_done86 = {_mk86.cell_center(1, 1)}
+    check('v2.86 B(2) 对照项：只走完一步 => 仍剩一步（证明 B(1) 不是"永远空"）· %r'
+          % (_run86(_one_done86),), _run86(_one_done86) == [(2, 2)])
+
+    check('v2.86 B(3) 对照项：一步没走 => 两步都在 · %r' % (_run86(set()),),
+          _run86(set()) == [(1, 1), (2, 2)])
+except Exception as _e86:       # noqa: BLE001
+    check('v2.86 守门可运行（%r）' % (_e86,), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

@@ -10635,7 +10635,21 @@ def one_round(b, log, rnd, prefix, st):
     #     give_up_step: 3,2                摘掉第1步，plan 还剩 2 步
     #     finish: blank_board, had_plan=True   直接收工，2 步没走 ✗
     #   根因：只看 had_plan（这张图算过计划），没看 st['plan'] 剩不剩步
-    _plan_left = list(st.get('plan') or [])
+    # !! v2.86【_plan_left 必须是「还没走的步」，不是原始计划】
+    #   ---- 真机铁证（2026-10-30 23:06 第 2 张图，礼包完成后）----
+    #     r4~r7 say「没有目标了，准备退图」，却一轮都没退；
+    #     blank_board n=1/2/3 => end_reason=blank => 「连续 2 张图认不出棋盘」=> 停整局 X
+    #   ---- 病 ----
+    #     旧写法 list(st.get('plan') or []) 拿的是原始计划（不按 done 过滤）；
+    #     而 st['plan'] 每轮由 solver 覆盖、走完也不会自动清空
+    #     => 只要这张图算过一次计划，_plan_left 就永远非空
+    #     => 下面「计划走完 + 没目标 => 立刻收工」那道门永远进不去 X
+    #     => 落到 blank_board 的 3 轮耐心 => 被判「认不出棋盘」（其实棋盘好好的）X
+    #   ---- 修法 ----
+    #     与 _rest（10863 行）同口径：排除已 done 的步
+    #     （v2.70 的原话就是「计划里还有没走的步 => 不能收工」—— 没走 = 未 done）
+    _plan_left = [p for p in (st.get('plan') or [])
+                  if marks_mod.cell_center(p[0], p[1]) not in done]
     if vis and rnd >= 2 and not marked and not pending_buy and not _plan_left:
         if st.get('had_plan'):
             # ─────────────────────────────────────────────────────────────────────
@@ -11113,6 +11127,26 @@ def one_round(b, log, rnd, prefix, st):
     # ⭐ v1.39：探索模式的记账 + 「先探图」悬浮条提示**已一并移除**（用户定）
     #   —— 这段就是用户目击「还在显示探索」的来源（`status('…没标记，先探图…')`）✓
     if not order and not marked:
+        # !! v2.86【「有格子但没目标」= 正常收工，不是「认不出棋盘」】
+        #   真机铁证（23:06 第 2 张图）：礼包做完、目标清零，棋盘上还有 22~24 格，
+        #   可这里照样累加 blank => 3 轮后 return 'blank'
+        #   => end_reason=blank => 「连续 2 张图认不出棋盘」=> 停整局 X
+        #   blank 的本义是「整盘没识别到」（grays/nones 全空）
+        #   => 用它判「没目标」是错的
+        #   => 算出过计划 + 盘上有格子 + 确实没目标 => 立刻收工（return 'done'）
+        #   !! 从没算出过计划（had_plan=False，全雾/识别失败）=> 仍走 blank 三轮耐心
+        _cells86 = len(grays) + len(nones) + len(nones_extra)
+        try:
+            _no_tgt86 = not marked and not buy_any
+        except Exception:       # noqa: BLE001
+            _no_tgt86 = not marked
+        if st.get('had_plan') and _cells86 > 0 and _no_tgt86:
+            log.append(entry)
+            log.append({'finish': 'targets_done_no_order',
+                        'gray_left': len(grays), 'cells': _cells86,
+                        'note': '计划已走完 + 没有目标 => 正常收工（不是 blank）；'
+                                'blank 只留给整盘认不出（v2.86）'})
+            return 'done'
         st['blank'] = st.get('blank', 0) + 1
         log.append(entry)
         log.append({'finish': 'blank_board', 'n': st['blank']})
