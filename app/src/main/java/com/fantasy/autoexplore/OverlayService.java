@@ -209,11 +209,6 @@ public class OverlayService extends Service {
     private WindowManager.LayoutParams lp;
     /** 外层竖向两行：`[日志行]` / `[按钮行]`（见 LOG_ROW_H_REF 注释） */
     private LinearLayout bar;
-    /** v2.89 显示窗不挡点击；控制窗只放主按钮（见下方 ctrl 注释） */
-    private LinearLayout ctrl;
-    private WindowManager.LayoutParams lpCtrl;
-    private TextView cMain;
-    private TextView cToggle;
     /** 下行：气泡 + 张数 + ▶ + ■ + ✕ */
     private LinearLayout btnRow;
     private MarqueeView tvLog;
@@ -607,14 +602,6 @@ public class OverlayService extends Service {
         if (INSTANCE == this) {
             INSTANCE = null;
         }
-        // v2.89: 控制窗一并拆掉（不清会留一颗点不动的按钮在屏幕上）
-        if (ctrl != null && ctrl.getParent() != null) {
-            try {
-                wm.removeView(ctrl);
-            } catch (Throwable ignored) {
-            }
-            ctrl = null;
-        }
         BLANK_RECT = null;              // ⚠ 必须清：否则机器人会继续涂一块没有悬浮条的空白
         if (bar != null && bar.getParent() != null) {
             try {
@@ -955,24 +942,16 @@ public class OverlayService extends Service {
                         : WindowManager.LayoutParams.TYPE_PHONE,
                 // ⚠ 这里**不要**加 FLAG_SECURE（见硬约束②：MuMu 上会让整屏抓取直接失败）
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         // ⚠ Gravity.BOTTOM：lp.y 变成「离屏幕底的距离」⇒ 底边**恒定**，只横向生长
-        // v2.89e【按成熟范式定位】显示窗不再钉底部 ——
-        //   底部那一条会压住游戏的「角色/开始冒险/斗技场/图鉴」，怎么调都难看。
-        //   改成贴**右侧中部**、紧挨着控制圆钮（FloatWindow / Auto.js / Hamibot 同款）：
-        //     收起态 = 只有右侧一颗圆钮
-        //     展开态 = 圆钮左边弹出一张窄卡片
-        lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+        lp.gravity = Gravity.BOTTOM | Gravity.START;
         lp.setTitle("MGAS");                         // 便于 `dumpsys window` 里认人
         // v2.21：左边距同样记住用户拖的位置
         int savedX = Prefs.overlayX(getApplicationContext());
-        // v2.89f：**END 重力下 x 是「离右边多远」，正数才往内缩**
-        //   上一版写 -76 => 把窗口推到屏幕外，右半截被裁掉（截图里文字被切）
-        lp.x = RefMapper.devX(84);    // 右边留 84（给圆钮让位）
+        lp.x = (savedX >= 0) ? savedX : RefMapper.devX(20);
         // ⚠⚠ 真机 bug（v2.02，用户原话「悬浮窗还是低了，显示不全」）：
         //   Gravity.BOTTOM 下 lp.y 是**离屏幕底**的距离，而屏幕底包含系统手势条区。
         //   参考 y=1816 是「1080×1920 无手势条」时代的口径 ⇒ 映射到 1280×2772 后
@@ -994,7 +973,7 @@ public class OverlayService extends Service {
         int[] rs0 = realScreen();
         int physical = rs0[1];
         int usable = physical - nav();   // = 父窗口高度
-        lp.y = 0;   // CENTER_VERTICAL：0 = 竖直正中间（不再按底锚算）
+        lp.y = anchorY(usable);
         AppLog.i("悬浮条定位：展开=" + expanded + " ⇒ lp.y=" + lp.y
                 + "（可用区 " + usable + " = 物理 " + physical + " − 手势条 " + nav() + "）"
                 + "  " + (expanded ? "顶边贴限制线 1722" : "底边钉 1816"));
@@ -1004,7 +983,6 @@ public class OverlayService extends Service {
         //    （实测：addView 之后才 setVisibility(GONE)，首帧仍是展开的宽 ✗）
         applyMode();
         addBarOrWarn();
-        buildCtrl();
     }
 
     /** 加窗（失败时把"为什么"讲清楚——多半是少了「显示在其他应用上层」权限） */
@@ -1147,19 +1125,6 @@ public class OverlayService extends Service {
             r = Math.min(sw, loc[0] + bar.getWidth());
             b = Math.min(sh, loc[1] + bar.getHeight());
             t = Math.max(0, loc[1]);
-        }
-        // v2.89b：控制窗是**独立窗口**，必须一起并入涂平矩形
-        //   否则它会被截进画面 => PNG 里多出「启动/停止」字样 => OCR 误判
-        try {
-            if (ctrl != null && ctrl.getParent() != null) {
-                int[] cl = new int[2];
-                ctrl.getLocationOnScreen(cl);
-                l = Math.min(l, Math.max(0, cl[0]));
-                t = Math.min(t, Math.max(0, cl[1]));
-                r = Math.max(r, Math.min(sw, cl[0] + ctrl.getWidth()));
-                b = Math.max(b, Math.min(sh, cl[1] + ctrl.getHeight()));
-            }
-        } catch (Throwable ignored) {
         }
         BLANK_RECT = (r > l && b > t) ? new int[]{l, t, r, b} : null;
 
@@ -1571,16 +1536,11 @@ public class OverlayService extends Service {
         //   两者相加 100 参考 px；而 bar 的**实测高度只有 90 设备 px**（≈76 参考）。
         //   ⇒ 内容比窗口高 ⇒ LinearLayout 把两行压扁、互相重叠 ✗
         //   修：bar 的高度必须显式包含两行之和（日志行 + 按钮行），别只给按钮行。
-        // v2.89c：按钮行已经移到独立控制窗（btnRow 整行 GONE）
-        //   => 显示窗**不能再按「日志+按钮」两行算高**，否则就是一条全宽厚黑板，
-        //      把游戏底部导航整排盖住（用户：「太难看了」）
-        int btnH = 0;
+        int btnH = (expanded && logMode) ? 56 : (expanded ? 50 : 44);
         int logH = (expanded && logMode) ? LOG_ROW_H_REF : 0;
         boolean wide = expanded;
-        // v2.89c：展开态也**不再拉满全宽**（只有一行状态文字，满宽很难看）
-        //   固定一颗紧凑药丸宽；日志超出按省略号走（MarqueeView 自己会滚）
         int w = wide
-                ? RefMapper.devX(560)
+                ? Math.max(1, realScreen()[0] - RefMapper.devX(40))
                 : LinearLayout.LayoutParams.WRAP_CONTENT;
 
         // ⭐ 关键：**父级 bar 也要有确定宽度**，否则里面 MATCH_PARENT 的日志行无解（=0 宽）。
@@ -1666,80 +1626,6 @@ public class OverlayService extends Service {
         }
     }
 
-    /** v2.89：建控制小窗（唯一吃触摸的地方） */
-    private void buildCtrl() {
-        try {
-            ctrl = new LinearLayout(this);
-            ctrl.setOrientation(LinearLayout.HORIZONTAL);
-            ctrl.setGravity(Gravity.CENTER_VERTICAL);
-            cMain = chipStyle("▶", TXT_PRIMARY, S_PRIMARY);   // v2.89c：只留符号，别再占一行宽
-            cMain.setOnClickListener(v -> {
-                flash(cMain);
-                keepAlive();
-                if (isRunningState()) {
-                    AppLog.i("[ctrl] 点 ■ 立刻停止");
-                    new Thread(() -> AppLog.i("■ " + PyBridge.call("stop")),
-                               "ctrl-stop").start();
-                } else {
-                    AppLog.i("[ctrl] 点 ▶ 开始");
-                    onStart();
-                }
-            });
-            cToggle = chip("▼", TXT_CHIP_DIM);
-            cToggle.setOnClickListener(v -> {
-                flash(cToggle);
-                keepAlive();
-                setExpanded(!expanded);
-            });
-            // v2.89d：只放一颗圆钮；展开/收起改成**长按**它 => 屏幕上少一个东西
-            cMain.setOnLongClickListener(v -> {
-                keepAlive();
-                AppLog.i("[ctrl] 长按 展开/收起");
-                setExpanded(!expanded);
-                return true;
-            });
-            ctrl.addView(cMain);
-            lpCtrl = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                            : WindowManager.LayoutParams.TYPE_PHONE,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT);
-            // v2.89b：贴**右下角**。原来也放左下 => 与显示窗的 MGAS 胶囊叠在一起，
-            //   截图里看着就是一个畸形疙瘩（用户 2026-10-31：「悬浮窗现在像个畸形」）
-            // v2.89d：按成熟悬浮窗范式（FloatWindow / Auto.js / Hamibot）——
-            //   收起态只有**一颗贴边小圆钮**，贴右侧中部，不占屏幕底部
-            lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
-            lpCtrl.setTitle("MGAS-ctrl");
-            lpCtrl.x = RefMapper.devX(8);    // 同理：正数 = 离右边 8
-            lpCtrl.y = 0;
-            wm.addView(ctrl, lpCtrl);
-            AppLog.i("[ctrl] 控制窗已建");
-            refreshCtrl();
-        } catch (Throwable t) {
-            AppLog.i("[ctrl] 建失败：" + t);
-        }
-    }
-
-    /** v2.89：控制窗文案跟着运行/展开状态走 */
-    private void refreshCtrl() {
-        try {
-            if (cMain == null) {
-                return;
-            }
-            boolean running = isRunningState();
-            cMain.setText(running ? "■" : "▶");
-            cMain.setTextColor(running ? TXT_DANGER : TXT_PRIMARY);
-            if (cToggle != null) {
-                cToggle.setText(expanded ? "▲" : "▼");
-            }
-        } catch (Throwable ignored) {
-        }
-    }
     private void applyMode() {
         if (bar == null) {
             return;
@@ -1778,18 +1664,6 @@ public class OverlayService extends Service {
         // ⭐ 精简版：下行只有【状态胶囊 + 一个主按钮】
         //   待机 ⇒ 启动（青蓝渐变）；跑起来 ⇒ 停止（红）
         //   张数/反馈/✕ 都收进长按菜单，不再常驻
-        refreshCtrl();
-        // v2.89g：日志行**常显**（用户 2026-10-31：「要有那个日志行提示」）
-        //   原来收起态会把它藏掉 => 跑起来就看不到「第几张图 · 在做什么」了
-        //   现在收起/展开都留着这一行；它不可点（穿透给游戏），只负责显示
-        if (bar != null) {
-            bar.setVisibility(View.VISIBLE);
-        }
-        // v2.89b：显示窗**不再画那排按钮**（控制窗已有同样的两颗）
-        //   两套一起露 => 叠成一坨，用户看到的就是畸形
-        if (btnRow != null) {
-            btnRow.setVisibility(View.GONE);
-        }
         boolean idle = !isRunningState();
         btnStart.setVisibility(expanded && idle ? View.VISIBLE : View.GONE);
         btnStop.setVisibility(expanded && !idle ? View.VISIBLE : View.GONE);

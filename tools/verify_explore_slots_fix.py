@@ -11395,6 +11395,10 @@ try:
                                if not _ln.strip().startswith('//')
                                and not _ln.strip().startswith('*')
                                and not _ln.strip().startswith('/*'))
+    check('v2.88 A(3) 撤回守门：code 里**没有**改用 FLAG_NOT_TOUCHABLE'
+          '（那样停止按钮/拖动/点气泡展开会一起失灵 X）· %s'
+          % ('干净 OK' if 'FLAG_NOT_TOUCHABLE' not in _ovl88_code else '出现了'),
+          'FLAG_NOT_TOUCHABLE' not in _ovl88_code)
 
     check('v2.88 A(4) DeviceApi 有 dodgeOverlay，且判定用 blankRect（同一份矩形）· %s'
           % ('有 OK' if ('private static void dodgeOverlay' in _dev88
@@ -11408,80 +11412,6 @@ try:
           _dev88.count('dodgeOverlay(_dx, _dy);') >= 2)
 except Exception as _e88:       # noqa: BLE001
     check('v2.88 守门可运行（%r）' % (_e88,), False)
-print()
-
-# ── v2.89【拆两个窗口：显示窗不吃触摸 + 小控制窗】──
-#   用户口径（2026-10-31）：「我记得自动精灵就能启动后悬浮窗不会影响截图和点击」
-#   正解 AOSP FloatingToolbar 那套（touchableRegion 局部可点）用的是 @hide 隐藏 API，
-#   实测 javac 报「找不到符号」=> 公开 SDK 编译不过；反射撞隐藏 API 限制 ✗
-#   => 公开 API 的等价做法：拆两个窗口
-#        显示窗 bar  => FLAG_NOT_TOUCHABLE（永不吃触摸，只显示）
-#        控制窗 ctrl => 小尺寸，只放【主按钮 + 展开箭头】，唯一吃触摸的地方
-#      ctrl 落在 bar 的矩形带内 => FrameStore 涂平矩形照样盖住它，OCR 不被污染 ✓
-try:
-    _ovl89 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/OverlayService.java'),
-                     encoding='utf-8').read()
-    _code89 = chr(10).join(_ln for _ln in _ovl89.split(chr(10))
-                           if not _ln.strip().startswith('//')
-                           and not _ln.strip().startswith('*')
-                           and not _ln.strip().startswith('/*'))
-
-    check('v2.89 A(1) 有独立的控制小窗（buildCtrl + ctrl 字段）· %s'
-          % ('有 OK' if ('private void buildCtrl' in _code89
-                         and 'private LinearLayout ctrl;' in _code89) else '缺'),
-          'private void buildCtrl' in _code89
-          and 'private LinearLayout ctrl;' in _code89)
-
-    check('v2.89 A(2) 显示窗带 FLAG_NOT_TOUCHABLE（**唯一能解掉挡点击**的那一条）· %s'
-          % ('有 OK' if 'FLAG_NOT_TOUCHABLE' in _code89 else '缺'),
-          'FLAG_NOT_TOUCHABLE' in _code89)
-
-    _i_ctrl89 = _code89.find('lpCtrl = new WindowManager.LayoutParams(')
-    _seg_ctrl89 = _code89[_i_ctrl89:_i_ctrl89 + 700] if _i_ctrl89 >= 0 else ''
-    check('v2.89 A(3) 控制窗**不能**带 NOT_TOUCHABLE（带了就变成按钮也点不动 X）· %s'
-          % ('干净 OK' if ('FLAG_NOT_TOUCHABLE' not in _seg_ctrl89 and _seg_ctrl89) else '错/缺'),
-          bool(_seg_ctrl89) and 'FLAG_NOT_TOUCHABLE' not in _seg_ctrl89)
-
-    check('v2.89 A(4) onDestroy 里把控制窗也摘掉（不清会留一颗点不动的按钮）· %s'
-          % ('有 OK' if 'wm.removeView(ctrl)' in _code89 else '缺'),
-          'wm.removeView(ctrl)' in _code89)
-
-    check('v2.89 A(5) 撤回守门：**没有**回头用 InternalInsetsInfo（@hide，javac 直接编译不过 X）· %s'
-          % ('干净 OK' if 'InternalInsetsInfo' not in _code89 else '出现了'),
-          'InternalInsetsInfo' not in _code89)
-    # v2.89d 起控制窗改贴**右侧中部**（不再挂底部右下），本条按新位置改写
-    check('v2.89 A(6) 控制窗贴**右侧中部**（END|CENTER_VERTICAL）'
-          '（挂底部会和游戏底部导航挤在一起，怎么调都难看）· %s'
-          % ('OK' if 'lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89
-                      else '不在右侧中部'),
-          'lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
-    check('v2.89 A(7) 显示窗不再画那排按钮（两套一起露就是重复/畸形）· %s'
-          % ('有 OK' if 'btnRow.setVisibility(View.GONE)' in _code89 else '缺'),
-          'btnRow.setVisibility(View.GONE)' in _code89)
-    check('v2.89 A(8) 控制窗并进涂平矩形（否则它会进截图 => OCR 多出启动/停止字样）· %s'
-          % ('有 OK' if 'ctrl.getLocationOnScreen' in _code89 else '缺'),
-          'ctrl.getLocationOnScreen' in _code89)
-    check('v2.89 A(9) 显示窗高度**不再算按钮行**（btnH=0）'
-          '（算了就是一条全宽厚黑板，把游戏底部导航整排盖住 => 用户：太难看了）· %s'
-          % ('有 OK' if 'int btnH = 0;' in _code89 else '还在算'),
-          'int btnH = 0;' in _code89)
-    check('v2.89 A(10) 展开态不再拉满全宽，改紧凑药丸（devX(560)）· %s'
-          % ('有 OK' if 'RefMapper.devX(560)' in _code89 else '还是满宽'),
-          'RefMapper.devX(560)' in _code89)
-    # END 重力下 lp.x 是「离右边多远」：**正数才往内缩**，负数会把窗口推出屏幕外
-    #   （v2.89f 实测：写 -76 时卡片右半截被裁掉，截图里文字被切断）
-    check('v2.89 A(11) 贴右布局的 x 是**正数**（负数会把窗口推到屏幕外被裁 X）· %s'
-          % ('对 OK' if ('lp.x = RefMapper.devX(84)' in _code89
-                         and 'lp.x = -RefMapper.devX' not in _code89) else '还是负的'),
-          'lp.x = RefMapper.devX(84)' in _code89
-          and 'lp.x = -RefMapper.devX' not in _code89)
-    check('v2.89 A(12) 显示窗贴**右侧中部**，不再钉底部'
-          '（钉底部会压住 公会/角色/开始冒险/斗技场/图鉴 那一排 => 太难看了）· %s'
-          % ('OK' if ('lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
-                      else '还在底部'),
-          'lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
-except Exception as _e89:       # noqa: BLE001
-    check('v2.89 守门可运行（%r）' % (_e89,), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
