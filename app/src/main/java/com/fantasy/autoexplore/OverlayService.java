@@ -1564,11 +1564,16 @@ public class OverlayService extends Service {
         //   两者相加 100 参考 px；而 bar 的**实测高度只有 90 设备 px**（≈76 参考）。
         //   ⇒ 内容比窗口高 ⇒ LinearLayout 把两行压扁、互相重叠 ✗
         //   修：bar 的高度必须显式包含两行之和（日志行 + 按钮行），别只给按钮行。
-        int btnH = (expanded && logMode) ? 56 : (expanded ? 50 : 44);
+        // v2.89c：按钮行已经移到独立控制窗（btnRow 整行 GONE）
+        //   => 显示窗**不能再按「日志+按钮」两行算高**，否则就是一条全宽厚黑板，
+        //      把游戏底部导航整排盖住（用户：「太难看了」）
+        int btnH = 0;
         int logH = (expanded && logMode) ? LOG_ROW_H_REF : 0;
         boolean wide = expanded;
+        // v2.89c：展开态也**不再拉满全宽**（只有一行状态文字，满宽很难看）
+        //   固定一颗紧凑药丸宽；日志超出按省略号走（MarqueeView 自己会滚）
         int w = wide
-                ? Math.max(1, realScreen()[0] - RefMapper.devX(40))
+                ? RefMapper.devX(560)
                 : LinearLayout.LayoutParams.WRAP_CONTENT;
 
         // ⭐ 关键：**父级 bar 也要有确定宽度**，否则里面 MATCH_PARENT 的日志行无解（=0 宽）。
@@ -1660,7 +1665,7 @@ public class OverlayService extends Service {
             ctrl = new LinearLayout(this);
             ctrl.setOrientation(LinearLayout.HORIZONTAL);
             ctrl.setGravity(Gravity.CENTER_VERTICAL);
-            cMain = chipStyle("▶ 启动", TXT_PRIMARY, S_PRIMARY);
+            cMain = chipStyle("▶", TXT_PRIMARY, S_PRIMARY);   // v2.89c：只留符号，别再占一行宽
             cMain.setOnClickListener(v -> {
                 flash(cMain);
                 keepAlive();
@@ -1712,7 +1717,7 @@ public class OverlayService extends Service {
                 return;
             }
             boolean running = isRunningState();
-            cMain.setText(running ? "■ 停止" : "▶ 启动");
+            cMain.setText(running ? "■" : "▶");
             cMain.setTextColor(running ? TXT_DANGER : TXT_PRIMARY);
             if (cToggle != null) {
                 cToggle.setText(expanded ? "▲" : "▼");

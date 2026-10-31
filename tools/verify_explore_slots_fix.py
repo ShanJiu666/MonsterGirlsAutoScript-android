@@ -11459,6 +11459,13 @@ try:
     check('v2.89 A(8) 控制窗并进涂平矩形（否则它会进截图 => OCR 多出启动/停止字样）· %s'
           % ('有 OK' if 'ctrl.getLocationOnScreen' in _code89 else '缺'),
           'ctrl.getLocationOnScreen' in _code89)
+    check('v2.89 A(9) 显示窗高度**不再算按钮行**（btnH=0）'
+          '（算了就是一条全宽厚黑板，把游戏底部导航整排盖住 => 用户：太难看了）· %s'
+          % ('有 OK' if 'int btnH = 0;' in _code89 else '还在算'),
+          'int btnH = 0;' in _code89)
+    check('v2.89 A(10) 展开态不再拉满全宽，改紧凑药丸（devX(560)）· %s'
+          % ('有 OK' if 'RefMapper.devX(560)' in _code89 else '还是满宽'),
+          'RefMapper.devX(560)' in _code89)
 except Exception as _e89:       # noqa: BLE001
     check('v2.89 守门可运行（%r）' % (_e89,), False)
 print()
