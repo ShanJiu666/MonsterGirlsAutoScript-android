@@ -11355,6 +11355,64 @@ try:
 except Exception as _e87:       # noqa: BLE001
     check('v2.87 守门可运行（%r）' % (_e87,), False)
 print()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.88【悬浮条挡住公会/开始冒险 => 脚本点不动】
+#
+#   ---- 用户原话（2026-10-31）----
+#     「悬浮窗在下面挡住公会角色开始冒险，无法切换到公会做日常怎么办？」
+#   ---- 病 ----
+#     悬浮窗带 FLAG_NOT_FOCUSABLE，但**会吃掉落在它身上的触摸**
+#     （OverlayService 第 94 行自己就写着这条）
+#     => 脚本 tapRef 目标点若正好在悬浮条矩形里，手势被悬浮条截走、游戏收不到
+#     => 公会 / 开始冒险 / 背包底部按钮**全都点不动** => 收工日常跑不完
+#   ---- 为什么不用 FLAG_NOT_TOUCHABLE ----
+#     那样确实不挡了，但 停止按钮 / 拖动 / 点气泡展开 也一起失灵 => 不能这么改
+#     => 只能在**点的那一瞬间**让路，点完立刻恢复
+#   ---- 修法 ----
+#     ① OverlayService.hideBriefly(ms)：bar 设 INVISIBLE，postDelayed 恢复
+#        （INVISIBLE 不参与触摸命中测试 => 手势直达游戏；位置尺寸都不动 ✓）
+#     ② DeviceApi.dodgeOverlay：目标点落在 blankRect 内（±8px）就先让路再点
+#        tapRef / tapRefDialog **两处都要**（弹窗系点底部按钮同样会被挡）
+try:
+    _ovl88 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/OverlayService.java'),
+                     encoding='utf-8').read()
+    _dev88 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/DeviceApi.java'),
+                     encoding='utf-8').read()
+
+    check('v2.88 A(1) OverlayService 有 hideBriefly（点之前能临时让路）· %s'
+          % ('有 OK' if 'public static void hideBriefly' in _ovl88 else '缺'),
+          'public static void hideBriefly' in _ovl88)
+
+    check('v2.88 A(2) 让路用 INVISIBLE + postDelayed 自动恢复'
+          '（GONE/缩小都不对：一个会重排、一个仍占位）· %s'
+          % ('有 OK' if ('View.INVISIBLE' in _ovl88 and 'postDelayed' in _ovl88) else '缺'),
+          'View.INVISIBLE' in _ovl88 and 'postDelayed' in _ovl88)
+
+    # !! 注意：本条必须先剥掉整行注释再查 —— 我自己的留档注释里逐字引用了 FLAG_NOT_TOUCHABLE
+    #   否则会假红（本项目第 4 次踩这个坑：v1.62c / v1.67 / v1.69 都是同一个）
+    _ovl88_code = chr(10).join(_ln for _ln in _ovl88.split(chr(10))
+                               if not _ln.strip().startswith('//')
+                               and not _ln.strip().startswith('*')
+                               and not _ln.strip().startswith('/*'))
+    check('v2.88 A(3) 撤回守门：code 里**没有**改用 FLAG_NOT_TOUCHABLE'
+          '（那样停止按钮/拖动/点气泡展开会一起失灵 X）· %s'
+          % ('干净 OK' if 'FLAG_NOT_TOUCHABLE' not in _ovl88_code else '出现了'),
+          'FLAG_NOT_TOUCHABLE' not in _ovl88_code)
+
+    check('v2.88 A(4) DeviceApi 有 dodgeOverlay，且判定用 blankRect（同一份矩形）· %s'
+          % ('有 OK' if ('private static void dodgeOverlay' in _dev88
+                         and 'OverlayService.blankRect()' in _dev88) else '缺'),
+          'private static void dodgeOverlay' in _dev88
+          and 'OverlayService.blankRect()' in _dev88)
+
+    check('v2.88 A(5) tapRef 与 tapRefDialog **两处都**调了 dodgeOverlay'
+          '（只改一处 => 弹窗系点底部按钮照样被挡 X）· 调用 %d 处'
+          % _dev88.count('dodgeOverlay(_dx, _dy);'),
+          _dev88.count('dodgeOverlay(_dx, _dy);') >= 2)
+except Exception as _e88:       # noqa: BLE001
+    check('v2.88 守门可运行（%r）' % (_e88,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

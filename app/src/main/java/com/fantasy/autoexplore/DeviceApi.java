@@ -364,11 +364,36 @@ public final class DeviceApi {
         return AutoTouchService.ready();
     }
 
+    /**
+     * !! v2.88 [点之前先给悬浮条让路]
+     *   用户 2026-10-31：「悬浮窗在下面挡住公会角色开始冒险，无法切换到公会做日常」
+     *   悬浮条会吃掉落在它身上的触摸 => 公会/开始冒险/背包底部按钮点不动。
+     *   => 目标点落在悬浮条矩形内（正负 8px 容差）就先 hideBriefly，再点
+     *   => 只有这一种情况多花 ~180ms，其余点击零开销
+     */
+    private static void dodgeOverlay(int devX, int devY) {
+        try {
+            int[] r = OverlayService.blankRect();
+            if (r == null) {
+                return;
+            }
+            if (devX < r[0] - 8 || devX > r[2] + 8 || devY < r[1] - 8 || devY > r[3] + 8) {
+                return;
+            }
+            OverlayService.hideBriefly(420);
+            Thread.sleep(180);
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static boolean tapRef(float x, float y) {
         if (!AutoTouchService.ready()) {
             return false;
         }
-        return AutoTouchService.get().tap(RefMapper.devX(x), RefMapper.devY(y));
+        int _dx = RefMapper.devX(x);
+        int _dy = RefMapper.devY(y);
+        dodgeOverlay(_dx, _dy);
+        return AutoTouchService.get().tap(_dx, _dy);
     }
 
     /**
@@ -377,10 +402,13 @@ public final class DeviceApi {
      * PC / 9:16 屏上与 {@link #tapRef} 数学等价（C=0）⇒ 行为一字不变。
      */
     public static boolean tapRefDialog(float x, float y) {
+        int _dx = RefMapper.devX(x);
+        int _dy = RefMapper.devYDialog(y);
+        dodgeOverlay(_dx, _dy);
         if (!AutoTouchService.ready()) {
             return false;
         }
-        return AutoTouchService.get().tap(RefMapper.devX(x), RefMapper.devYDialog(y));
+        return AutoTouchService.get().tap(_dx, _dy);
     }
 
     public static boolean tapRefHold(float x, float y, int ms) {

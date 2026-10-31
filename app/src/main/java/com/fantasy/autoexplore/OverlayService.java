@@ -450,6 +450,48 @@ public class OverlayService extends Service {
      * 悬浮条占的设备像素矩形（给 `FrameStore` 涂平用）；服务没跑/没显示 ⇒ null。
      * ⚠ 返回值**不要改**（共享数组）。
      */
+    /**
+     * !! v2.88 [让路]：把悬浮条临时隐藏 ms 毫秒（给脚本点被它盖住的按钮用）
+     *
+     *   ---- 为什么需要 ----
+     *     用户 2026-10-31 报：「悬浮窗在下面挡住公会角色开始冒险，无法切换到公会做日常」
+     *     悬浮窗带 FLAG_NOT_FOCUSABLE，但会吃掉落在它身上的触摸（本文件第 94 行已写明）
+     *     => 脚本 tapRef 点到的那一点若正好在悬浮条矩形里，手势被悬浮条截走，
+     *        游戏根本收不到 => 公会/开始冒险/背包底部按钮全部点不动
+     *
+     *   ---- 为什么不是 FLAG_NOT_TOUCHABLE ----
+     *     那样确实不挡了，但 停止按钮 / 拖动 / 点气泡展开 也一起失灵
+     *     => 只能在点的那一瞬间让路，点完立刻恢复
+     *
+     *   ---- 为什么是 INVISIBLE ----
+     *     缩小仍会占位；INVISIBLE 的窗口不参与触摸命中测试 => 手势直达游戏
+     *     420ms 覆盖「抬起手指 + 游戏开始处理」；位置/尺寸都不动，
+     *     恢复后与原来完全一致（不会因为让路而漂移）
+     */
+    public static void hideBriefly(final int ms) {
+        final OverlayService o = INSTANCE;
+        if (o == null) {
+            return;
+        }
+        o.ui.post(() -> {
+            try {
+                if (o.bar == null || o.bar.getVisibility() != android.view.View.VISIBLE) {
+                    return;
+                }
+                o.bar.setVisibility(android.view.View.INVISIBLE);
+                o.ui.postDelayed(() -> {
+                    try {
+                        if (o.bar != null) {
+                            o.bar.setVisibility(android.view.View.VISIBLE);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }, Math.max(120, ms));
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
     public static int[] blankRect() {
         return BLANK_RECT;
     }
@@ -900,6 +942,7 @@ public class OverlayService extends Service {
                         : WindowManager.LayoutParams.TYPE_PHONE,
                 // ⚠ 这里**不要**加 FLAG_SECURE（见硬约束②：MuMu 上会让整屏抓取直接失败）
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
