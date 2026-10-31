@@ -209,6 +209,11 @@ public class OverlayService extends Service {
     private WindowManager.LayoutParams lp;
     /** 外层竖向两行：`[日志行]` / `[按钮行]`（见 LOG_ROW_H_REF 注释） */
     private LinearLayout bar;
+    /** v2.89 显示窗不挡点击；控制窗只放主按钮（见下方 ctrl 注释） */
+    private LinearLayout ctrl;
+    private WindowManager.LayoutParams lpCtrl;
+    private TextView cMain;
+    private TextView cToggle;
     /** 下行：气泡 + 张数 + ▶ + ■ + ✕ */
     private LinearLayout btnRow;
     private MarqueeView tvLog;
@@ -602,6 +607,14 @@ public class OverlayService extends Service {
         if (INSTANCE == this) {
             INSTANCE = null;
         }
+        // v2.89: 控制窗一并拆掉（不清会留一颗点不动的按钮在屏幕上）
+        if (ctrl != null && ctrl.getParent() != null) {
+            try {
+                wm.removeView(ctrl);
+            } catch (Throwable ignored) {
+            }
+            ctrl = null;
+        }
         BLANK_RECT = null;              // ⚠ 必须清：否则机器人会继续涂一块没有悬浮条的空白
         if (bar != null && bar.getParent() != null) {
             try {
@@ -942,6 +955,7 @@ public class OverlayService extends Service {
                         : WindowManager.LayoutParams.TYPE_PHONE,
                 // ⚠ 这里**不要**加 FLAG_SECURE（见硬约束②：MuMu 上会让整屏抓取直接失败）
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -983,6 +997,7 @@ public class OverlayService extends Service {
         //    （实测：addView 之后才 setVisibility(GONE)，首帧仍是展开的宽 ✗）
         applyMode();
         addBarOrWarn();
+        buildCtrl();
     }
 
     /** 加窗（失败时把"为什么"讲清楚——多半是少了「显示在其他应用上层」权限） */
@@ -1626,6 +1641,70 @@ public class OverlayService extends Service {
         }
     }
 
+    /** v2.89：建控制小窗（唯一吃触摸的地方） */
+    private void buildCtrl() {
+        try {
+            ctrl = new LinearLayout(this);
+            ctrl.setOrientation(LinearLayout.HORIZONTAL);
+            ctrl.setGravity(Gravity.CENTER_VERTICAL);
+            cMain = chipStyle("▶ 启动", TXT_PRIMARY, S_PRIMARY);
+            cMain.setOnClickListener(v -> {
+                flash(cMain);
+                keepAlive();
+                if (isRunningState()) {
+                    AppLog.i("[ctrl] 点 ■ 立刻停止");
+                    new Thread(() -> AppLog.i("■ " + PyBridge.call("stop")),
+                               "ctrl-stop").start();
+                } else {
+                    AppLog.i("[ctrl] 点 ▶ 开始");
+                    onStart();
+                }
+            });
+            cToggle = chip("▼", TXT_CHIP_DIM);
+            cToggle.setOnClickListener(v -> {
+                flash(cToggle);
+                keepAlive();
+                setExpanded(!expanded);
+            });
+            ctrl.addView(cMain);
+            ctrl.addView(cToggle);
+            lpCtrl = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_PHONE,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            lpCtrl.gravity = Gravity.BOTTOM | Gravity.START;
+            lpCtrl.setTitle("MGAS-ctrl");
+            lpCtrl.x = RefMapper.devX(8);
+            lpCtrl.y = (lp != null) ? lp.y : 0;
+            wm.addView(ctrl, lpCtrl);
+            AppLog.i("[ctrl] 控制窗已建");
+            refreshCtrl();
+        } catch (Throwable t) {
+            AppLog.i("[ctrl] 建失败：" + t);
+        }
+    }
+
+    /** v2.89：控制窗文案跟着运行/展开状态走 */
+    private void refreshCtrl() {
+        try {
+            if (cMain == null) {
+                return;
+            }
+            boolean running = isRunningState();
+            cMain.setText(running ? "■ 停止" : "▶ 启动");
+            cMain.setTextColor(running ? TXT_DANGER : TXT_PRIMARY);
+            if (cToggle != null) {
+                cToggle.setText(expanded ? "▲" : "▼");
+            }
+        } catch (Throwable ignored) {
+        }
+    }
     private void applyMode() {
         if (bar == null) {
             return;
@@ -1664,6 +1743,7 @@ public class OverlayService extends Service {
         // ⭐ 精简版：下行只有【状态胶囊 + 一个主按钮】
         //   待机 ⇒ 启动（青蓝渐变）；跑起来 ⇒ 停止（红）
         //   张数/反馈/✕ 都收进长按菜单，不再常驻
+        refreshCtrl();
         boolean idle = !isRunningState();
         btnStart.setVisibility(expanded && idle ? View.VISIBLE : View.GONE);
         btnStop.setVisibility(expanded && !idle ? View.VISIBLE : View.GONE);
