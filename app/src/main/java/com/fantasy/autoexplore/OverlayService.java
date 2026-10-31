@@ -961,11 +961,18 @@ public class OverlayService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         // ⚠ Gravity.BOTTOM：lp.y 变成「离屏幕底的距离」⇒ 底边**恒定**，只横向生长
-        lp.gravity = Gravity.BOTTOM | Gravity.START;
+        // v2.89e【按成熟范式定位】显示窗不再钉底部 ——
+        //   底部那一条会压住游戏的「角色/开始冒险/斗技场/图鉴」，怎么调都难看。
+        //   改成贴**右侧中部**、紧挨着控制圆钮（FloatWindow / Auto.js / Hamibot 同款）：
+        //     收起态 = 只有右侧一颗圆钮
+        //     展开态 = 圆钮左边弹出一张窄卡片
+        lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
         lp.setTitle("MGAS");                         // 便于 `dumpsys window` 里认人
         // v2.21：左边距同样记住用户拖的位置
         int savedX = Prefs.overlayX(getApplicationContext());
-        lp.x = (savedX >= 0) ? savedX : RefMapper.devX(20);
+        // v2.89f：**END 重力下 x 是「离右边多远」，正数才往内缩**
+        //   上一版写 -76 => 把窗口推到屏幕外，右半截被裁掉（截图里文字被切）
+        lp.x = RefMapper.devX(84);    // 右边留 84（给圆钮让位）
         // ⚠⚠ 真机 bug（v2.02，用户原话「悬浮窗还是低了，显示不全」）：
         //   Gravity.BOTTOM 下 lp.y 是**离屏幕底**的距离，而屏幕底包含系统手势条区。
         //   参考 y=1816 是「1080×1920 无手势条」时代的口径 ⇒ 映射到 1280×2772 后
@@ -987,7 +994,7 @@ public class OverlayService extends Service {
         int[] rs0 = realScreen();
         int physical = rs0[1];
         int usable = physical - nav();   // = 父窗口高度
-        lp.y = anchorY(usable);
+        lp.y = 0;   // CENTER_VERTICAL：0 = 竖直正中间（不再按底锚算）
         AppLog.i("悬浮条定位：展开=" + expanded + " ⇒ lp.y=" + lp.y
                 + "（可用区 " + usable + " = 物理 " + physical + " − 手势条 " + nav() + "）"
                 + "  " + (expanded ? "顶边贴限制线 1722" : "底边钉 1816"));
@@ -1684,8 +1691,14 @@ public class OverlayService extends Service {
                 keepAlive();
                 setExpanded(!expanded);
             });
+            // v2.89d：只放一颗圆钮；展开/收起改成**长按**它 => 屏幕上少一个东西
+            cMain.setOnLongClickListener(v -> {
+                keepAlive();
+                AppLog.i("[ctrl] 长按 展开/收起");
+                setExpanded(!expanded);
+                return true;
+            });
             ctrl.addView(cMain);
-            ctrl.addView(cToggle);
             lpCtrl = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -1698,10 +1711,12 @@ public class OverlayService extends Service {
                     PixelFormat.TRANSLUCENT);
             // v2.89b：贴**右下角**。原来也放左下 => 与显示窗的 MGAS 胶囊叠在一起，
             //   截图里看着就是一个畸形疙瘩（用户 2026-10-31：「悬浮窗现在像个畸形」）
-            lpCtrl.gravity = Gravity.BOTTOM | Gravity.END;
+            // v2.89d：按成熟悬浮窗范式（FloatWindow / Auto.js / Hamibot）——
+            //   收起态只有**一颗贴边小圆钮**，贴右侧中部，不占屏幕底部
+            lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
             lpCtrl.setTitle("MGAS-ctrl");
-            lpCtrl.x = -RefMapper.devX(10);   // END 对齐：负值 = 离右边 10
-            lpCtrl.y = (lp != null) ? lp.y : 0;
+            lpCtrl.x = RefMapper.devX(8);    // 同理：正数 = 离右边 8
+            lpCtrl.y = 0;
             wm.addView(ctrl, lpCtrl);
             AppLog.i("[ctrl] 控制窗已建");
             refreshCtrl();
@@ -1764,6 +1779,12 @@ public class OverlayService extends Service {
         //   待机 ⇒ 启动（青蓝渐变）；跑起来 ⇒ 停止（红）
         //   张数/反馈/✕ 都收进长按菜单，不再常驻
         refreshCtrl();
+        // v2.89g：日志行**常显**（用户 2026-10-31：「要有那个日志行提示」）
+        //   原来收起态会把它藏掉 => 跑起来就看不到「第几张图 · 在做什么」了
+        //   现在收起/展开都留着这一行；它不可点（穿透给游戏），只负责显示
+        if (bar != null) {
+            bar.setVisibility(View.VISIBLE);
+        }
         // v2.89b：显示窗**不再画那排按钮**（控制窗已有同样的两颗）
         //   两套一起露 => 叠成一坨，用户看到的就是畸形
         if (btnRow != null) {

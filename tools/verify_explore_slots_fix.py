@@ -11449,10 +11449,12 @@ try:
     check('v2.89 A(5) 撤回守门：**没有**回头用 InternalInsetsInfo（@hide，javac 直接编译不过 X）· %s'
           % ('干净 OK' if 'InternalInsetsInfo' not in _code89 else '出现了'),
           'InternalInsetsInfo' not in _code89)
-    check('v2.89 A(6) 控制窗贴右下（END）而不是左下'
-          '（原来与 MGAS 胶囊叠在同一角落 => 截图里就是个畸形疙瘩）· %s'
-          % ('END OK' if 'Gravity.BOTTOM | Gravity.END' in _code89 else '还是 START'),
-          'Gravity.BOTTOM | Gravity.END' in _code89)
+    # v2.89d 起控制窗改贴**右侧中部**（不再挂底部右下），本条按新位置改写
+    check('v2.89 A(6) 控制窗贴**右侧中部**（END|CENTER_VERTICAL）'
+          '（挂底部会和游戏底部导航挤在一起，怎么调都难看）· %s'
+          % ('OK' if 'lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89
+                      else '不在右侧中部'),
+          'lpCtrl.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
     check('v2.89 A(7) 显示窗不再画那排按钮（两套一起露就是重复/畸形）· %s'
           % ('有 OK' if 'btnRow.setVisibility(View.GONE)' in _code89 else '缺'),
           'btnRow.setVisibility(View.GONE)' in _code89)
@@ -11466,6 +11468,18 @@ try:
     check('v2.89 A(10) 展开态不再拉满全宽，改紧凑药丸（devX(560)）· %s'
           % ('有 OK' if 'RefMapper.devX(560)' in _code89 else '还是满宽'),
           'RefMapper.devX(560)' in _code89)
+    # END 重力下 lp.x 是「离右边多远」：**正数才往内缩**，负数会把窗口推出屏幕外
+    #   （v2.89f 实测：写 -76 时卡片右半截被裁掉，截图里文字被切断）
+    check('v2.89 A(11) 贴右布局的 x 是**正数**（负数会把窗口推到屏幕外被裁 X）· %s'
+          % ('对 OK' if ('lp.x = RefMapper.devX(84)' in _code89
+                         and 'lp.x = -RefMapper.devX' not in _code89) else '还是负的'),
+          'lp.x = RefMapper.devX(84)' in _code89
+          and 'lp.x = -RefMapper.devX' not in _code89)
+    check('v2.89 A(12) 显示窗贴**右侧中部**，不再钉底部'
+          '（钉底部会压住 公会/角色/开始冒险/斗技场/图鉴 那一排 => 太难看了）· %s'
+          % ('OK' if ('lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
+                      else '还在底部'),
+          'lp.gravity = Gravity.END | Gravity.CENTER_VERTICAL' in _code89)
 except Exception as _e89:       # noqa: BLE001
     check('v2.89 守门可运行（%r）' % (_e89,), False)
 print()
