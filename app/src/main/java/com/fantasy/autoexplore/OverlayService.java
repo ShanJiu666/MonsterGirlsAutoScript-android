@@ -1141,6 +1141,19 @@ public class OverlayService extends Service {
             b = Math.min(sh, loc[1] + bar.getHeight());
             t = Math.max(0, loc[1]);
         }
+        // v2.89b：控制窗是**独立窗口**，必须一起并入涂平矩形
+        //   否则它会被截进画面 => PNG 里多出「启动/停止」字样 => OCR 误判
+        try {
+            if (ctrl != null && ctrl.getParent() != null) {
+                int[] cl = new int[2];
+                ctrl.getLocationOnScreen(cl);
+                l = Math.min(l, Math.max(0, cl[0]));
+                t = Math.min(t, Math.max(0, cl[1]));
+                r = Math.max(r, Math.min(sw, cl[0] + ctrl.getWidth()));
+                b = Math.max(b, Math.min(sh, cl[1] + ctrl.getHeight()));
+            }
+        } catch (Throwable ignored) {
+        }
         BLANK_RECT = (r > l && b > t) ? new int[]{l, t, r, b} : null;
 
         float topRef = RefMapper.refY(t);
@@ -1678,9 +1691,11 @@ public class OverlayService extends Service {
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                     PixelFormat.TRANSLUCENT);
-            lpCtrl.gravity = Gravity.BOTTOM | Gravity.START;
+            // v2.89b：贴**右下角**。原来也放左下 => 与显示窗的 MGAS 胶囊叠在一起，
+            //   截图里看着就是一个畸形疙瘩（用户 2026-10-31：「悬浮窗现在像个畸形」）
+            lpCtrl.gravity = Gravity.BOTTOM | Gravity.END;
             lpCtrl.setTitle("MGAS-ctrl");
-            lpCtrl.x = RefMapper.devX(8);
+            lpCtrl.x = -RefMapper.devX(10);   // END 对齐：负值 = 离右边 10
             lpCtrl.y = (lp != null) ? lp.y : 0;
             wm.addView(ctrl, lpCtrl);
             AppLog.i("[ctrl] 控制窗已建");
@@ -1744,6 +1759,11 @@ public class OverlayService extends Service {
         //   待机 ⇒ 启动（青蓝渐变）；跑起来 ⇒ 停止（红）
         //   张数/反馈/✕ 都收进长按菜单，不再常驻
         refreshCtrl();
+        // v2.89b：显示窗**不再画那排按钮**（控制窗已有同样的两颗）
+        //   两套一起露 => 叠成一坨，用户看到的就是畸形
+        if (btnRow != null) {
+            btnRow.setVisibility(View.GONE);
+        }
         boolean idle = !isRunningState();
         btnStart.setVisibility(expanded && idle ? View.VISIBLE : View.GONE);
         btnStop.setVisibility(expanded && !idle ? View.VISIBLE : View.GONE);

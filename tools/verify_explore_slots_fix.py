@@ -11449,6 +11449,16 @@ try:
     check('v2.89 A(5) 撤回守门：**没有**回头用 InternalInsetsInfo（@hide，javac 直接编译不过 X）· %s'
           % ('干净 OK' if 'InternalInsetsInfo' not in _code89 else '出现了'),
           'InternalInsetsInfo' not in _code89)
+    check('v2.89 A(6) 控制窗贴右下（END）而不是左下'
+          '（原来与 MGAS 胶囊叠在同一角落 => 截图里就是个畸形疙瘩）· %s'
+          % ('END OK' if 'Gravity.BOTTOM | Gravity.END' in _code89 else '还是 START'),
+          'Gravity.BOTTOM | Gravity.END' in _code89)
+    check('v2.89 A(7) 显示窗不再画那排按钮（两套一起露就是重复/畸形）· %s'
+          % ('有 OK' if 'btnRow.setVisibility(View.GONE)' in _code89 else '缺'),
+          'btnRow.setVisibility(View.GONE)' in _code89)
+    check('v2.89 A(8) 控制窗并进涂平矩形（否则它会进截图 => OCR 多出启动/停止字样）· %s'
+          % ('有 OK' if 'ctrl.getLocationOnScreen' in _code89 else '缺'),
+          'ctrl.getLocationOnScreen' in _code89)
 except Exception as _e89:       # noqa: BLE001
     check('v2.89 守门可运行（%r）' % (_e89,), False)
 print()
