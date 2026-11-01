@@ -973,7 +973,13 @@ public class OverlayService extends Service {
         int[] rs0 = realScreen();
         int physical = rs0[1];
         int usable = physical - nav();   // = 父窗口高度
-        lp.y = anchorY(usable);
+        // !! v2.92b【Gravity.BOTTOM 的基准是**物理屏高**，不是可用区】
+        //   实测（1280x2640，手势条 156）：lp.y=0、h=78 时顶边落在设备 2563
+        //     => 2640 − 78 = 2562，即**基准 = 物理 2640**
+        //   而旧代码按「可用区 2484」算 => 恒差 156px（正好一条手势条）
+        //     => 悬浮条被压到屏幕最底、甚至盖住底部导航（用户：位置还是错的）
+        //   => 改用物理屏高做基准 ✓
+        lp.y = anchorY(physical);
         AppLog.i("悬浮条定位：展开=" + expanded + " ⇒ lp.y=" + lp.y
                 + "（可用区 " + usable + " = 物理 " + physical + " − 手势条 " + nav() + "）"
                 + "  " + (expanded ? "顶边贴限制线 1722" : "底边钉 1816"));
@@ -1424,7 +1430,11 @@ public class OverlayService extends Service {
         //   ⇒ 回到最朴素的做法：按固定锚点摆一次就完事，不再追问真实坐标。
         int[] rs = realScreen();
         int sh = rs[1];
-        int offY = anchorY(sh - nav());
+        // !! v2.92c：这里原来是 anchorY(sh - nav())（可用区），会和上面 line 982 的
+        //   物理屏高口径**打架**；而且本函数**后执行**、直接把 lp.y 覆盖掉
+        //   => 实测 lp.y 恒为 0 => 悬浮条被压到屏幕最底（用户：位置还是错的）
+        //   统一成**物理屏高**（与 Gravity.BOTTOM 的实际基准一致）✓
+        int offY = anchorY(sh);
         if (lp.y != offY) {
             lp.y = offY;
             try {
@@ -1554,6 +1564,32 @@ public class OverlayService extends Service {
         //   修：bar 的高度必须显式包含两行之和（日志行 + 按钮行），别只给按钮行。
         int btnH = (expanded && logMode) ? 56 : (expanded ? 50 : 44);
         int logH = (expanded && logMode) ? LOG_ROW_H_REF : 0;
+        // !! v2.92【夹缝不够就按比例压矮】—— 用户 2026-11-01：进图后吸附位置还是错的
+        //   本机实测（1280x2640 @520dpi）：
+        //     物理 2640 − 手势条 156 = 可用区 2484
+        //     棋盘下沿 devY(1722) = 2405  =>  夹缝只有 79 设备 px
+        //     而两行 44+56=100 参考 px = 119 设备 px
+        //   => 119 > 79：要么顶边压棋盘、要么底边溢出可用区
+        //      （实测落到 参考 y 1742~1842，比设计值 1716~1816 低 26）
+        //   原设计假设夹缝 94 参考 px（1280x2772 那类机器），这台只有 66。
+        //   修：装不下就按比例压矮两行，保证 顶边=棋盘下沿 且 底边≤可用区底。
+        try {
+            int _avail = realScreen()[1] - nav() - RefMapper.devY(BOARD_Y1_REF);
+            int _need = RefMapper.devLen(logH + btnH);
+            if (_avail > 0 && _need > _avail) {
+                double _r = (double) _avail / (double) _need;
+                int _log2 = (int) Math.round(logH * _r);
+                int _btn2 = (int) Math.round(btnH * _r);
+                if (_log2 < 24) { _log2 = 24; }
+                if (_btn2 < 30) { _btn2 = 30; }
+                AppLog.i("[ovl] 夹缝不足 " + _avail + " < 需要 " + _need
+                        + " => 压矮 日志" + logH + "->" + _log2
+                        + " 按钮" + btnH + "->" + _btn2);
+                logH = _log2;
+                btnH = _btn2;
+            }
+        } catch (Throwable ignored) {
+        }
         boolean wide = expanded;
         int w = wide
                 ? Math.max(1, realScreen()[0] - RefMapper.devX(40))

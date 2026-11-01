@@ -11451,6 +11451,46 @@ try:
 except Exception as _e91:       # noqa: BLE001
     check('v2.91 守门可运行（%r）' % (_e91,), False)
 print()
+
+# ── v2.92【进图后吸附位置还是错的：夹缝放不下 + 基准口径打架】──
+#  用户 2026-11-01：「进图后怎么吸附位置还是错的？」
+#  实测本机（1280x2640 @520dpi）：
+#    物理 2640 − 手势条 156 = 可用区 2484；棋盘下沿 devY(1722)=2405
+#    => 夹缝只有 79 设备 px，而条子两行 = 119 设备 px  => 放不下
+#  两处病：
+#    ① 夹缝不足时没有压矮 => 要么压棋盘、要么溢出到屏幕最底
+#    ② base 口径打架：line 982 与 settlePosition 一个按物理、一个按可用区，
+#       且 settlePosition **后执行会覆盖** => 实测 lp.y 恒 0 => 条子被压到屏幕最底
+#       （实测落到 参考 y 1854~1920，正确应是 1737~1803）
+try:
+    _ovl92 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/OverlayService.java'),
+                     encoding='utf-8').read()
+    _code92 = chr(10).join(_ln for _ln in _ovl92.split(chr(10))
+                           if not _ln.strip().startswith('//')
+                           and not _ln.strip().startswith('*')
+                           and not _ln.strip().startswith('/*'))
+
+    check('v2.92 A(1) 夹缝不足时**按比例压矮**两行（_avail / _need）'
+          '（否则 119 塞进 79 的夹缝 => 压棋盘或溢出到屏幕最底）· %s'
+          % ('有 OK' if ('int _avail = realScreen()[1] - nav()' in _code92
+                         and 'int _need = RefMapper.devLen(logH + btnH)' in _code92) else '缺'),
+          'int _avail = realScreen()[1] - nav()' in _code92
+          and 'int _need = RefMapper.devLen(logH + btnH)' in _code92)
+
+    check('v2.92 A(2) 锚点基准统一成**物理屏高**'
+          '（line 982 与 settlePosition 必须同口径；不同口径会互相覆盖）· %s'
+          % ('齐 OK' if ('lp.y = anchorY(physical)' in _code92
+                         and 'int offY = anchorY(sh);' in _code92) else '还不同口径'),
+          'lp.y = anchorY(physical)' in _code92
+          and 'int offY = anchorY(sh);' in _code92)
+
+    check('v2.92 A(3) 撤回守门：settlePosition **不再**用 anchorY(sh - nav())'
+          '（它就是覆盖元凶：后执行把 lp.y 压成 0）· %s'
+          % ('干净 OK' if 'anchorY(sh - nav())' not in _code92 else '还在'),
+          'anchorY(sh - nav())' not in _code92)
+except Exception as _e92:       # noqa: BLE001
+    check('v2.92 守门可运行（%r）' % (_e92,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
