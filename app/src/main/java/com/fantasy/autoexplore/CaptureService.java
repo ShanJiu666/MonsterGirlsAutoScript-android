@@ -235,7 +235,11 @@ public class CaptureService extends Service {
             int rowStride = p.getRowStride();
             int pixelStride = p.getPixelStride();
 
-            Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            // v2.91：优先复用退休池里的位图（不 recycle、不每帧 new 13.5 MB）
+            Bitmap bmp = FrameStore.acquire(w, h);
+            if (bmp == null) {
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            }
             if (pixelStride == 4 && rowStride == w * 4) {
                 sloPath = false;
                 bmp.copyPixelsFromBuffer(buf);

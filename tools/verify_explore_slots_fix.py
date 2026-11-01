@@ -11340,10 +11340,10 @@ try:
                     encoding='utf-8').read()
     _cs87 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/CaptureService.java'),
                     encoding='utf-8').read()
-    check('v2.87 A(3) FrameStore 退休帧**有界回收**（RETIRE_MAX + recycle）'
-          '（否则每帧 13.5 MB 只丢引用 => 22 分钟后 RSS 3.4 GB 被 lmkd 杀 X）· %s'
-          % ('有 OK' if ('RETIRE_MAX' in _fs87 and '.recycle()' in _fs87) else '缺'),
-          'RETIRE_MAX' in _fs87 and '.recycle()' in _fs87)
+    check('v2.87 A(3) FrameStore 帧池**有界且可复用**（RETIRE_MAX + acquire）'
+          '（有界：防 22 分钟涨到 3.4GB 被 lmkd 杀；acquire：不每帧 new 13.5MB）· %s'
+          % ('有 OK' if ('RETIRE_MAX' in _fs87 and 'public static Bitmap acquire' in _fs87) else '缺'),
+          'RETIRE_MAX' in _fs87 and 'public static Bitmap acquire' in _fs87)
 
     check('v2.87 A(4) 退休队列保留 >= 3 代宽限'
           '（只留 1~2 代 => 一次 OCR 要 2 秒，会踩到已 recycle 的帧 X）· RETIRE_MAX=%s'
@@ -11412,6 +11412,44 @@ try:
           _dev88.count('dodgeOverlay(_dx, _dy);') >= 2)
 except Exception as _e88:       # noqa: BLE001
     check('v2.88 守门可运行（%r）' % (_e88,), False)
+print()
+
+# ── v2.91【吸附位置用实测值没校验 + recycle 造成 use-after-free】──
+#  A) 用户 2026-11-01：「自动吸附到棋盘下面，为什么吸附到的实际位置和真机上不一样？」
+#     真机铁证：在「世界图鉴」界面时 bar 被吸到 参考 y 1369~1469（应 1716~1816），骑在棋盘上
+#     病：boardBottomY() 无条件信 measuredBoardBottom()，而它是 BoardEdge 从**当前画面**量;
+#         当前不在地图界面（图鉴/公会/背包）=> 量出来是垃圾 X
+#     修：实测与常量 devY(1722) 相差 > 80 设备 px 判不可信，退回常量
+#  B) 用户 2026-11-01：「现在爆红了」
+#     真机铁证：18:17:47 java.lang.RuntimeException: Canvas: trying to use a recycled bitmap
+#     病：v2.87 的「有界回收」会 recycle 掉读帧线程还拿着的位图 X
+#     修：改成**池复用**（超上限只丢引用交给 GC，绝不 recycle）+ CaptureService 用 acquire
+try:
+    _ovl91 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/OverlayService.java'),
+                     encoding='utf-8').read()
+    _fs91 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/FrameStore.java'),
+                    encoding='utf-8').read()
+    _cs91 = io.open(os.path.join(PROJ, 'app/src/main/java/com/fantasy/autoexplore/CaptureService.java'),
+                    encoding='utf-8').read()
+
+    check('v2.91 A(1) 吸附实测值有**偏离校验**（>80px 判不可信退回常量）'
+          '（否则不在地图界面时会被吸到棋盘上 => 用户：吸附位置和真机不一样）· %s'
+          % ('有 OK' if 'Math.abs(measured - _refBottom) <= 80' in _ovl91 else '缺'),
+          'Math.abs(measured - _refBottom) <= 80' in _ovl91)
+
+    check('v2.91 A(2) 撤回守门：FrameStore **不再 recycle 位图**'
+          '（recycle 会造成 Canvas: trying to use a recycled bitmap X）· %s'
+          % ('干净 OK' if '.recycle()' not in _fs91 else '还有 recycle'),
+          '.recycle()' not in _fs91)
+
+    check('v2.91 A(3) 位图改成**池复用**（acquire）且 CaptureService 用它'
+          '（既不每帧 new 13.5MB，也不回收别人还在用的帧）· %s'
+          % ('有 OK' if ('public static Bitmap acquire' in _fs91
+                         and 'FrameStore.acquire(w, h)' in _cs91) else '缺'),
+          'public static Bitmap acquire' in _fs91
+          and 'FrameStore.acquire(w, h)' in _cs91)
+except Exception as _e91:       # noqa: BLE001
+    check('v2.91 守门可运行（%r）' % (_e91,), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

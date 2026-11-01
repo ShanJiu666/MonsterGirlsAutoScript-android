@@ -1367,11 +1367,27 @@ public class OverlayService extends Service {
         //   ⇒ 顶边对齐棋盘底边 2537。
         //   ⭐ v2.34：**优先用 BoardEdge 实测**（进图第一张后自动对齐），
         //      拿不到帧才退回 devY(1722) 常量。
+        // !! v2.91【实测值必须校验】—— 用户 2026-11-01：
+        //   「自动吸附到棋盘下面，为什么吸附到的实际位置和真机上不一样？」
+        //   真机铁证：在「世界图鉴」界面时 bar 被吸到 参考 y 1369~1469
+        //     （应该在 1716~1816）—— 骑在棋盘上；
+        //     几何日志：设备 顶=1831 lp.y=534 => boardBottomY() 回了 1831，
+        //     而 devY(1722) 应该是 2405。
+        //   病：measuredBoardBottom() 是 BoardEdge 从**当前画面**量棋盘底边，
+        //     可当前画面根本不是地图（世界图鉴/公会/背包）=> 量出来的是垃圾值，
+        //     却被无条件当成真值 => 悬浮条被吸到莫名其妙的地方 X
+        //   修：实测值与常量 devY(1722) 相差超过 **80 设备 px** 就判为不可信，
+        //     退回常量 ✓（正常地图上实测与常量本来就只差几 px）
         int measured = measuredBoardBottom();
-        if (measured > 0) {
+        int _refBottom = RefMapper.devY(BOARD_Y1_REF);
+        if (measured > 0 && Math.abs(measured - _refBottom) <= 80) {
             return measured;
         }
-        return RefMapper.devY(BOARD_Y1_REF);
+        if (measured > 0) {
+            AppLog.i("[ovl] 实测棋盘底=" + measured + " 与常量 " + _refBottom
+                    + " 相差过大（多半不在地图界面）=> 退回常量");
+        }
+        return _refBottom;
     }
 
     private int anchorY(int usableH) {

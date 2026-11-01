@@ -65,18 +65,36 @@ public final class FrameStore {
             return;
         }
         RETIRED.addLast(old);
+        // !! v2.91【绝不 recycle】—— 上一版 recycle 造成 use-after-free：
+        //   真机 2026-11-01 18:17 反复抛
+        //     java.lang.RuntimeException: Canvas: trying to use a recycled bitmap
+        //   因为读帧线程（RefMapper/OCR）可能还拿着那张位图在画 X
+        //   => 超上限的只是**丢掉引用**交给 GC，读取方永远不会踩到已回收的位图 ✓
         while (RETIRED.size() > RETIRE_MAX) {
-            Bitmap dead = RETIRED.pollFirst();
-            if (dead != null && dead != latest && !dead.isRecycled()) {
-                try {
-                    dead.recycle();
-                } catch (Throwable ignored) {
-                    // 已经被别处回收/正在用 => 放弃这一张，绝不因为回收抛异常
-                }
-            }
+            RETIRED.pollFirst();
         }
     }
 
+    /**
+     * v2.91：从退休池取一张同尺寸、未回收的位图复用；拿不到返回 null。
+     *   => 既不每帧 new 13.5 MB，也绝不回收别人还在用的帧 ✓
+     */
+    public static Bitmap acquire(int w, int h) {
+        synchronized (RETIRED) {
+            java.util.Iterator<Bitmap> it = RETIRED.iterator();
+            while (it.hasNext()) {
+                Bitmap b = it.next();
+                if (b == null || b.isRecycled() || b == latest) {
+                    continue;
+                }
+                if (b.getWidth() == w && b.getHeight() == h && b.isMutable()) {
+                    it.remove();
+                    return b;
+                }
+            }
+        }
+        return null;
+    }
     private FrameStore() {
     }
 
