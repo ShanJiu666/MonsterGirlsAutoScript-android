@@ -3028,13 +3028,22 @@ def bag_upgrade(b, log, tag='bag'):
             say('   ⚙ 开背包第 %d 轮未成：%s ⇒ 屏上认到 %s' % (_try + 1, _where, _txts))
             log.append({'bag': 'open_bag_miss', 'try': _try, 'at': _where, 'texts': _txts})
             if _hit is not None:
-                # ⭐ 硬判据（v0.52：均值差判据被轮播横幅干扰——横幅一动 diff 就超阈值）：
-                #   **模板命中背包图标、点击却没开出背包 = 点击通道失效铁证** ⇒ 立即放弃。
-                #   重试同一点击无意义；GUILD_BTN/万能位兜底才是「打开着头像界面不知道在干嘛」
-                #   的乱点源头 ⇒ 坚决不点（v0.53）
-                say('   ⚠ 模板命中背包图标但点击未生效 ⇒ 放弃升星（点击通道异常），请手动操作')
-                log.append({'bag': 'abort_tap_dead', 'at': (_hit[0], _hit[1]), 'try': _try})
-                return False
+                # !! v2.96【不再一次即放弃】—— 真机 2026-11-03 00:52 实例：
+                #   模板命中背包图标、点了没开出背包 ⇒ 旧代码立即 return False
+                #   ⇒ 升星整块被跳过、下一张图直接开跑
+                #   ⇒ 用户看到的就是「打开背包就直接显示准备进图」✗
+                #   而我手动点同一坐标 (964,1680) 是能正常打开背包的（实测 ✓）
+                #   ⇒ 那只是一次瞬态（点击被吞/帧偏旧），应该重试，不是判死
+                log.append({'bag': 'tap_no_effect_retry', 'at': (_hit[0], _hit[1]),
+                            'try': _try})
+                say('   · 模板命中但没开出背包（第 %d/3 轮）⇒ 重新来一轮（不当成通道失效）' % (_try + 1))
+                _frame0 = None
+                try:
+                    b.snap(tag + 'retry%d' % _try)      # 强制新帧（旧帧会把刚开的背包读成大厅）
+                except Exception:       # noqa: BLE001
+                    pass
+                time.sleep(1.2)
+                continue
             _now = b.img()
             if _frame0 is not None and _now is not None:
                 _diff = float(_np.mean(_np.abs(

@@ -2504,12 +2504,58 @@ def foretell_flow(bot, log, flags=None):
         out['picked'].append(c['name'])
 
     # ⑥ 点「确定」（优先 OCR；搜索带只框面板那个确定 ✓）
-    p = _find_text_btn(b, ('确定',), 1230, 1440)
-    at = (p[0], p[1]) if p else FORETELL['ok']
-    b.tap_dlg(at[0], at[1], wait=2.2)
-    log.append({'foretell': 'ok', 'at': list(at), 'src': 'ocr' if p else 'fallback'})
-    out['acts'] = ['pick%d' % len(pick), 'ok']
+    # ⛔ v2.95【两个「点了就假定成功」=> 卡没选中就无限「点卡+点确定」】
+    #   用户 2026-11-03：「预言石板不选择预言就一直点确认」「点了很久确认才弄完」
+    #   真机当时面板一直开着：点卡没生效（没选中）=> 点确定等于空点 =>
+    #   外层每轮重进本函数 => 又点一次卡 + 又点一次确定 => 看起来就是"一直点确认" ✗
+    #   ⇒ 修：① 点完确定**必须复检面板是否真的关掉**；
+    #         ② 没关 => **再试一次**（重点卡片行中心 + 确定）；
+    #         ③ 还没关 => **点 X 收掉 + 如实记 giveup**（绝不再无限重试），
+    #            并把"当时面板上到底是什么字"记下来（这才是下次能定位的证据 ✓）
+    def _panel_still_open():
+        try:
+            _it = _items(b)
+        except Exception:       # noqa: BLE001
+            return False, []
+        if not _it:
+            return False, []
+        return bool(_has(_it, FORETELL['title']) or _foretell_panel_like(_it)), _it
 
+    def _tap_ok(_try):
+        _p = _find_text_btn(b, ('确定',), 1230, 1440)
+        _at = (_p[0], _p[1]) if _p else FORETELL['ok']
+        b.tap_dlg(_at[0], _at[1], wait=2.2)
+        log.append({'foretell': 'ok', 'at': list(_at),
+                    'src': 'ocr' if _p else 'fallback', 'try': _try})
+        return _at
+
+    _at = _tap_ok(1)
+    _still, _it2 = _panel_still_open()
+    if _still:
+        log.append({'foretell': 'ok_not_taken', 'try': 1,
+                    'texts': [(t.get('text') or '')[:14] for t in (_it2 or [])][:14],
+                    'note': '点了确定但面板还开着 => 卡多半没选中；再试一次'})
+        say('      · ⚠ 点了「确定」面板没关（卡可能没选中）⇒ **再试一次**')
+        for c in pick:
+            b.tap_dlg(c['x'], FORETELL['cards_y'], wait=1.4)
+        _at = _tap_ok(2)
+        _still, _it2 = _panel_still_open()
+    if _still:
+        log.append({'foretell': 'giveup', 'why': 'ok_twice_panel_still_open',
+                    'picked': out['picked'],
+                    'texts': [(t.get('text') or '')[:14] for t in (_it2 or [])][:14],
+                    'note': '两次都没关掉 => 点 X 收掉，**不再重试**（旧代码无限点确定 ✗）'})
+        say('      · ✗ 两次都没关掉 ⇒ 点 X 收掉，本轮放弃（不再反复点确定）')
+        try:
+            close_panel(b, log, 'foretell_giveup_x', title=FORETELL['title'],
+                        structured=_foretell_panel_like)
+        except Exception:       # noqa: BLE001
+            pass
+        out['acts'] = []
+        out['picked'] = []
+        return out
+
+    out['acts'] = ['pick%d' % len(pick), 'ok']
     close_panel(b, log, 'foretell_tail', title=FORETELL['title'],
                 structured=_foretell_panel_like)
     log.append({'foretell': 'done', 'picked': out['picked'], 'stop': out['stop']})

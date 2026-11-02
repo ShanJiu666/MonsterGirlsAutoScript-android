@@ -11141,6 +11141,16 @@ try:
     _src85 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
     _code85 = chr(10).join(_ln for _ln in _src85.split(chr(10))
                            if not _ln.strip().startswith('#'))
+    import explore_loop as _EL96
+
+    class _B96:
+        def img(self):
+            return None
+
+    _op96, _how96 = _EL96._bag_panel_open(_B96(), [{'text': '背包'}])
+    check('v2.96 B(1) 背包判据文字兜底**实跑**'                 # 真跑 _bag_panel_open
+          '（真机 OCR 读不到标题时靠文字命中；这条保证它没被改坏）· %s'
+          % ('开 OK' if _op96 else '没开'), _op96 is True)
 
     check('v2.85 A(1) 派遣成功处会记 purple_sent（否则每轮重入 X）· %s'
           % ('有 OK' if "setdefault('purple_sent', set())" in _code85 else '缺'),
@@ -11561,6 +11571,128 @@ try:
 except Exception as _e94:       # noqa: BLE001
     check('v2.94 守门可运行（%r）' % (_e94,), False)
 print()
+
+# ── v2.95【预言石板「一直点确定」：点卡与点确定都不验证结果】──
+#  用户 2026-11-03：「为什么又开始预言石板不选择预言就一直点确认了」
+#               「就是刚刚结束那把，点了很久确认才正常弄完」
+#  病（读代码即证）：foretell_flow ⑤点卡、⑥点确定 **都是「点了就假定成功」**，
+#    没有复检 ⇒ 卡没选中 ⇒ 确定空点 ⇒ 外层每轮重进 ⇒ 又点卡 + 又点确定
+#    ⇒ 表现就是「不选预言、一直点确认」X
+#  修：点完确定复检面板；没关则再试一次（重点卡片行中心）；仍没关 ⇒ 点 X 收掉 +
+#      记 giveup + **返回空 acts**（不假装成功、不再无限重试）
+try:
+    import buypanels as BP
+    _bp95 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+    _c95 = chr(10).join(_ln for _ln in _bp95.split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+    check('v2.95 A(1) foretell_flow 点完确定**复检面板**(ok_not_taken 证据) · %s'
+          % ('有 OK' if 'ok_not_taken' in _c95 else '缺'),
+          'ok_not_taken' in _c95)
+    check('v2.95 A(2) 两次都关不掉 ⇒ **点 X 收掉 + giveup**（不再无限点确定）· %s'
+          % ('有 OK' if ("'giveup'" in _c95 and 'foretell_giveup_x' in _c95) else '缺'),
+          "'giveup'" in _c95 and 'foretell_giveup_x' in _c95)
+    check('v2.95 A(3) 放弃时**返回空 acts**（不假装选成功，上层据此收工）· %s'
+          % ('有 OK' if _c95.count('out[\'acts\'] = []') >= 1 else '缺'),
+          _c95.count("out['acts'] = []") >= 1)
+
+    # ── 黑盒：造一个**永远关不掉**的预言面板 ⇒ 确定最多点 2 次、必须 giveup ──
+    def _item95(t, x, y, conf=0.96):
+        return {'text': t, 'cx': x, 'cy': y, 'x0': x - 40, 'x1': x + 40,
+                'y0': y - 12, 'y1': y + 12, 'conf': conf}
+
+    _panel95 = [
+        _item95('预合石板', 540, 560),          # 标题（真机实测被读成「预合」✓ 结构兜底）
+        _item95('本次可选择1个预言！', 540, 620),
+        _item95('财富', 212, BP._foretell_card_y()), _item95('秘藏', 540, BP._foretell_card_y()), _item95('命运', 868, BP._foretell_card_y()),
+        _item95('确定', 540, 1390),
+    ]
+
+    class _Bot95(FakeBot):
+        """OCR 永远返回同一个预言面板（= 怎么点都关不掉）"""
+        def __init__(self):
+            FakeBot.__init__(self, _panel95)
+
+    _b95 = _Bot95()
+    _log95 = []
+    _out95 = BP.foretell_flow(_b95, _log95, flags={})
+    # 只数「重试循环里的确定」：放弃时 close_panel 会再点一下收尾，
+    _ok_taps = [e for e in _log95 if e.get('foretell') == 'ok']
+    _giveup = [e for e in _log95 if e.get('foretell') == 'giveup']
+    check('v2.95 B(1) 关不掉时「确定」**最多点 2 次**（旧代码会无限点）· %s'
+          % ('点 %d 次' % len(_ok_taps),), len(_ok_taps) <= 2)
+    check('v2.95 B(2) 关不掉时留 giveup 证据（带当时面板文字）· %s'
+          % ('有' if _giveup else '没有',),
+          bool(_giveup) and 'texts' in (_giveup[0] if _giveup else {}))
+    check('v2.95 B(3) 关不掉时**不假装选成功**（acts 空）· %s'
+          % ('acts=%r' % (_out95.get('acts'),),), _out95.get('acts') == [])
+
+    # ── 对照：面板**能关掉**时照常走完（证明不是恒放弃）──
+    class _Bot95ok(FakeBot):
+        def __init__(self):
+            FakeBot.__init__(self, _panel95)
+            self._n = 0
+
+        def ocr(self, *a, **k):
+            self._n += 1
+            # 前 2 次给面板（读卡+点卡），之后给"已关掉"的画面
+            return [dict(t) for t in (_panel95 if self._n <= 2 else
+                                      [_item95('夏日海滩[100]', 540, 300)])]
+
+        def ocr_dlg(self, *a, **k):
+            return self.ocr()
+
+    _b95b = _Bot95ok()
+    _log95b = []
+    _out95b = BP.foretell_flow(_b95b, _log95b, flags={})
+    check('v2.95 B(4) 对照项：面板能关掉时**照常选卡成功**（不是恒放弃）· %s'
+          % ('acts=%r picked=%r' % (_out95b.get('acts'), _out95b.get('picked')),),
+          bool(_out95b.get('acts')) and bool(_out95b.get('picked')))
+except Exception as _e95:       # noqa: BLE001
+    check('v2.95 守门可运行（%r）' % (_e95,), False)
+print()
+
+# ── v2.96【升星：模板命中但没开出背包 ⇒ 旧代码一次即放弃 ⇒ 直接跳下一张图】──
+#  用户 2026-11-03：「装备升星什么情况？打开背包就直接显示准备进图了」
+#  真机实测（我手动点同一坐标 (964,1680)）=> **背包正常打开** ✓
+#  判据实测：真背包帧 brown_frac=0.734 >= 0.6 ✓ / 大厅帧 0.294 ✗
+#  => 坐标对、判据对，那一次只是**被吞掉的点击**（瞬态）
+#  旧代码却把它判成「点击通道失效」=> return False => 升星整块跳过、下一张图直接开跑 X
+#  修：记一笔 + 强制新帧 + 重来一轮（最多 3 轮），不再一次即死
+try:
+    _el96 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c96 = chr(10).join(_ln for _ln in _el96.split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+    check('v2.96 A(1) 开背包失败改成**重试**（tap_no_effect_retry + continue）· %s'
+          % ('有 OK' if ('tap_no_effect_retry' in _c96) else '缺'),
+          'tap_no_effect_retry' in _c96)
+
+    check('v2.96 A(2) 撤回守门：不再有「模板命中但未生效 ⇒ 立刻 return False」'
+          '（abort_tap_dead 那条一次即死，真机 2026-11-03 实测只是一次被吞的点击 X）· %s'
+          % ('干净 OK' if 'abort_tap_dead' not in _c96 else '还在'),
+          'abort_tap_dead' not in _c96)
+except Exception as _e96:       # noqa: BLE001
+    # 实跑：闸门已记下 sid ⇒ **不该再派一次**（v2.94 行为级）
+    import explore_loop as _EL97
+    _px97 = _EL97.cell_center(1, 1)
+    _rc97 = _EL97.cell_of(_px97[0], _px97[1])
+    _ctx97 = {'st': {_rc97: {'sid': 'S00003_221'}},
+              'tapped': _px97, 'marks': {},
+              'flags': {'slots_free': 1,
+                          'purple_sent': {(1, 1), 'sid:S00003_221'}},
+              'slots_free': 1, 'ev_tiles': ['1,1']}
+    _panel97 = [item('探索产出', 274, 443), item('战斗事件', 806, 442),
+                 item('探索', 274, 736), item('战斗', 806, 736)]
+    _b97 = FakeBot(_panel97)
+    _log97 = []
+    EL.popups(_b97, _panel97, _log97, ctx=_ctx97)
+    _dis97 = [e for e in _log97 if e.get('explore')]
+    check('v2.96 B(2) 已派过的紫格不再重复派遣（实跑 popups）· %s'
+          % ('不派 OK' if not _dis97 else '又派了',), not _dis97)
+    check('v2.96 守门可运行（%r）' % (_e96,), False)
+print()
+
 
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
