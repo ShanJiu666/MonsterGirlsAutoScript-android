@@ -11491,6 +11491,38 @@ try:
 except Exception as _e92:       # noqa: BLE001
     check('v2.92 守门可运行（%r）' % (_e92,), False)
 print()
+
+# ── v2.93【炼金：一次定生死 => 面板晚一拍就判没开、且再也不点返回】──
+#  用户 2026-11-02：「领取成功后没有点返回」「现在还是卡在领取炼金那一步」
+#  真机铁证（19:12:58）：
+#    {alch: chest_by_tpl, at:(361,399), score:0.999}   <= 箱子找得准
+#    {alch: open, panel: 没开出任何面板, ok:False}       <= 点完立刻 OCR，面板还没出来
+#    {alch: open_final, hit:None, note:点错已清理}       <= 直接 return res 放弃
+#  而面板后来确实开了（截图：炼金结果 95900 + 返回按钮停在那儿）=> 永远走不到领取 => 卡住 X
+#  另：进来时面板本来就开着时，旧代码还会再点一下箱子（反而把它点掉）X
+#  修法：① 已开面板 => 不点箱子直接领取 ② 点箱验证改成最多 3 次重试
+try:
+    _gd93 = io.open(os.path.join(MAPBOT, 'guild_daily.py'), encoding='utf-8').read()
+    _c93 = chr(10).join(_ln for _ln in _gd93.split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+    check('v2.93 A(1) 进炼金前先判「面板本来就开着」=> 不再点箱子'
+          '（再点会把它点掉 => 面板没了 => 永远领不到 X）· %s'
+          % ('有 OK' if ('already_open' in _c93 and '_is_alch_panel(items)' in _c93) else '缺'),
+          'already_open' in _c93 and '_is_alch_panel(items)' in _c93)
+
+    check('v2.93 A(2) 点箱验证是**最多 3 次重试**（不是一次定生死）· %s'
+          % ('有 OK' if ('for _k in range(3)' in _c93
+                         and '_tap_xy(b, _cx, _cy, wait=2.5)' in _c93) else '缺'),
+          'for _k in range(3)' in _c93
+          and '_tap_xy(b, _cx, _cy, wait=2.5)' in _c93)
+
+    check('v2.93 A(3) 判据收成一个 _is_alch_panel（三处判据同源，别再各写一份）· %s'
+          % ('有 OK' if _c93.count('_is_alch_panel') >= 3 else '缺'),
+          _c93.count('_is_alch_panel') >= 3)
+except Exception as _e93:       # noqa: BLE001
+    check('v2.93 守门可运行（%r）' % (_e93,), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

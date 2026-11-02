@@ -1764,11 +1764,37 @@ def run_alchemy(b, log=None, auto_start=True, leave=False):
         _log(log, {"alch": "chest_by_anchor", "at": (_cx, _cy),
                    "note": "模板没命中（角色挡住/皮肤不同）⇒ 用用户指认的实测位置"})
         _say("   · ⚠ 模板没命中 ⇒ 用实测兜底 ref(%d,%d)" % (_cx, _cy))
-    _tap_xy(b, _cx, _cy, wait=3.0)
-    items = ocr_items(b, tag="alch_open")
+    # !! v2.93【一次定生死 => 面板晚一拍就被判没开、且再也不点返回】
+    #   真机铁证（2026-11-02 19:12:58）：
+    #     {alch: chest_by_tpl, at:(361,399), score:0.999}   <= 箱子找得准
+    #     {alch: open, panel: 没开出任何面板, ok:False}       <= 点完立刻 OCR，面板还没出来
+    #     {alch: open_final, hit:None, note:点错已清理}       <= 直接放弃
+    #   而**面板后来确实开了**（用户截图：炼金结果 95900 金币 + 返回按钮停在那儿）
+    #   => 代码 `return res` 提前返回 => 永远走不到领取分支 => 面板留屏 => 卡住 X
+    #   另外：进来时若面板**本来就开着**，旧代码还会再点一下箱子（反而把它点掉）X
+    #   ---- 修法 ----
+    #     ① 先看「进来时面板是否已经开着」=> 开着就**不点箱子**，直接去领取
+    #     ② 否则点箱子 + 验证，**最多重试 3 次**（每次等 2.5 秒再 OCR）
+    #       面板慢一拍也能接住，不再因为一次没等到就整轮放弃 ✓
+    def _is_alch_panel(_its):
+        return (result_panel_open(_its) or main_panel_open(_its)
+                or has(_its, "献祭宝箱怪", "当前正在炼金中"))
+
+    items = _pre
+    _ok_panel = _is_alch_panel(items)
+    if _ok_panel:
+        _say("   · 进来时炼金面板**已经开着** ⇒ 不再点箱子（再点会把它点掉 ✗）")
+        _log(log, {"alch": "already_open", "panel": _which_panel(items)})
+    else:
+        for _k in range(3):
+            _tap_xy(b, _cx, _cy, wait=2.5)
+            items = ocr_items(b, tag="alch_open%d" % _k)
+            _ok_panel = _is_alch_panel(items)
+            if _ok_panel:
+                break
+            _say("   · 点 (%d,%d) 后还没看到炼金面板（第 %d/3 次）⇒ 再试一次"
+                 % (_cx, _cy, _k + 1))
     _opened = _which_panel(items)
-    _ok_panel = (result_panel_open(items) or main_panel_open(items)
-                 or has(items, "献祭宝箱怪", "当前正在炼金中"))
     _log(log, {"alch": "open", "at": (_cx, _cy), "panel": _opened,
                "ok": _ok_panel, "texts": _texts(items)[:12]})
     if _ok_panel:
