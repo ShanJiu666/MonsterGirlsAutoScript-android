@@ -6587,7 +6587,13 @@ def popups(b, items, log, ctx=None):
     _fl85 = ctx.get('flags') if isinstance(ctx.get('flags'), dict) else {}
     _sent85 = _fl85.get('purple_sent') or set()
     _nogo85 = _fl85.get('nogo_rc') or ()
-    _purple_seen85 = (_tc is not None) and ((_tc in _sent85) or (_tc in _nogo85))
+    # !! v2.94【闸门必须再按 sid 判一次】—— 2026-11-02 真机：
+    #   {explore: first_fixed_btn, at:(275,736), tile:-1,2} => tapped 是面板按钮，
+    #   不是棋盘格 => _tc=(-1,2) 盘外 => 按格号记的 purple_sent 永远匹配不上 X
+    #   => 紫金格每轮重入、反复派遣（用户：明明派遣成功了还在继续派遣）
+    _sid85 = ("sid:" + str(_tapped_sid)) if _tapped_sid else None
+    _purple_seen85 = (((_tc is not None) and ((_tc in _sent85) or (_tc in _nogo85)))
+                      or (_sid85 is not None and _sid85 in _sent85))
     if _purple_seen85:
         _sk85 = _fl85.setdefault('purple_skip_logged', set())
         if _tc not in _sk85:
@@ -6602,6 +6608,21 @@ def popups(b, items, log, ctx=None):
                      or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))
                      or (_is_purple and _free_now > 0 and not _purple_seen85))
     if EXPLORE_DISPATCH and _is_purple and _free_now > 0 and not _purple_seen85 and _expl_entry63:
+        # !! v2.94【一进来就记「这格已经派过」】
+        #   旧钩子挂在「已派遣一支探索队」那条成功路径上，可那条经常走不到
+        #     （第二次 OCR 读到的还是「键派遣」=> still_open_close => 不记）
+        #   => 下一轮又重入 => 反复派遣 X
+        #   改成进入本分支即记（sid + 格号双 key）=> 同一紫格本图最多派一次 ✓
+        try:
+            _fl94 = ctx.get("flags") if isinstance(ctx.get("flags"), dict) else {}
+            if _fl94 is not None:
+                _ps94 = _fl94.setdefault("purple_sent", set())
+                if _tapped_sid:
+                    _ps94.add("sid:" + str(_tapped_sid))
+                if _tc is not None:
+                    _ps94.add(_tc)
+        except Exception:       # noqa: BLE001
+            pass
         if not (fb(items, L['expl'])
                 or (dlg_c() and _dlg_panel_btn(ditems, L['ebtn']))):
             # 命中的是 v1.63 新补的那一条 ⇒ 记一笔（便于日后对账 ✓）

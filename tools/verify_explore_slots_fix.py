@@ -275,12 +275,16 @@ bot2 = FakeBot(panel)
 log2 = []
 act2 = EL.popups(bot2, panel, log2, ctx=ctx)
 check('第 2 次：又点了一下', len([t for t in bot2.taps if t[0] == 'tap_dlg']) == 1)
-check('第 2 次：判定"槽其实是满的"并写回 flags',
-      ctx['flags'].get('slots_free') == 0 and ctx.get('slots_free') == 0,
-      ctx['flags'])
-check('第 2 次：留下 slots_full_latched 证据',
-      any(e.get('explore') == 'slots_full_latched' for e in log2),
-      [e for e in log2 if e.get('explore')])
+# v2.94：闸门改成 sid+格号双 key 且「进分支即记」=> 同一紫格第 2 次**直接跳过**，
+#   不再靠「第 2 次判满 slots_full_latched」来止血。
+#   ⚠ 那条 latch 现在对**同一格**不可达 —— 这不是退化，正是修复的目的：
+#     派过就不再派（真机 2026-11-02：派遣成功后仍反复派遣 X）。
+#   保留的判据 = 「不会重复派遣」本身 + 「跳过要留证据」（不静默）。
+check('第 2 次：同一紫格不再重复派遣（v2.94 闸门生效）',
+      len([t for t in bot2.taps if t[0] == 'tap_dlg']) <= 1 and len(bot2.taps) <= len(bot.taps),
+      bot2.taps)
+check('第 2 次：留下 purple_skip 证据（跳过不是静默）',
+      bool(ctx['flags'].get('purple_skip_logged')), ctx['flags'])
 
 bot3 = FakeBot(panel)
 log3 = []
@@ -11523,6 +11527,41 @@ try:
 except Exception as _e93:       # noqa: BLE001
     check('v2.93 守门可运行（%r）' % (_e93,), False)
 print()
+
+# ── v2.94【紫金格反复派遣：闸门按格号判，可 tapped 常常是面板按钮(-1,2)】──
+#  用户 2026-11-02：「明明紫金探索已经派遣成功了，还在继续派遣」
+#  真机铁证：
+#    r2 {dispatch: btn_by_ocr, text: 键派遣, try:1} / try:2  => 第二次读到的还是「键派遣」
+#    r2 purple_prefer_explore cell=2,4
+#    r3 purple_prefer_explore cell=2,4                       => 又来一次
+#    r3 {explore: first_fixed_btn, at:(275,736), tile:-1,2}  => tile 是盘外
+#  病：v2.85 的 purple_sent 记录与闸门都按格号 key，而 tapped 常是面板按钮(275,736)
+#      => _tc=(-1,2) 盘外 => 记录被 if 1<=rc<=5 挡掉、闸门也永远匹配不上
+#      => 同一紫格每轮重入 => 反复派遣 X
+#  另：记录钩子挂在「已派遣一支探索队」那条成功路径上，可那条经常走不到
+#      （still_open_close）=> 就算格号对也不会被记下
+#  修法：① 闸门再按 sid 判 ② 进入分支即记录（sid + 格号双 key）
+try:
+    _el94 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c94 = chr(10).join(_ln for _ln in _el94.split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+    check('v2.94 A(1) 闸门再按 sid 判一次（格号在面板按钮当 tapped 时是盘外，永远匹配不上）· %s'
+          % ('有 OK' if ('_sid85' in _c94 and '_sid85 in _sent85' in _c94) else '缺'),
+          '_sid85' in _c94 and '_sid85 in _sent85' in _c94)
+
+    check('v2.94 A(2) 进入分支即记录（不再等「已派遣一支探索队」那条常走不到的路）· %s'
+          % ('有 OK' if ('_ps94' in _c94 and 'sid:' in _c94) else '缺'),
+          '_ps94' in _c94 and 'sid:' in _c94)
+
+    check('v2.94 A(3) 撤回守门：闸门不再是只看格号的老写法'
+          '（_purple_seen85 = (_tc is not None) and ...，它挡不住面板按钮场景 X）· %s'
+          % ('干净 OK' if '_purple_seen85 = (_tc is not None) and' not in _c94 else '还是老写法'),
+          '_purple_seen85 = (_tc is not None) and' not in _c94)
+except Exception as _e94:       # noqa: BLE001
+    check('v2.94 守门可运行（%r）' % (_e94,), False)
+print()
+
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
