@@ -6990,6 +6990,35 @@ def popups(b, items, log, ctx=None):
     #   （零额外 OCR，全靠已有的 items / ditems）：
     #     ① 说明文案「※花费金币分别解锁**宝库**的外层、内层、核心」(dlg 1459 ⇒ 帧内 1250 ✓)
     #     ② 右下角按钮 (dlg 1444 ⇒ 帧内 1235 ✓) 经 dlg_items 换算后按 dlg 标定值判
+    # !! v2.97【面板慢一拍 ⇒ 轮询等它画出来】—— 真机 2026-11-03 实例：
+    #   3,2 勇者之墓那格耗时 11.7s（同图别格 1~6s），且一条 relic 日志都没有
+    #   ⇒ 判断发生在「面板还没画出来」的那一帧（识别与判据都已离线验过是好的 ✓）
+    #   ⚠ 只在「画面被压暗」（= 有面板盖着）时才轮询 ≤3 轮 × 1.0s
+    #      ⇒ 正常跑图零额外开销（用户口径：不要让每图时间变长 ✓）
+    try:
+        _dim97 = (b.last_change or {}).get('dim')
+    except Exception:       # noqa: BLE001
+        _dim97 = None
+    if (_dim97 is not None and _dim97 < 0.85
+            and not buypanels._relic_panel_like(items)
+            and not _is_prophecy_panel(items)
+            and not fb(items, *L['special'])):
+        for _w97 in range(3):
+            time.sleep(1.0)
+            try:
+                b.snap('sp_wait%d' % _w97)
+            except Exception:       # noqa: BLE001
+                pass
+            items = b.ocr(tag='sp_wait%d' % _w97)
+            if (buypanels._relic_panel_like(items) or _is_prophecy_panel(items)
+                    or fb(items, *L['special'])):
+                log.append({'special_wait': 'appeared', 'round': _w97 + 1,
+                            'dim': round(float(_dim97), 3)})
+                say('   · 面板慢了一拍，第 %d 轮才认出 ✓' % (_w97 + 1))
+                break
+        else:
+            log.append({'special_wait': 'timeout', 'dim': round(float(_dim97), 3),
+                        'texts': [(i.get('text') or '')[:12] for i in (items or [])][:10]})
     _sp = []
     if dlg_c() and (fb(items, '解锁宝库') or _dlg_btn_sig(ditems, 'vault')):
         _sp.append('黄金宝库')

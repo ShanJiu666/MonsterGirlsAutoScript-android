@@ -11693,6 +11693,33 @@ except Exception as _e96:       # noqa: BLE001
     check('v2.96 守门可运行（%r）' % (_e96,), False)
 print()
 
+# ── v2.97【面板慢一拍：判断发生在面板还没画出来的那一帧】──
+#  用户 2026-11-03：「勇者之墓没用正常点击」
+#  离线实测把三层都验过了：OCR 6/6 命中 conf=1.00 / _relic_panel_like=True /
+#  _panel_title_of=英灵使者 -> SPECIAL_ALIAS -> 勇者之墓 在 act_on 里 ✓
+#  => 识别、判据、分派都没问题，剩下的只有**时序**
+#  旁证：3,2 那格耗时 11.7s（同图别格 1~6s），且一条 relic 日志都没有
+#  修：画面被压暗（有面板盖着）却认不出面板时，轮询 ≤3 轮 × 1.0s 等它画出来
+try:
+    _el97 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c97 = chr(10).join(_ln for _ln in _el97.split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+    check('v2.97 A(1) 有「等面板画出来」的轮询（special_wait: appeared/timeout）· %s'
+          % ('有 OK' if ('special_wait' in _c97 and 'appeared' in _c97) else '缺'),
+          'special_wait' in _c97 and 'appeared' in _c97)
+
+    check('v2.97 A(2) 轮询**有上限**（≤3 轮，别在热路径里无限等）· %s'
+          % ('有 OK' if 'for _w97 in range(3)' in _c97 else '缺'),
+          'for _w97 in range(3)' in _c97)
+
+    check('v2.97 A(3) 只在**画面被压暗**时才轮询（正常跑图零额外开销）· %s'
+          % ('有 OK' if ('_dim97 is not None and _dim97 < 0.85' in _c97) else '缺'),
+          '_dim97 is not None and _dim97 < 0.85' in _c97)
+except Exception as _e97:       # noqa: BLE001
+    check('v2.97 守门可运行（%r）' % (_e97,), False)
+print()
+
 
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
