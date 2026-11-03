@@ -2556,8 +2556,42 @@ def foretell_flow(bot, log, flags=None):
         return out
 
     out['acts'] = ['pick%d' % len(pick), 'ok']
-    close_panel(b, log, 'foretell_tail', title=FORETELL['title'],
-                structured=_foretell_panel_like)
+    # !! v2.101【照抄 PC：收尾用**_univ_close万能点位**】
+    #   PC 原话：「用万能点位关面板（三个新面板都吃这一下 ✓）」`mapbot_pc/buypanels.py:2670`
+    #   旧写法 `close_panel(title=...)` 认不出面板就**什么都不点**（v2.59 禁盲点）
+    #   ⇒ 面板留着 ⇒ 下一步的计划点击落在它上面把它关掉
+    #     （用户 2026-11-03 真机：点「5,1」正好把预言面板关了）X
+    # !! v2.101【点完确定后：**取新帧**复检，还开着就用**识别到的文字按钮**关】
+    #   用户 2026-11-03 真机：点「3,2」预言面板没做完、面板没关，
+    #   下一步计划点击「5,1」正好落在它上面把它关掉 X
+    #   旧写法两种都不对：
+    #     · close_panel(title=...) 认不出面板就**什么都不点** ⇒ 面板留着
+    #     · _univ_close 盲点固定点位 ⇒ 用户明确不要（「用万能点位就算了」）✓
+    #   ⇒ 走中间路：先取**新帧**复检（不能用缓存帧，今天已踩两次），
+    #     还开着就 OCR 找「返回/关闭/确定」点一下，最多 2 轮，全失败如实记日志 ✓
+    for _k101 in range(2):
+        try:
+            b.snap('ft_tail%d' % _k101)
+            _it101 = b.ocr(tag='ft_tail%d' % _k101)
+        except Exception:       # noqa: BLE001
+            _it101 = []
+        try:
+            _btn101 = _find_text_btn(b, ('返回', '关闭', '确定'))
+        except Exception:       # noqa: BLE001
+            _btn101 = None
+        _open101 = bool(_it101) and (_has(_it101, FORETELL['title'])
+                                     or _foretell_panel_like(_it101)
+                                     or _btn101 is not None)
+        if not _open101:
+            break
+        if _btn101:
+            b.tap_dlg(_btn101[0], _btn101[1], wait=1.6)
+            log.append({'foretell': 'tail_close_by_text', 'text': _btn101[2],
+                        'round': _k101 + 1})
+        else:
+            log.append({'foretell': 'tail_still_open_no_btn', 'round': _k101 + 1,
+                        'texts': [(i.get('text') or '')[:12] for i in _it101][:10]})
+            break
     log.append({'foretell': 'done', 'picked': out['picked'], 'stop': out['stop']})
     return out
 

@@ -6149,6 +6149,15 @@ def model_cost(sid, marks=()):
 
 def popups(b, items, log, ctx=None):
     ctx = ctx or {}
+    # !! v2.102【**诊断：每轮 popups 看到的屏幕**】—— 不改行为
+    #   为什么要它：预言面板点开后「没认出」，但光看日志分不清是
+    #   ① 帧旧（点击前的）还是 ② OCR 真没读到那句话。
+    #   → 每轮把 items 的文字（前 12 条）原样落一行，一目了然 ✓
+    try:
+        log.append({'popup_scan': len(items or []),
+                    'texts': [(i.get('text') or '')[:12] for i in (items or [])][:12]})
+    except Exception:       # noqa: BLE001
+        pass
     markers = ctx.get('marks') or {}
     tapped = ctx.get('tapped')
     # ⭐ v0.32：弹窗系条目（+C）一次算好；真机上面板标题/X 在弹性区看不见，
@@ -11426,6 +11435,28 @@ def one_round(b, log, rnd, prefix, st):
                  (changed is not False), _sid_tap, _cost_tap])
         except Exception:       # noqa: BLE001
             pass
+        # !! v2.103【**面板型格子：点完就结束本轮**】—— 用户 2026-11-04
+        #   「规划完不就应该知道点的这步是点的啥吗？难道还要临时判断？」—— 对，
+        #   类型在规划期就已知，不该临场嗅探面板。
+        #   真机铁证（loop_log）：一轮里 taps=[[3,2,7.1s],[5,1,12.5s]] ——
+        #     点开豬言面板后**直接去点下一步**，面板被那一下顺手关掉 X
+        #   ⇒ → 这一格是「会弹面板的特殊格」就 **break**（本轮结束）
+        #     → 下一轮 popups() 正常看到面板并走对应流程 ✓
+        #   判据用**规划已知的 sid/name**，不读屏幕、不等面板、不猜 ✓
+        try:
+            _nm103 = str(_v_tap.get('name') or '')
+            if not _nm103:
+                import spots as _sp103
+                _nm103 = str(getattr(_sp103, 'name_of', lambda *_: '')(_sid_tap) or '')
+        except Exception:       # noqa: BLE001
+            _nm103 = ''
+        _PANEL_CELLS103 = ('豬言石碑', '旅行商人', '金属宝箱怪',
+                           '机巧宝箱怪', '黄金宝库', '勇者之墓')
+        if any(_k103 in _nm103 for _k103 in _PANEL_CELLS103):
+            log.append({'plan_step': 'panel_cell_stop',
+                        'cell': '%d,%d' % cell_of(cx, cy), 'name': _nm103,
+                        'note': '面板型格子 ⇒ 本轮结束，交给下一轮 popups() 处理'})
+            break
         b.snap()
         # ⭐ B（2026-09-25 用户要求「都试试」）：**只在"画面完全没变"时**跳过这次 OCR
         #   （0.74 秒/次，36 次/图是大头）。
@@ -11583,6 +11614,15 @@ def one_round(b, log, rnd, prefix, st):
                 fb(it2, L['fight'], L['expl'], *L['claim'])
                 or fb(it2, *L['desc']) or fb(it2, *L['special'])) else 'dlg_btn'
             say('       · 点 (%d,%d) → 弹面板' % (cx, cy))
+            # 诊断用（**不改行为**）：计划步点开了面板就记一行，
+            #   下次遇到预言石碑能直接回答：点没点 / 点在哪 / 哪一格
+            try:
+                _rc_d = cell_of(cx, cy)
+                log.append({'tap_step': 'panel',
+                            'cell': '%d,%d' % _rc_d if _rc_d else None,
+                            'xy': [cx, cy]})
+            except Exception:       # noqa: BLE001
+                pass
             break
         cold[(cx, cy)] = cold.get((cx, cy), 0) + 1
         if cold[(cx, cy)] >= 2 and (cx, cy) not in marked_px \
