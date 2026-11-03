@@ -11443,15 +11443,22 @@ def one_round(b, log, rnd, prefix, st):
         #   ⇒ → 这一格是「会弹面板的特殊格」就 **break**（本轮结束）
         #     → 下一轮 popups() 正常看到面板并走对应流程 ✓
         #   判据用**规划已知的 sid/name**，不读屏幕、不等面板、不猜 ✓
-        try:
-            _nm103 = str(_v_tap.get('name') or '')
-            if not _nm103:
-                import spots as _sp103
-                _nm103 = str(getattr(_sp103, 'name_of', lambda *_: '')(_sid_tap) or '')
-        except Exception:       # noqa: BLE001
-            _nm103 = ''
-        _PANEL_CELLS103 = ('豬言石碑', '旅行商人', '金属宝箱怪',
-                           '机巧宝箱怪', '黄金宝库', '勇者之墓')
+        # !! v2.103b【改成按 sid 判】—— 真机 2026-11-04 铁证：
+        #   plan_step 一条都没有，而 taps 仍是一轮两步
+        #   ⇒ 判据恒空：_v_tap 里**只有 sid、没有 name**，spots.name_of 也拿不到
+        #     ⇒ _nm103 恒为 '' ⇒ 永不 break
+        def _pn103(_sid):
+            _sfx = str(_sid or '').rsplit('_', 1)[-1]
+            _MAP = {'013': '预言石碑', '011': '勇者之墓', '008': '旅行商人'}
+            if _sfx in _MAP:
+                return _MAP[_sfx]
+            try:
+                import spots as _sp103b
+                return str(getattr(_sp103b, 'name_of', lambda *_: '')(_sid) or '')
+            except Exception:       # noqa: BLE001
+                return ''
+        _nm103 = str(_v_tap.get('name') or '') or _pn103(_sid_tap)
+        _PANEL_CELLS103 = ('预言石碑', '旅行商人', '金属宝箱怪', '机巧宝箱怪', '黄金宝库', '勇者之墓')
         if any(_k103 in _nm103 for _k103 in _PANEL_CELLS103):
             log.append({'plan_step': 'panel_cell_stop',
                         'cell': '%d,%d' % cell_of(cx, cy), 'name': _nm103,
