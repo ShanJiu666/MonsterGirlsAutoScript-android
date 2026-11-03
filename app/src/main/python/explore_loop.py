@@ -6977,9 +6977,30 @@ def popups(b, items, log, ctx=None):
             if x:
                 _tap(b, x['cx'], x['cy'], wait=1.4)
             return 'handled'
-        close_x_panels(b, img)
-        return 'handled'
-
+        # !! v2.98【关面板前先重取一帧确认】—— 真机 2026-11-03 17:45 实例：
+        #   用户手动点开「勇者之墓」，脚本拿**上一次 snap 的旧帧**判断 ⇒ 认不出
+        #   ⇒ 下面的 close_x_panels 把它关掉 ⇒ 用户看到的就是「点开就直接关了」X
+        #   ⇒ 关之前重取一帧再 OCR 一次；认出来了就**不关**，继续走正常流程 ✓
+        #   只在这条「认不出的面板」路径上多一次 snap+OCR（正常路径零开销）
+        try:
+            b.snap('unk_recheck')
+            _fresh98 = b.ocr(tag='unk_recheck')
+        except Exception:       # noqa: BLE001
+            _fresh98 = None
+        _found98 = bool(_fresh98) and (
+            buypanels._relic_panel_like(_fresh98)
+            or _is_prophecy_panel(_fresh98)
+            or fb(_fresh98, *L['special']))
+        if _found98:
+            log.append({'popup': 'unknown_recheck_found',
+                        'texts': [(i.get('text') or '')[:12] for i in _fresh98][:10]})
+            say('   · 面板第一次没认出、重取一帧后认到了 ⇒ 不关它 ✓')
+            items = _fresh98
+        else:
+            log.append({'popup': 'unknown_closed',
+                        'texts': [(i.get('text') or '')[:12] for i in (items or [])][:10]})
+            close_x_panels(b, img)
+            return 'handled'
     # ⭐ 特殊地块（旅行商人 / 黄金宝库）必须**排在「领取」之前**判：
     #   黄金宝库面板的说明文案是「不管你看到多少宝物，每一层都只能**领取**一件哦」，
     #   先判「领取」会一直去点这句说明文字（点了没反应 → 每轮空转）
@@ -7280,6 +7301,24 @@ def popups(b, items, log, ctx=None):
                 _mout = None
                 try:
                     _mout = buypanels.mimic_flow(b, log)
+                    # !! v2.100【买完必须把这格记掉 —— 用户 2026-11-03：
+                    #   「金属宝箱怪买完了怎么还要再打开？」
+                    #   真机铁证：23:03:58 买到 1 件 => 23:04:00 **2 秒后又点开同一只**
+                    #   （下一轮规划里它还是目标）=> 白点一次、还盲点了兜底购买键 X
+                    #   用户口径：「同一地图特殊方块**最多出现一个**」
+                    #   => 用 v1.66 既有的 nogo_rc（本图不碰格）记掉它，本图不再重入 ✓
+                    try:
+                        _tp100 = ctx.get('tapped')
+                        _fl100 = ctx.get('flags')
+                        if _tp100 and isinstance(_fl100, dict):
+                            _rc100 = cell_of(_tp100[0], _tp100[1])
+                            if _rc100:
+                                _fl100.setdefault('nogo_rc', set()).add(_rc100)
+                                log.append({'mimic': 'nogo_tagged',
+                                            'cell': '%d,%d' % _rc100,
+                                            'note': '买完记掉 => 本图不再重开（一图最多一个特殊方块 ✓）'})
+                    except Exception:       # noqa: BLE001
+                        pass
                 except Exception as _mi:      # noqa: BLE001
                     import traceback as _tb6
                     log.append({'mimic': 'flow_error', 'e': repr(_mi)[:120],
