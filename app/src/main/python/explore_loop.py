@@ -11463,6 +11463,8 @@ def one_round(b, log, rnd, prefix, st):
             log.append({'plan_step': 'panel_cell_stop',
                         'cell': '%d,%d' % cell_of(cx, cy), 'name': _nm103,
                         'note': '面板型格子 ⇒ 本轮结束，交给下一轮 popups() 处理'})
+            # v2.103c：已点过 ⇒ 记进 done，别让后续/补点再点它一次
+            done.add((cx, cy))
             break
         b.snap()
         # ⭐ B（2026-09-25 用户要求「都试试」）：**只在"画面完全没变"时**跳过这次 OCR
