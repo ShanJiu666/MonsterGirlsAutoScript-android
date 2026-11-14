@@ -14722,6 +14722,92 @@ except Exception as _e133:             # noqa: BLE001
     check('v2.133 守门可运行（%r） TRACE=%s'
           % (_e133, _tb133.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
+print('v2.133b QQ 反馈群入口：诊断页「一键反馈」下面一张卡，点整框拉起 QQ 群卡片')
+#   用户 2026-11-14：「诊断的一键反馈框下新增个框，里面点击能加我的 qq 群 1067971799」
+#     ＋「表明是反馈群」⇒ 文案必须明确是"反馈群"，不是随便一个群
+#   ⚠ 同组两条老坑各守一遍：撤回守门先剥整行注释；切片一律 .find() + 判 >= 0
+try:
+    _JD133b = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _ma133b = io.open(os.path.join(_JD133b, 'MainActivity.java'), encoding='utf-8').read()
+    _Q133b = chr(34)
+
+    def _strip133b(_s):
+        _o = []
+        for _ln in _s.splitlines():
+            _t = _ln.strip()
+            if _t.startswith('//') or _t.startswith('/*') or _t.startswith('*'):
+                continue
+            _o.append(_ln)
+        return chr(10).join(_o)
+
+    def _blk133b(_src, _anchor):
+        _i = _src.find(_anchor)
+        if _i < 0:
+            return None
+        _j = _src.find('{', _i)
+        if _j < 0:
+            return None
+        _d = 0
+        for _k in range(_j, len(_src)):
+            _c = _src[_k]
+            if _c == '{':
+                _d += 1
+            elif _c == '}':
+                _d -= 1
+                if _d == 0:
+                    return _src[_j + 1:_k]
+        return None
+
+    def _qqok133b(_seg):
+        # 打开群的三级兜底缺一不可：QQ 群卡片 scheme / 剪贴板 / 提示弹窗
+        if _seg is None:
+            return None
+        return ('mqqapi://card/show_pslcard' in _seg
+                and 'card_type=group' in _seg
+                and 'ClipboardManager' in _seg
+                and 'setPrimaryClip' in _seg
+                and 'AlertDialog.Builder' in _seg)
+
+    _MA133b = _strip133b(_ma133b)
+    _qqseg133b = _blk133b(_MA133b, 'private void openQqGroup()')
+
+    check('v2.133b A① 结构级：诊断页有「QQ 反馈群」卡 + 群号常量写死为 1067971799'
+          '（用户原话「表明是反馈群」）· 文案=%s 常量=%s'
+          % ('QQ 反馈群' in _MA133b,
+             ('QQ_FEEDBACK_GROUP = ' + _Q133b + '1067971799' + _Q133b) in _MA133b),
+          'QQ 反馈群' in _MA133b
+          and ('QQ_FEEDBACK_GROUP = ' + _Q133b + '1067971799' + _Q133b) in _MA133b)
+
+    check('v2.133b A② 执行级（结构）：openQqGroup() 三级兜底齐全 —— '
+          'mqqapi 群卡片 + 剪贴板复制 + 提示弹窗（点了没反应是最烦的）· 判据=%s'
+          % (_qqok133b(_qqseg133b),),
+          _qqok133b(_qqseg133b) is True)
+
+    check('v2.133b A③ 结构级：**整框可点** + 右侧「加群」也可点（用户口径「里面点击能加」）· '
+          '框=%s 右侧=%s'
+          % ('qq.setOnClickListener(qqTap)' in _MA133b,
+             'joinQq.setOnClickListener(qqTap)' in _MA133b),
+          'qq.setOnClickListener(qqTap)' in _MA133b
+          and 'joinQq.setOnClickListener(qqTap)' in _MA133b)
+
+    check('v2.133b A④ 结构级：这张卡真的挂到诊断页容器上（host.addView(qq））· %s'
+          % ('host.addView(qq,' in _MA133b,),
+          'host.addView(qq,' in _MA133b)
+
+    check('v2.133b B① 交互禁忌守门：MainActivity 全文件**不用 Toast**'
+          '（本项目状态一律走弹窗/悬浮条/日志）· 出现次数=%d'
+          % _MA133b.count('Toast.makeText'),
+          'Toast.makeText' not in _MA133b)
+
+    check('v2.133b B② 对照项：同一判据打**只有文字、没有三级兜底**的假样本 ⇒ 必须 False'
+          '（否则 A② 恒真 = 白测）· 假样本判据=%s'
+          % (_qqok133b('private void openQqGroup() { 群号 1067971799 }'),),
+          _qqok133b('private void openQqGroup() { 群号 1067971799 }') is False)
+except Exception as _e133b:            # noqa: BLE001
+    import traceback as _tb133b
+    check('v2.133b 守门可运行（%r） TRACE=%s'
+          % (_e133b, _tb133b.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

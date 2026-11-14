@@ -1123,6 +1123,28 @@ public class MainActivity extends Activity {
         fb.addView(share);
         host.addView(fb, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        // ── QQ 反馈群 ──
+        // 用户 2026-11-14：「诊断的一键反馈框下新增个框，里面点击能加我的 qq 群 1067971799」
+        //   ＋「表明是反馈群」⇒ 标题就叫「QQ 反馈群」，副行直接写群号与用途。
+        // 放在一键反馈正下方：打包日志是一句话，进群反馈是第二句话，逻辑连得上 ✓
+        LinearLayout qq = UiKit.row(this);
+        qq.setBackground(UiKit.pill(this, 0x1622D3EE, 0x4C22D3EE, 13));
+        qq.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 10),
+                UiKit.dp(this, 14), UiKit.dp(this, 10));
+        LinearLayout ql = UiKit.column(this);
+        ql.addView(UiKit.text(this, "QQ 反馈群", 12, false, 0xFF9CEAFA));
+        ql.addView(UiKit.text(this, "群号 " + QQ_FEEDBACK_GROUP + " · 有问题、想要新功能，进来直接说",
+                8.5f, false, 0xFF93B4CC));
+        qq.addView(ql, UiKit.lpWeight(1f));
+        TextView joinQq = UiKit.text(this, "加群 ›", 10, false, 0xFF9CEAFA);
+        qq.addView(joinQq);
+        View.OnClickListener qqTap = v -> openQqGroup();
+        qq.setOnClickListener(qqTap);       // 整框都可点（用户口径「里面点击能加」）
+        joinQq.setOnClickListener(qqTap);
+        host.addView(qq, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(qq, 0, UiKit.dp(this, 10), 0, 0);
     }
 
     /**
@@ -1870,6 +1892,56 @@ public class MainActivity extends Activity {
     /** 字节数 → "0.4MB"（与 {@code Updater.mb} 同格式；确认框必须让用户看见大小） */
     private static String mb(long bytes) {
         return String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0);
+    }
+
+    /** MGAS 反馈群（用户 2026-11-14 给的群号；改成别的群只动这一处） */
+    private static final String QQ_FEEDBACK_GROUP = "1067971799";
+
+    /**
+     * ⭐⭐ 打开 QQ 反馈群（诊断页那张卡，整框可点）。
+     *
+     * <p>用户 2026-11-14：「诊断的一键反馈框下新增个框，里面点击能加我的 qq 群 1067971799」
+     * ＋「表明是反馈群」。
+     *
+     * <p>三级兜底，缺一不可（否则用户点了没反应，本仓最烦这种）：
+     * <ol>
+     *   <li>{@code mqqapi://card/show_pslcard} 拉起 QQ 群卡片（QQ 官方分享用的那个 scheme）；</li>
+     *   <li>装的是 TIM / 没装 QQ / 被 ROM 拦 ⇒ 抛 {@link Throwable} ⇒ <b>把群号复制到剪贴板</b>；</li>
+     *   <li>再弹一句「已复制，去 QQ 粘贴搜索」——<b>不用 Toast</b>（本项目全程不用 Toast，
+     *       状态一律走弹窗/悬浮条/日志）。</li>
+     * </ol>
+     * <p>每一步都落 {@code AppLog.i}，真机上点了没反应时能在日志里看到断在哪一步。
+     */
+    private void openQqGroup() {
+        AppLog.i("[加群] 点「QQ 反馈群 " + QQ_FEEDBACK_GROUP + "」");
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(
+                    "mqqapi://card/show_pslcard?src_type=internal&source=sharecard&version=1"
+                            + "&uin=" + QQ_FEEDBACK_GROUP + "&card_type=group"));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return;
+        } catch (Throwable t) {
+            AppLog.i("[加群] 拉起 QQ 失败（可能没装 QQ / 被系统拦）：" + t);
+        }
+        try {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                    "MGAS 反馈群", QQ_FEEDBACK_GROUP));
+        } catch (Throwable t) {
+            AppLog.i("[加群] 复制群号失败：" + t);
+        }
+        try {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("MGAS 反馈群")
+                    .setMessage("群号 " + QQ_FEEDBACK_GROUP + "（已复制到剪贴板）\n"
+                            + "打开 QQ → 找群/加群 → 粘贴搜索即可。")
+                    .setPositiveButton("好", null)
+                    .show();
+        } catch (Throwable t) {
+            AppLog.i("[加群] 提示弹窗失败：" + t);
+        }
     }
 
     /**
