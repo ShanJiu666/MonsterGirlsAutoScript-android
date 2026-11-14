@@ -14984,6 +14984,58 @@ except Exception as _e136:             # noqa: BLE001
     check('v2.136 守门可运行（%r） TRACE=%s'
           % (_e136, _tb136.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
+print('v2.138 默认勾选按用户口径定死（目标方块 5 个 + 日常四项 + 预言石碑两个停位）')
+#   用户 2026-11-14：「app 默认设置勾选是勾 旅行商人 黄金宝库 勇者之墓 限时礼包 预言石碑。
+#                   下面 派遣 炼金 情报 招募 幸运 和元素橙色阶位」
+#   守两件事：① 默认值就是这个集合（多一个少一个都红）② load() 仍对 DEFAULT_ON 做 setdefault
+#             （否则老机器上已有 target_types.json ⇒ 改默认值根本不生效 ✗）
+try:
+    _JD138 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _tc138 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'targets_cfg.py'), encoding='utf-8').read()
+    _pr138 = io.open(os.path.join(_JD138, 'Prefs.java'), encoding='utf-8').read()
+
+    _i138 = _tc138.find('DEFAULT_ON = (')
+    _j138 = _tc138.find(')', _i138) if _i138 >= 0 else -1
+    _def138 = _tc138[_i138:_j138] if (_i138 >= 0 and _j138 > _i138) else None
+    _want138 = ['旅行商人', '黄金宝库', '勇者之墓', '限时礼包', '预言石碑']
+
+    def _defok138(_s):
+        if _s is None:
+            return None
+        return all(('\'' + _k + '\'') in _s for _k in _want138)
+
+    check('v2.138 A① 结构级：DEFAULT_ON 必须同时含 旅行商人/黄金宝库/勇者之墓/限时礼包/预言石碑'
+          '（用户 2026-11-14 逐字口径）· 缺=%s'
+          % ([_k for _k in _want138 if ('\'' + _k + '\'') not in (_def138 or '')],),
+          _defok138(_def138) is True)
+
+    check('v2.138 A② 撤回守门：load() 仍对 DEFAULT_ON 逐个 setdefault(True)'
+          '（少了这句 ⇒ 老机器上的 target_types.json 会让新默认值**静默失效** ✗）· 命中=%s'
+          % (("d['types'].setdefault(k, True)" in _tc138),),
+          "d['types'].setdefault(k, True)" in _tc138)
+
+    _daily138 = ['getBoolean(K_GUILD_TASKS, true)', 'getBoolean(K_GUILD_ALCHEMY, true)',
+                 'getBoolean(K_GUILD_INTEL, true)', 'getBoolean(K_RECRUIT_FREE, true)']
+    check('v2.138 A③ 结构级：日常四项默认 true —— 派遣/炼金/情报/招募 · 缺=%s'
+          % ([_k for _k in _daily138 if _k not in _pr138],),
+          all(_k in _pr138 for _k in _daily138))
+
+    _stop138 = ['getBoolean("stop_lucky", true)', 'getBoolean("stop_elem_orange", true)',
+                'getBoolean("stop_peace", false)', 'getBoolean("stop_elem_purple", false)']
+    check('v2.138 A④ 结构级：预言石碑「遇到就停」默认 = 幸运✓ 元素橙✓ 和平✗ 紫✗'
+          '（用户 2026-11-14 只点名 幸运 + 元素橙色阶位）· 缺=%s'
+          % ([_k for _k in _stop138 if _k not in _pr138],),
+          all(_k in _pr138 for _k in _stop138))
+
+    check('v2.138 B① 对照项：同一判据打**缺勇者之墓**的旧 DEFAULT_ON（v2.22 那版）⇒ 必须 False'
+          '（否则 A① 恒真 = 白测）· 旧样本=%s'
+          % (_defok138("'★标记格', '旅行商人', '黄金宝库', '限时礼包', '预言石碑', '★紫橙探索格'"),),
+          _defok138("'★标记格', '旅行商人', '黄金宝库', '限时礼包', '预言石碑', '★紫橙探索格'") is False)
+except Exception as _e138:             # noqa: BLE001
+    import traceback as _tb138
+    check('v2.138 守门可运行（%r） TRACE=%s'
+          % (_e138, _tb138.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:
