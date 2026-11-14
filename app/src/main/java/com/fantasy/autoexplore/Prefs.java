@@ -28,7 +28,7 @@ public final class Prefs {
     //   -9999 = 没设过（用默认锚点）
     // ⭐ 2026-11-14：**首次打开必须读一次免责声明**（用户口径）
     //   key 带版本号：以后声明内容有大改时把它改成 disclaimer_v2 ⇒ 老用户会再被问一次 ✓
-    private static final String K_DISCLAIMER = "disclaimer_v1";
+    private static final String K_DISCLAIMER = "disclaimer_v2";
     private static final String K_OVL_LOCK = "ovl_lock";   // 位置锁定开关
     private static final String K_OVL_Y = "ovl_y";
     private static final String K_OVL_X = "ovl_x";

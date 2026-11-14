@@ -14943,10 +14943,10 @@ try:
           '（以后改内容改成 v2 就能让老用户再看一次）· getter=%s setter=%s key=%s'
           % ('public static boolean disclaimerAgreed(Context c)' in _pr136,
              'public static void setDisclaimerAgreed(Context c, boolean v)' in _pr136,
-             'disclaimer_v1' in _pr136),
+             'disclaimer_v' in _pr136),
           ('public static boolean disclaimerAgreed(Context c)' in _pr136)
           and ('public static void setDisclaimerAgreed(Context c, boolean v)' in _pr136)
-          and ('disclaimer_v1' in _pr136))
+          and ('disclaimer_v' in _pr136))
 
     _onc136 = _blk136(_ma136, 'protected void onCreate(Bundle savedInstanceState)') or ''
     check('v2.136 A② 结构级：onCreate 里**真的**调了 showDisclaimerOnce()（只写方法不调 = 白做 ✗）· 调用=%s'
@@ -14966,6 +14966,14 @@ try:
     check('v2.136 A④ 结构级：声明的**关键句**一条都不许少（用户最在意的就是"纯视觉不注入内存"）· 缺=%s'
           % ([_k for _k in _keys136 if _k not in _dis136],),
           all(_k in _dis136 for _k in _keys136))
+
+    # ── A⑤：仓库地址写 GitHub（用户 2026-11-14：「仓库地址改成 github 仓库」）──
+    #   ⚠ 同时守「不许再出现 gitee」——只加不减会两边都写着，用户看到会以为没改
+    _gh136 = 'github.com/ShanJiu666/MonsterGirlsAutoScript-android'
+    check('v2.136 A⑤ 结构级：开源地址必须是 **GitHub 仓**，且声明里**不许再出现 gitee**'
+          '（用户 2026-11-14 口径）· github=%s gitee残留=%s'
+          % (_gh136 in _dis136, 'gitee' in _dis136.lower()),
+          (_gh136 in _dis136) and ('gitee' not in _dis136.lower()))
 
     check('v2.136 B① 对照项：同一条"三件套"判据打**缺 setCancelable(false)** 的假样本 ⇒ 必须 False'
           '（否则 A③ 恒真 = 白测）· 假样本=%s'

@@ -1915,8 +1915,9 @@ public class MainActivity extends Activity {
         }
         try {
             TextView tv = new TextView(this);
-            String body = "MGAS 是免费开源软件（代码公开在 gitee：geng-haojie/MGAS）。"
-                    + "任何人向你收费、卖激活码、代充代练都与我无关，请不要付费。\n\n"
+            String body = "MGAS 是免费开源软件（代码公开在 GitHub："
+                    + "github.com/ShanJiu666/MonsterGirlsAutoScript-android）。"
+                    + "任何人向你收费、卖激活码都与我无关，请不要付费。\n\n"
                     + "本软件是纯视觉自动化：截取屏幕 → 在你手机本地用 OCR 识别 → 用无障碍手势模拟点击。\n"
                     + "· 不注入游戏进程\n"
                     + "· 不读取、不修改游戏内存与数据包\n"
