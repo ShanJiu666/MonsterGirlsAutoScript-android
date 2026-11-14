@@ -164,6 +164,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         RefMapper.detectTopInset(this);           // ⭐ 真机安全区（状态栏/挖孔）自动检测；模拟器=0
         setContentView(buildUi());
+        showDisclaimerOnce();                 // ⭐ 2026-11-14：首次打开先看免责声明（首启弹一次，确认后不再弹）
         // ⭐⭐ 2026-09-30 修（真 bug）：原来用 `AppLog.setListener(...)`，而它的语义是
         //   **"清掉其它监听、只留这一个"**（见 AppLog 注释）⇒ MainActivity 每次 onCreate
         //   都会把**悬浮控制条**的日志订阅顶掉 ⇒ 悬浮条那一行从此不再更新（停在旧句）。
@@ -1828,7 +1829,8 @@ public class MainActivity extends Activity {
             ui.post(() -> {
                 refreshStatus();
                 if (p == null) {
-                    String cur = "已是最新（v" + BuildConfig.VERSION_NAME
+                    // 用户 2026-11-14：整包不提示（要整包自己去群里拿）⇒ 这里只说补丁
+                    String cur = "补丁已是最新（本机 v" + BuildConfig.VERSION_NAME
                             + "(" + BuildConfig.VERSION_CODE + ")）";
                     AppLog.i("[更新] " + cur);
                     showUpdateResult(cur);
@@ -1892,6 +1894,56 @@ public class MainActivity extends Activity {
     /** 字节数 → "0.4MB"（与 {@code Updater.mb} 同格式；确认框必须让用户看见大小） */
     private static String mb(long bytes) {
         return String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0);
+    }
+
+    /**
+     * ⭐⭐ 2026-11-14（用户口径）：「第一次打开要有个弹窗，写上本软件为免费开源软件什么的
+     * 免责声明，表明是纯视觉不会注入内存什么的」。
+     *
+     * <p>三条硬要求：
+     * <ol>
+     *   <li>**只在第一次**弹 ⇒ 用 {@link Prefs#disclaimerAgreed} 记标记（key 带版本号）；</li>
+     *   <li>**必须明确"纯视觉"**：不注入进程 / 不读写游戏内存 / 不需要 root —— 这是用户
+     *       最在意的那句话，别写成模糊的"安全可靠"；</li>
+     *   <li>**不可点外面关掉**（{@code setCancelable(false)}）⇒ 用户必须做一个选择。</li>
+     * </ol>
+     * <p>选「不同意」⇒ 直接 {@code finish()} 退出（不落标记，下次打开还会问）。
+     */
+    private void showDisclaimerOnce() {
+        if (Prefs.disclaimerAgreed(this)) {
+            return;
+        }
+        try {
+            TextView tv = new TextView(this);
+            String body = "MGAS 是免费开源软件（代码公开在 gitee：geng-haojie/MGAS）。"
+                    + "任何人向你收费、卖激活码、代充代练都与我无关，请不要付费。\n\n"
+                    + "本软件是纯视觉自动化：截取屏幕 → 在你手机本地用 OCR 识别 → 用无障碍手势模拟点击。\n"
+                    + "· 不注入游戏进程\n"
+                    + "· 不读取、不修改游戏内存与数据包\n"
+                    + "· 不需要 root\n"
+                    + "· 不上传你的截图；唯一联网是「检查更新」读一次更新清单、下载补丁\n\n"
+                    + "⚠ 使用自动化工具可能违反游戏用户协议，存在账号被限制或封禁的风险。"
+                    + "是否使用由你决定，风险自担。\n\n"
+                    + "本软件按「现状」提供，不附带任何担保；因使用造成的账号、数据或设备损失，作者不承担责任。\n\n"
+                    + "有问题请进 QQ 反馈群 1067971799（诊断页有入口）。卸载即清除全部本地数据。";
+            tv.setText(body);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            tv.setTextColor(UiKit.INK);
+            int pad = UiKit.dp(this, 18);
+            tv.setPadding(pad, UiKit.dp(this, 6), pad, UiKit.dp(this, 6));
+            ScrollView sv = new ScrollView(this);
+            sv.addView(tv);
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("使用前请读 · 免责声明")
+                    .setView(sv)
+                    .setCancelable(false)
+                    .setPositiveButton("我知道了，继续", (d, w) -> Prefs.setDisclaimerAgreed(this, true))
+                    .setNegativeButton("不同意，退出", (d, w) -> finish())
+                    .show();
+            AppLog.i("[免责] 首次打开：已弹免责声明（确认后不再弹）");
+        } catch (Throwable t) {
+            AppLog.i("[免责] ⚠ 弹窗失败：" + t);
+        }
     }
 
     /** MGAS 反馈群（用户 2026-11-14 给的群号；改成别的群只动这一处） */

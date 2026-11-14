@@ -418,7 +418,8 @@ public final class Updater {
      */
     private static JSONObject planOf(Context ctx, JSONObject m) throws Exception {
         final int myVc = myVersionCode(ctx);
-        JSONObject app = m.optJSONObject("app");
+        // ⚠ 这里**只取 hot 段**：整包（app 段）按用户口径完全不参与"要不要更新"的判断，
+        //   见下面 return null 之前那段注释。
         JSONObject hot = m.optJSONObject("hot");
 
         // 补丁优先（小、无感）—— 判据与 run(hot) 完全同源，别写第二份
@@ -431,16 +432,13 @@ public final class Updater {
             p.put("notes", hot.optString("notes", ""));
             return p;
         }
-        if (app != null && !app.isNull("url") && app.optInt("versionCode", 0) > myVc) {
-            JSONObject p = new JSONObject();
-            p.put("kind", "apk");
-            p.put("id", String.valueOf(app.optInt("versionCode", 0)));
-            p.put("versionName", app.optString("versionName",
-                    String.valueOf(app.optInt("versionCode", 0))));
-            p.put("size", app.optLong("size", 0));
-            p.put("notes", app.optString("notes", ""));
-            return p;
-        }
+        // ⭐⭐ 2026-11-14 用户口径（真机踩过之后定的）：
+        //   「**整包完全不提示，需要时我自己去群里要安装包**」
+        //   背景：补丁刚更完、一重启就立刻弹「发现更新 v2.134 · 71.4MB」⇒ 用户点下去，
+        //   先是白下 71MB，再被系统「安装未知应用 / 危险警告」拦住，观感极差 ✗
+        //   ⇒ 从**探测层**直接不给整包（不是靠界面不显示）：plan 永远不会返回 kind=apk。
+        //   ⚠ 整包安装能力**保留**（installApk / run("apk")），只留给 adb 调试面
+        //     （门禁 C① 守着，别顺手删掉）。
         return null;
     }
 

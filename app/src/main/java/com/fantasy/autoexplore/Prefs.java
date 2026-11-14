@@ -26,6 +26,9 @@ public final class Prefs {
     private static final String K_GUILD_ALCHEMY = "guild_alchemy";
     // ⭐ v2.06：悬浮条的**记忆位置**（用户拖到哪，下次还放哪）
     //   -9999 = 没设过（用默认锚点）
+    // ⭐ 2026-11-14：**首次打开必须读一次免责声明**（用户口径）
+    //   key 带版本号：以后声明内容有大改时把它改成 disclaimer_v2 ⇒ 老用户会再被问一次 ✓
+    private static final String K_DISCLAIMER = "disclaimer_v1";
     private static final String K_OVL_LOCK = "ovl_lock";   // 位置锁定开关
     private static final String K_OVL_Y = "ovl_y";
     private static final String K_OVL_X = "ovl_x";
@@ -41,6 +44,15 @@ public final class Prefs {
     public static final int BAG_EVERY_DEFAULT = 10;
 
     private Prefs() {
+    }
+
+    /** 免责声明确认过没有（默认**没确认**⇒ 首次打开会弹一次） */
+    public static boolean disclaimerAgreed(Context c) {
+        return sp(c).getBoolean(K_DISCLAIMER, false);
+    }
+
+    public static void setDisclaimerAgreed(Context c, boolean v) {
+        sp(c).edit().putBoolean(K_DISCLAIMER, v).apply();
     }
 
     /** 是否显示调试按钮（默认**关**：正常人只要「开始/停止」两个键） */

@@ -14835,6 +14835,147 @@ except Exception as _e134:             # noqa: BLE001
     check('v2.134 守门可运行（%r） TRACE=%s'
           % (_e134, _tb134.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
+print('v2.135 整包更新不再主动提示（用户 2026-11-14 真机踩过之后的口径）')
+#   用户原话：「整包完全不提示，需要时我自己去群里要安装包」
+#   背景：补丁更完一重启就弹「发现更新 v2.134 · 71.4MB」⇒ 白下 71MB + 被系统
+#        「安装未知应用 / 危险警告」拦住。修法 = **探测层就不给整包**（不是界面藏起来）。
+#   门禁守两件事：① plan 永不返回 kind=apk ② 整包的**安装能力**必须留着（adb 调试面）
+try:
+    _JD135 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _up135 = io.open(os.path.join(_JD135, 'Updater.java'), encoding='utf-8').read()
+    _ma135 = io.open(os.path.join(_JD135, 'MainActivity.java'), encoding='utf-8').read()
+
+    def _strip135(_s):
+        _o = []
+        for _ln in _s.splitlines():
+            _t = _ln.strip()
+            if _t.startswith('//') or _t.startswith('/*') or _t.startswith('*'):
+                continue
+            _o.append(_ln)
+        return chr(10).join(_o)
+
+    def _blk135(_src, _anchor):
+        _i = _src.find(_anchor)
+        if _i < 0:
+            return None
+        _j = _src.find('{', _i)
+        if _j < 0:
+            return None
+        _d = 0
+        for _k in range(_j, len(_src)):
+            _c = _src[_k]
+            if _c == '{':
+                _d += 1
+            elif _c == '}':
+                _d -= 1
+                if _d == 0:
+                    return _src[_j + 1:_k]
+        return None
+
+    def _noapk135(_seg):
+        # planOf 里**不许**再出现"把整包塞进 plan"的三件套
+        if _seg is None:
+            return None
+        _c = _strip135(_seg)
+        return (('p.put("kind", "apk")' not in _c)
+                and ('optJSONObject("app")' not in _c)
+                and ('p.put("kind", "hot")' in _c))
+
+    _pof135 = _blk135(_strip135(_up135), 'private static JSONObject planOf(')
+    check('v2.135 A① 结构级：planOf 只产出 kind=hot，**不再 optJSONObject("app") / 不再产 kind=apk**'
+          '（整包从探测层就不给，不是界面藏起来）· 判据=%s' % (_noapk135(_pof135),),
+          _noapk135(_pof135) is True)
+
+    check('v2.135 A② 结构级：「检查更新」无更新时的话术是「补丁已是最新」'
+          '（不再用"已是最新"暗示整包也最新，那是骗人）· 命中=%s'
+          % ('补丁已是最新' in _ma135,), '补丁已是最新' in _ma135)
+
+    check('v2.135 B① 撤销守门：整包的**安装能力**必须保留 —— installApk( 本体 + run 的 apk 分支'
+          '（adb 广播 update --es mode apk 还靠它，别顺手删掉）· installApk=%s apk分支=%s'
+          % ('private static String installApk(Context ctx, JSONObject app)' in _up135,
+             'if ("apk".equals(mode))' in _up135),
+          ('private static String installApk(Context ctx, JSONObject app)' in _up135)
+          and ('if ("apk".equals(mode))' in _up135))
+
+    check('v2.135 C① 对照项：同一判据打**带 apk 分支的旧 planOf**（改前那版）⇒ 必须 False'
+          '（否则 A① 恒真 = 白测）· 旧样本判据=%s'
+          % (_noapk135('JSONObject app = m.optJSONObject("app");'
+                       'if (app != null) { p.put("kind", "apk"); return p; }'
+                       'p.put("kind", "hot");'),),
+          _noapk135('JSONObject app = m.optJSONObject("app");'
+                    'if (app != null) { p.put("kind", "apk"); return p; }'
+                    'p.put("kind", "hot");') is False)
+except Exception as _e135:             # noqa: BLE001
+    import traceback as _tb135
+    check('v2.135 守门可运行（%r） TRACE=%s'
+          % (_e135, _tb135.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('v2.136 首次打开弹免责声明（用户 2026-11-14：免费开源 + 纯视觉不注入内存）')
+#   用户原话：「第一次打开要有个弹窗。写上本软件为免费开源软件什么的免责声明，
+#              表明是纯视觉不会注入内存什么的」
+#   三条硬要求：① 只在第一次弹（Prefs 标记，key 带版本号）② 必须写明"纯视觉/不注入内存/不需 root"
+#              ③ 不能点外面关掉（必须做个选择）
+try:
+    _JD136 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _pr136 = io.open(os.path.join(_JD136, 'Prefs.java'), encoding='utf-8').read()
+    _ma136 = io.open(os.path.join(_JD136, 'MainActivity.java'), encoding='utf-8').read()
+
+    def _blk136(_src, _anchor):
+        _i = _src.find(_anchor)
+        if _i < 0:
+            return None
+        _j = _src.find('{', _i)
+        if _j < 0:
+            return None
+        _d = 0
+        for _k in range(_j, len(_src)):
+            _c = _src[_k]
+            if _c == '{':
+                _d += 1
+            elif _c == '}':
+                _d -= 1
+                if _d == 0:
+                    return _src[_j + 1:_k]
+        return None
+
+    # 只弹一次：getter/setter 与**带版本的 key** 必须在
+    check('v2.136 A① 结构级：Prefs 有 disclaimerAgreed / setDisclaimerAgreed，且 key **带版本号**'
+          '（以后改内容改成 v2 就能让老用户再看一次）· getter=%s setter=%s key=%s'
+          % ('public static boolean disclaimerAgreed(Context c)' in _pr136,
+             'public static void setDisclaimerAgreed(Context c, boolean v)' in _pr136,
+             'disclaimer_v1' in _pr136),
+          ('public static boolean disclaimerAgreed(Context c)' in _pr136)
+          and ('public static void setDisclaimerAgreed(Context c, boolean v)' in _pr136)
+          and ('disclaimer_v1' in _pr136))
+
+    _onc136 = _blk136(_ma136, 'protected void onCreate(Bundle savedInstanceState)') or ''
+    check('v2.136 A② 结构级：onCreate 里**真的**调了 showDisclaimerOnce()（只写方法不调 = 白做 ✗）· 调用=%s'
+          % ('showDisclaimerOnce();' in _onc136,), 'showDisclaimerOnce();' in _onc136)
+
+    _dis136 = _blk136(_ma136, 'private void showDisclaimerOnce()') or ''
+    check('v2.136 A③ 结构级：弹窗三件套齐全 —— 不可点外关闭 +「我知道了，继续」+「不同意，退出」· '
+          'cancelable=%s ok=%s no=%s'
+          % ('setCancelable(false)' in _dis136,
+             '我知道了，继续' in _dis136,
+             '不同意，退出' in _dis136),
+          ('setCancelable(false)' in _dis136)
+          and ('我知道了，继续' in _dis136)
+          and ('不同意，退出' in _dis136))
+
+    _keys136 = ['免费开源', '纯视觉', '不注入', '内存', 'root']
+    check('v2.136 A④ 结构级：声明的**关键句**一条都不许少（用户最在意的就是"纯视觉不注入内存"）· 缺=%s'
+          % ([_k for _k in _keys136 if _k not in _dis136],),
+          all(_k in _dis136 for _k in _keys136))
+
+    check('v2.136 B① 对照项：同一条"三件套"判据打**缺 setCancelable(false)** 的假样本 ⇒ 必须 False'
+          '（否则 A③ 恒真 = 白测）· 假样本=%s'
+          % (('setCancelable(false)' in 'setPositiveButton("我知道了，继续"), setNegativeButton("不同意，退出")'),),
+          ('setCancelable(false)' in 'setPositiveButton("我知道了，继续"), setNegativeButton("不同意，退出")') is False)
+except Exception as _e136:             # noqa: BLE001
+    import traceback as _tb136
+    check('v2.136 守门可运行（%r） TRACE=%s'
+          % (_e136, _tb136.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

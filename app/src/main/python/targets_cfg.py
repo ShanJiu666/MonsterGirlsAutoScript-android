@@ -583,6 +583,15 @@ def summary(cfg=None, maxlen=8):
     return '目标方块 %d 种：%s（未勾 %d 种不拿）' % (len(on), head or '（空！什么都不拿）', offN)
 
 
+# ⭐⭐ 2026-11-14 **热更新端到端验证用的临时探针**（验完下一版删）
+#   为什么放这里：本模块在启动期被 explore_loop（import 期）与 explore_android **双重 import**
+#   ⇒ 这行在「Python 起来」时一定打一次；只有**补丁真的被激活**才会出现（APK 里那份源码没有它）。
+#   看哪里：adb logcat -s python / App 控制台日志。
+#   ⚠ 别当常驻功能：验完删掉，别留在正式版里污染日志。
+HOT_PROBE = 'v2.135-hot-1'
+print('[MGAS] hot patch alive: ' + HOT_PROBE + ' · 反馈群 1067971799', flush=True)
+
+
 if __name__ == '__main__':
     import io
     import sys
