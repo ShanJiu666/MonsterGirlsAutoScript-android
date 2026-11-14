@@ -77,6 +77,25 @@ public final class Prefs {
         sp(c).edit().putBoolean(K_AUTO_SUPPLY, v).apply();
     }
 
+    // ⭐⭐ 2026-11-14 用户口径：「加个用简易补给的脚本，用户可以自由选择能用那种补给」
+    //   ⇒ 两种补给各一个勾（这个开关只决定「允许吃哪种」，总闸仍是 autoSupply）
+    //   默认都勾：有哪种就先吃哪种（顺序在 Python 侧 = 先简易 后结实，先用便宜的）
+    public static boolean supplySimple(Context c) {
+        return sp(c).getBoolean("supply_simple", true);
+    }
+
+    public static void setSupplySimple(Context c, boolean v) {
+        sp(c).edit().putBoolean("supply_simple", v).apply();
+    }
+
+    public static boolean supplyStrong(Context c) {
+        return sp(c).getBoolean("supply_strong", true);
+    }
+
+    public static void setSupplyStrong(Context c, boolean v) {
+        sp(c).edit().putBoolean("supply_strong", v).apply();
+    }
+
     /** 每几张图去背包做一次装备一键升星（0 = 关闭） */
     public static int bagEvery(Context c) {
         return sp(c).getInt(K_BAG_EVERY, BAG_EVERY_DEFAULT);

@@ -9169,8 +9169,24 @@ SUPPLY_TPL = os.path.join(_MAPBOT_ROOT, 'templates', 'items', 'supply_strong.png
 SUPPLY_MASK = os.path.join(_MAPBOT_ROOT, 'templates', 'items', 'supply_strong_mask.png')
 SUPPLY_THR = 0.90             # 识图匹配下限（自匹配 1.000，其他格子差得远）
 
+# ⭐⭐ 2026-11-14 用户要求：「加个用简易补给的脚本，用户可以自由选择能用那种补给」
+#   ⇒ 补给**按名字**取模板（不再写死结实补给一个），顺序来自界面勾选：
+#      简单说 = 「允许用哪些、先用哪个」由用户在 App 里勾，勾空了就一个都不补。
+#   ⚠ 两个模板都裁自真机帧的同一个 150×150 格子（拖走右下角数量 → 配 mask）
+#     · supply_strong.png 紫色板条箱 = 结实补给（+500 体力）
+#     · supply_simple.png 蓝色板条箱 = 简易补给（+100 体力）
+#   实测分离度（1280×2640 真机帧上做 NCC）：
+#     简易模板 0.9929 @简易格 / 0.5462 @结实格；结实模板 0.8860 @结实格 / 0.4955 @简易格
+#     ⇒ 互不串号，可以放心按名字挑 ✓
+SUPPLY_TPLS = {
+    '结实补给': ('supply_strong.png', 'supply_strong_mask.png'),
+    '简易补给': ('supply_simple.png', 'supply_simple_mask.png'),
+}
+SUPPLY_ORDER = ('简易补给', '结实补给')   # 默认顺序：先用便宜的；空元组 = 什么都不许用
+SUPPLY_DESC = {'简易补给': '+100 体力', '结实补给': '+500 体力'}
 
-def find_supply_icon(b, img=None):
+
+def find_supply_icon(b, img=None, name='结实补给'):
     """⭐ 靠识图在背包「道具」页里找「结实补给」-> (cx, cy, score) 或 None
 
     模板是 2026-09-25 从用户屏幕上裁的 150×150 格子（掩码挖掉右下角数量数字，
@@ -9186,10 +9202,14 @@ def find_supply_icon(b, img=None):
     """
     import cv2
     import numpy as np
-    tp = os.path.join(_MAPBOT_ROOT, SUPPLY_TPL)
-    mp = os.path.join(_MAPBOT_ROOT, SUPPLY_MASK)
+    _tpls = SUPPLY_TPLS.get(name)
+    if not _tpls:
+        say('       · ⚠ 补给名字不在模板表里：%r（可选 %s）' % (name, list(SUPPLY_TPLS)))
+        return None
+    tp = os.path.join(_MAPBOT_ROOT, 'templates', 'items', _tpls[0])
+    mp = os.path.join(_MAPBOT_ROOT, 'templates', 'items', _tpls[1])
     if not (os.path.exists(tp) and os.path.exists(mp)):
-        say('       · ⚠ 补给模板缺失：%s（_MAPBOT_ROOT=%s）' % (SUPPLY_TPL, _MAPBOT_ROOT))
+        say('       · ⚠ 补给模板缺失：%s（_MAPBOT_ROOT=%s）' % (_tpls[0], _MAPBOT_ROOT))
         return None
     tpl = cv2.imdecode(np.fromfile(tp, dtype=np.uint8), cv2.IMREAD_COLOR)
     msk = cv2.imdecode(np.fromfile(mp, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
@@ -9213,7 +9233,7 @@ def find_supply_icon(b, img=None):
     return (int(cx), int(cy), round(float(score), 3)) if score >= SUPPLY_THR else None
 
 
-def use_supply(b, log, names=('结实补给',)):
+def use_supply(b, log, names=None):
     """⭐ 使用一个「结实补给」回体力（用户 2026-09-25 给的流程）
 
         公会(95,1889) → 背包(969,1700) → 道具(926,261) → **识图**找结实补给 → 使用 → 回地图界面
@@ -9224,6 +9244,12 @@ def use_supply(b, log, names=('结实补给',)):
     #   （实测：补给其实**已经吃成功**（体力 14→489）、退图也退对了，
     #     只在最后统计那一行抛异常 ⇒ 被 except 吞掉 → 返回 False → 上层 `break`，
     #     全靠"后面再读一次体力发现够了"才没断线 ⇒ **侥幸跑通**，必须修 ✓）
+    # ⭐ 2026-11-14：允许用哪些补给由界面勾选决定（names=None ⇒ 用模块默认 SUPPLY_ORDER）
+    names = tuple(names) if names else tuple(SUPPLY_ORDER)
+    if not names:
+        log.append({'supply': 'none_selected'})
+        say('       · 界面里一个补给都没勾 ⇒ 不补（用户口径：能自由选择用哪种）')
+        return False
     global SUPPLY_USED
     try:
         b.snap('supply0')
@@ -9245,7 +9271,7 @@ def use_supply(b, log, names=('结实补给',)):
         #    → 模板（两帧×多尺度）→ 公会界面锚点；全程 say + 落帧，真机可诊断 ✓）
         # ⭐ 2026-10-01 用户要求：「使用结实补给**记得在悬浮窗的弹窗上给用户看**」✓
         #   （只有 `status()` 的消息会上悬浮条日志行；文本避开 OCR 关键词：不写"背包/关闭/领取"）
-        status('体力不够 · 去取结实补给')
+        status('体力不够 · 去取补给')
         _pub_dump('supply_select', b.img())
         items = []
         opened = False
@@ -9343,16 +9369,22 @@ def use_supply(b, log, names=('结实补给',)):
         # ④ 识图找结实补给
         b.snap('supply2')
         _pub_dump('supply_items', b.img())
-        hit = find_supply_icon(b)
+        hit, _name, _tried = None, None, []
+        for _nm in names:                      # ⭐ 按界面勾选顺序试（默认先用便宜的）
+            _tried.append(_nm)
+            hit = find_supply_icon(b, name=_nm)
+            if hit:
+                _name = _nm
+                break
         if not hit:
-            log.append({'supply': 'icon_not_found'})
-            say('       · 识图没找到结实补给 ✗')
+            log.append({'supply': 'icon_not_found', 'tried': _tried})
+            say('       · 识图没找到可用补给（试过 %s）✗' % ('、'.join(_tried) or '无'))
             _close_bag(b, b.ocr(tag='supply'), log)
             return False
         cx, cy, score = hit
-        log.append({'supply': 'icon_hit', 'at': (cx, cy), 'score': score})
-        say('       · 识图找到结实补给 (%d,%d) 分数 %.3f' % (cx, cy, score))
-        status('找到结实补给 · 正在用…')          # ⭐ 悬浮条上看得见 ✓（用户 2026-10-01 要求）
+        log.append({'supply': 'icon_hit', 'which': _name, 'at': (cx, cy), 'score': score})
+        say('       · 识图找到%s (%d,%d) 分数 %.3f' % (_name, cx, cy, score))
+        status('找到%s · 正在用…' % _name)          # ⭐ 悬浮条上看得见 ✓（用户 2026-10-01 要求）
         b.tap(cx, cy, wait=1.4)
         # ⑤ 使用（⭐ 双通道文字优先：真机上「使用」可能在归一化帧外 ⇒ 补弹窗帧 ✓）
         b.snap('supply3')

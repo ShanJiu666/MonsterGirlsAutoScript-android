@@ -742,6 +742,17 @@ public class MainActivity extends Activity {
                     Prefs.setAutoSupply(MainActivity.this, on);
                     AppLog.i("设置：没体力自动用补给 = " + (on ? "开 ✓" : "关"));
                 }));
+        // ⭐ 2026-11-14 用户口径：「用户可以自由选择能用那种补给」⇒ 两种各一个勾
+        c1.addView(toggleRow("用简易补给", "+100 体力；勾上才允许吃",
+                Prefs.supplySimple(this), on -> {
+                    Prefs.setSupplySimple(MainActivity.this, on);
+                    AppLog.i("设置：用简易补给 = " + (on ? "开 ✓" : "关"));
+                }));
+        c1.addView(toggleRow("用结实补给", "+500 体力；勾上才允许吃",
+                Prefs.supplyStrong(this), on -> {
+                    Prefs.setSupplyStrong(MainActivity.this, on);
+                    AppLog.i("设置：用结实补给 = " + (on ? "开 ✓" : "关"));
+                }));
         View h1 = UiKit.hair(this);
         c1.addView(h1);
         UiKit.margins(h1, 0, UiKit.dp(this, 10), 0, UiKit.dp(this, 10));

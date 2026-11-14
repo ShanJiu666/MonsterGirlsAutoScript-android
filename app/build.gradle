@@ -11,8 +11,8 @@ android {
         applicationId "com.fantasy.autoexplore"
         minSdk 26
         targetSdk 34
-        versionCode 2138
-        versionName "2.138"
+        versionCode 2139
+        versionName "2.139"
         // ⚠ abiFilters 别写在 defaultConfig：它对 buildType 是「取并集」挡不掉，
         //   且 Chaquopy 只认 defaultConfig/flavor 级（buildType 级直接报错）⇒ 走 flavor 维度（见下）
     }

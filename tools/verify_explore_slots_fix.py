@@ -347,8 +347,11 @@ check('重试阶梯默认最多 2 下（用户报「为什么连点三下背包�
 check('⭐ 摇色子按钮必须**文字命中骰子关键词**（用户报「怎么点了回放战斗」）',
       '_dice_keys' in src
       and "if it['cx'] < LAYOUT.sx(230) and LAYOUT.sy(820) <= it['cy'] <= LAYOUT.sy(1070):" not in src)
-check('⭐ 吃补给要在**悬浮条**上看得见（3 条 status）',
-      '体力不够 · 去取结实补给' in src and '找到结实补给 · 正在用' in src
+# ⚠ 2026-11-14（v2.139）按新行为改写：补给名从**写死的结实补给**变成变量（用户要求可选
+#   简易/结实）⇒ 两条 status 文案参数化成 "去取补给" / "找到%s · 正在用…"。
+#   **判据没放宽**：仍然要求补给流程在悬浮条上有这 3 条 status（少一条就红）。
+check('⭐ 吃补给要在**悬浮条**上看得见（3 条 status；v2.139 起补给名是变量 ⇒ 文案参数化）',
+      '体力不够 · 去取补给' in src and '找到%s · 正在用' in src
       and '补给已用 · 体力' in src)
 check('失败时把屏上 OCR 文本 say 出来（可诊断）',
       '背包没打开（重试 3 次 ✗）｜最后一屏认到' in src)
@@ -15035,6 +15038,71 @@ except Exception as _e138:             # noqa: BLE001
     import traceback as _tb138
     check('v2.138 守门可运行（%r） TRACE=%s'
           % (_e138, _tb138.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('v2.139 补给可选：简易补给 + 结实补给，用哪种/先用哪个由界面勾选决定')
+#   用户 2026-11-14：「加个用简易补给的脚本，用户可以自由选择能用那种补给」
+#   守四件事：① 两个模板都在（含 mask）② 按名字取模板，不再写死结实补给
+#            ③ 用完的补给名要进日志（which=_name）④ 资产变了 ⇒ MARK 必须抬到 v15
+try:
+    _IT139 = os.path.join(PROJ, 'app', 'src', 'main', 'assets', 'mapbot_pack', 'templates', 'items')
+    _EL139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_loop.py'), encoding='utf-8').read()
+    _EA139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'python', 'explore_android.py'), encoding='utf-8').read()
+    _PK139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore', 'PackInstaller.java'), encoding='utf-8').read()
+    _PR139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore', 'Prefs.java'), encoding='utf-8').read()
+    _MA139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore', 'MainActivity.java'), encoding='utf-8').read()
+    _OV139 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore', 'OverlayService.java'), encoding='utf-8').read()
+
+    _need139 = ['supply_simple.png', 'supply_simple_mask.png', 'supply_strong.png', 'supply_strong_mask.png']
+    _miss139 = [_f for _f in _need139 if not os.path.isfile(os.path.join(_IT139, _f))]
+    check('v2.139 A① 资源：两种补给的模板 + mask 四个文件都在 assets/templates/items 下 · 缺=%s'
+          % (_miss139,), not _miss139)
+
+    def _tplok139(_s):
+        if _s is None:
+            return None
+        return (("'简易补给':" in _s) and ("'结实补给':" in _s)
+                and ('supply_simple.png' in _s) and ('supply_strong.png' in _s))
+
+    _i139 = _EL139.find('SUPPLY_TPLS = {')
+    _j139 = _EL139.find('}', _i139) if _i139 >= 0 else -1
+    _tbl139 = _EL139[_i139:_j139] if (_i139 >= 0 and _j139 > _i139) else None
+    check('v2.139 A② 结构级：SUPPLY_TPLS 里两个补给名 + 各自模板/ mask 都登记了 · 判据=%s'
+          % (_tplok139(_tbl139),), _tplok139(_tbl139) is True)
+
+    check('v2.139 A③ 结构级：find_supply_icon 收 name 形参并按表取模板（不再写死结实补给）· sig=%s body=%s'
+          % ("def find_supply_icon(b, img=None, name='结实补给')" in _EL139,
+             'SUPPLY_TPLS.get(name)' in _EL139),
+          ("def find_supply_icon(b, img=None, name='结实补给')" in _EL139)
+          and ('SUPPLY_TPLS.get(name)' in _EL139))
+
+    check('v2.139 A④ 结构级：use_supply 按 names 顺序逐个试、第一个命中就用 · loop=%s log=%s'
+          % (('for _nm in names:' in _EL139) and ('find_supply_icon(b, name=_nm)' in _EL139),
+             "'which': _name" in _EL139),
+          ('for _nm in names:' in _EL139) and ('find_supply_icon(b, name=_nm)' in _EL139)
+          and ("'which': _name" in _EL139))
+
+    _java139 = [('Prefs.supplySimple', 'getBoolean("supply_simple", true)' in _PR139),
+                ('Prefs.supplyStrong', 'getBoolean("supply_strong", true)' in _PR139),
+                ('UI 简易补给行', '用简易补给' in _MA139),
+                ('UI 结实补给行', '用结实补给' in _MA139),
+                ('Java 传 supplyOrder', 'supplyOrder);' in _OV139),
+                ('空勾哨兵 __none__', '__none__' in _OV139),
+                ('python 收 supply_order', "supply_order=str(supply_order or '')" in _EA139)]
+    check('v2.139 A⑤ 结构级：Java 两个勾 + 传参 + 空勾哨兵 + python 收参，一条都不许断 · 缺=%s'
+          % ([_k for _k, _v in _java139 if not _v],), all(_v for _k, _v in _java139))
+
+    check('v2.139 A⑥ 撤回守门：assets 变了 ⇒ PackInstaller.MARK 必须抬到 .pack_v15'
+          '（不抬 ⇒ 已装设备永远拿不到新模板，v1.68 的 slot_done.png 就是这么丢的）· %s'
+          % ('MARK = ".pack_v15"' in _PK139,), 'MARK = ".pack_v15"' in _PK139)
+
+    check('v2.139 B① 对照项：同一判据打**只有结实一个模板**的旧假表 ⇒ 必须 False'
+          '（否则 A② 恒真 = 白测）· 旧样本=%s'
+          % (_tplok139("'结实补给': ('supply_strong.png', 'supply_strong_mask.png'),"),),
+          _tplok139("'结实补给': ('supply_strong.png', 'supply_strong_mask.png'),") is False)
+except Exception as _e139:             # noqa: BLE001
+    import traceback as _tb139
+    check('v2.139 守门可运行（%r） TRACE=%s'
+          % (_e139, _tb139.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))

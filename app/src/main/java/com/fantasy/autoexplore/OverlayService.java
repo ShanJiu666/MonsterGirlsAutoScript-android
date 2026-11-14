@@ -1946,6 +1946,10 @@ public class OverlayService extends Service {
         final int maps = (choiceIdx == 1) ? MAPS_CONTINUOUS : 1;
         final int bagEvery = Prefs.bagEvery(this);
         final boolean autoSupply = Prefs.autoSupply(this);
+        // ⭐ 2026-11-14：允许吃哪种补给（空 = 一个都不许 ⇒ 传哨兵 __none__）
+        final String _soNow = (Prefs.supplySimple(this) ? "简易补给," : "")
+                + (Prefs.supplyStrong(this) ? "结实补给" : "");
+        final String supplyOrder = _soNow.isEmpty() ? "__none__" : _soNow;
         // ⭐ v1.78：收工日常五颗勾选（= PC 窗口上那一排，语义与默认值都对齐 ✓）
         //   ⚠ 全部从 Prefs 读 ⇒ 界面上勾了这里就生效（不会「勾了没反应」✗）
         final boolean guildTasks = Prefs.guildTasks(this);
@@ -2000,7 +2004,8 @@ public class OverlayService extends Service {
                     guildTasks, guildAlchemy, guildIntel, recruitFree, adFree,
                     dailyFirst,
                     Prefs.stopLucky(this), Prefs.stopPeace(this),
-                    Prefs.stopElemPurple(this), Prefs.stopElemOrange(this));
+                    Prefs.stopElemPurple(this), Prefs.stopElemOrange(this),
+                    supplyOrder);
             AppLog.i("▶ " + r);
         }, "ovl-start").start();
     }

@@ -37,7 +37,11 @@ public final class PackInstaller {
      *   129×136 整块（含右上角红点徽标）在"奖励已领完"的帧上只有 **0.863 < 0.90**
      *   ⇒ 改成 **146×53 只裁红底条**，有/无徽标两帧都是 1.000 ✓
      */
-    private static final String MARK = ".pack_v14";
+    // 2026-11-14：pack_v14 -> pack_v15 —— 新增了简易补给的识别模板
+    //   (templates/items/supply_simple.png + mask)。
+    //   不提版本号 => 已装设备的 ensure() 见到旧标记直接 return => 新模板永远到不了
+    //   （v1.68 的 slot_done.png 就是这么丢的，别再踩）
+    private static final String MARK = ".pack_v15";
 
     private PackInstaller() {
     }

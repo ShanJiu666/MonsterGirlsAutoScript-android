@@ -559,7 +559,7 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
         guild_tasks=False, guild_alchemy=False, guild_intel=False,
         recruit_free=False, ad_free=False, daily_first=False,
         stop_lucky=True, stop_peace=True, stop_elem_purple=True,
-        stop_elem_orange=True):
+        stop_elem_orange=True, supply_order=''):
     """同步跑（阻塞）。一般请用 `start()` 起后台线程 ✓
 
     ⚠ 参数顺序 = Java 侧 `PyBridge.call("start", …)` 的位置参数顺序，
@@ -584,6 +584,13 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
     EL.STOP_PEACE = bool(stop_peace)
     EL.STOP_ELEM_PURPLE = bool(stop_elem_purple)
     EL.STOP_ELEM_ORANGE = bool(stop_elem_orange)
+    # ⭐ 2026-11-14：允许用哪些补给、先用哪个（Java 侧按界面勾选拼成 '简易补给,结实补给'）
+    #   空串 ⇒ 用 explore_loop 的默认顺序；界面上一个都不勾 ⇒ Java 传 '__none__' ⇒ 一个都不补
+    _so = (supply_order or '').strip()
+    if _so == '__none__':
+        EL.SUPPLY_ORDER = ()
+    elif _so:
+        EL.SUPPLY_ORDER = tuple(x for x in _so.split(',') if x in getattr(EL, 'SUPPLY_TPLS', {}))
     EL.__dict__['_ANDROID_STOP'] = False        # 清掉上一轮的停止标志
     if EL.INSTANCE_TAG:
         EL.WIN = os.path.join(EL.RUNS, EL.INSTANCE_TAG, 'loop')
@@ -637,7 +644,7 @@ def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
           guild_tasks=False, guild_alchemy=False, guild_intel=False,
           recruit_free=False, ad_free=False, daily_first=False,
           stop_lucky=True, stop_peace=True, stop_elem_purple=True,
-          stop_elem_orange=True):
+          stop_elem_orange=True, supply_order=''):
     """后台线程启动探索（幂等：已在跑就拒绝）
 
     ⚠ **签名必须与 `run()` 完全一致**（显式形参，不是 `**kw`）：
@@ -667,7 +674,9 @@ def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
               stop_lucky=bool(stop_lucky),
               stop_peace=bool(stop_peace),
               stop_elem_purple=bool(stop_elem_purple),
-              stop_elem_orange=bool(stop_elem_orange))
+              stop_elem_orange=bool(stop_elem_orange),
+              # 2026-11-14：允许用哪些补给、先用哪个（Java 按界面勾选拼串）
+              supply_order=str(supply_order or ''))
     with _LOCK:
         if _STATE['running']:
             return 'already-running'
