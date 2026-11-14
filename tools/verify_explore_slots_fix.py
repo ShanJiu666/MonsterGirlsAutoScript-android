@@ -14808,6 +14808,33 @@ except Exception as _e133b:            # noqa: BLE001
     check('v2.133b 守门可运行（%r） TRACE=%s'
           % (_e133b, _tb133b.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
+print('v2.134 反馈群号写进「一键反馈」的提示里（用户 2026-11-14 口径）')
+#   口径：「把反馈群号也写进『一键反馈』弹的提示里」⇒ 分享附言 + 反馈跑完那句提示都要带群号
+#   ⚠ 关键不是"文字里有没有群号"，而是**不许写第二份字面量**（单一事实来源 = MainActivity 的常量）
+try:
+    _JD134 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _fb134 = io.open(os.path.join(_JD134, 'Feedback.java'), encoding='utf-8').read()
+
+    def _fbok134(_s):
+        # 用了共享常量 **且** 没有第二份裸字面量
+        return ('MainActivity.QQ_FEEDBACK_GROUP' in _s) and ('1067971799' not in _s)
+
+    _n134 = _fb134.count('MainActivity.QQ_FEEDBACK_GROUP')
+    check('v2.134 A① 结构级：Feedback 三处提示（两条分享附言 + 跑完那句）都引用共享常量'
+          '（不写第二份群号字面量）· 引用次数=%d' % _n134, _n134 >= 3)
+
+    check('v2.134 A② 结构级：Feedback.java 里**没有**裸字面量 1067971799'
+          '（改群号只改 MainActivity 一处）· 判据=%s' % (_fbok134(_fb134),), _fbok134(_fb134))
+
+    check('v2.134 B① 对照项：同一判据打**写死字面量**的假样本 ⇒ 必须 False'
+          '（否则 A② 恒真 = 白测）· 假样本判据=%s'
+          % (_fbok134('Intent.putExtra(T, "\n进反馈群 1067971799")'),),
+          _fbok134('Intent.putExtra(T, "\n进反馈群 1067971799")') is False)
+except Exception as _e134:             # noqa: BLE001
+    import traceback as _tb134
+    check('v2.134 守门可运行（%r） TRACE=%s'
+          % (_e134, _tb134.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

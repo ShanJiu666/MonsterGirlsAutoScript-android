@@ -122,6 +122,10 @@ public final class Feedback {
             msg = "反馈失败：" + t;
             AppLog.i(TAG + " " + t);
         }
+        if (shareUri != null || plainFile != null) {
+            // 用户 2026-11-14：反馈跑完的那句提示里也带上群号（省得再去诊断页找）
+            msg = msg + " · 有问题进反馈群 " + MainActivity.QQ_FEEDBACK_GROUP;
+        }
         AppLog.i("\u203a " + msg);          // › 前缀 ⇒ 进悬浮条日志行 ✓
         return msg;
     }
@@ -458,7 +462,8 @@ public final class Feedback {
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.putExtra(Intent.EXTRA_SUBJECT, name);
             send.putExtra(Intent.EXTRA_TEXT,
-                    "MGAS 反馈包（内含日志 + 机型信息 + 现场帧）。麻烦把这个文件发给我，谢谢！");
+                    "MGAS 反馈包（内含日志 + 机型信息 + 现场帧）。麻烦把这个文件发给我，谢谢！"
+                            + "\n有问题也可以直接进 MGAS 反馈群 " + MainActivity.QQ_FEEDBACK_GROUP);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             Intent chooser = Intent.createChooser(send, "把 MGAS 反馈包发给开发者");
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -478,7 +483,8 @@ public final class Feedback {
             send.putExtra(Intent.EXTRA_SUBJECT, name);
             send.putExtra(Intent.EXTRA_TEXT,
                     "MGAS 反馈包路径：Download/autoexplore/" + name
-                            + "\n（请把这个文件发给我；内含日志 + 机型信息 + 现场帧）");
+                            + "\n（请把这个文件发给我；内含日志 + 机型信息 + 现场帧）"
+                            + "\n有问题也可以直接进 MGAS 反馈群 " + MainActivity.QQ_FEEDBACK_GROUP);
             Intent chooser = Intent.createChooser(send, "把 MGAS 反馈包发给开发者");
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.startActivity(chooser);

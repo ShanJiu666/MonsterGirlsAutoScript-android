@@ -1895,7 +1895,7 @@ public class MainActivity extends Activity {
     }
 
     /** MGAS 反馈群（用户 2026-11-14 给的群号；改成别的群只动这一处） */
-    private static final String QQ_FEEDBACK_GROUP = "1067971799";
+    static final String QQ_FEEDBACK_GROUP = "1067971799";
 
     /**
      * ⭐⭐ 打开 QQ 反馈群（诊断页那张卡，整框可点）。
