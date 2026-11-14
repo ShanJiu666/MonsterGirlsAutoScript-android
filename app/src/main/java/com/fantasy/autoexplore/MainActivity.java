@@ -32,6 +32,8 @@ import java.io.FileOutputStream;
 import java.util.List;
 import java.util.Locale;
 
+import org.json.JSONObject;
+
 /**
  * 手机版自动探索（MGAS）· 设备层 + 视觉层 + 决策层
  *
@@ -1025,7 +1027,9 @@ public class MainActivity extends Activity {
         chk.setBackground(UiKit.pill(this, 0x1C22D3EE, 0x6022D3EE, 14));
         chk.setPadding(UiKit.dp(this, 14), UiKit.dp(this, 8),
                 UiKit.dp(this, 14), UiKit.dp(this, 8));
-        chk.setOnClickListener(v -> doUpdate("auto"));
+        // ⭐ v2.133：不再直连 doUpdate("auto")（那条路一点就下载+安装 ✗）
+        //   ⇒ 先 Updater.plan 探测 → 弹「立即更新/稍后」确认 → 点了才真下
+        chk.setOnClickListener(v -> checkUpdate());
         up.addView(chk);
         UiKit.margins(up, 0, UiKit.dp(this, 8), 0, 0);
         p2.addView(up);
@@ -1775,9 +1779,104 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * ⭐ v1.41 热更新入口（悬浮条 / 广播 / 这里**同一条代码路径** ⇒ 我 adb 测的就是朋友跑的那条）。
+     * ⭐⭐⭐ v2.133「检查更新」= **先探测 → 再确认 → 最后才动手**（用户 2026-11-14 拍板）。
      *
-     * @param mode {@code auto} = 补丁优先、没补丁就下整包并弹安装 ／ {@code check} = 只查不动
+     * <p>用户三条口径：①「**所有更新前都要弹确认**」（含后台发现的热补丁）
+     * ②「后台检查保留，但只**发现并提示**，**一律不安装**」
+     * ③ 确认弹窗 = **版本号 + 大小 + 公告正文**，按钮「立即更新」/「稍后」。
+     *
+     * <p>流程：后台线程 {@code Updater.plan}（**无副作用**：只读清单 + 本地状态）
+     * ⇒ 无更新：复用 {@link #showUpdateResult} 弹「已是最新」；
+     * 有更新：弹 {@link #showUpdateConfirm} ⇒ 点「立即更新」才走 {@link #doUpdate}（真下载/安装）。
+     *
+     * <p>⚠ 必须后台线程：拉清单要走网络，主线程会 ANR ✗
+     * ⚠ 异常**不许吞成"已是最新"** ⇒ 照原样弹出来（本仓反复踩过"判据 fail-open"的坑）。
+     */
+    private void checkUpdate() {
+        new Thread(() -> {
+            final JSONObject p;
+            try {
+                p = Updater.plan(getApplicationContext());
+            } catch (Throwable t) {
+                AppLog.i("[更新] ⚠ " + t);
+                final String e = "更新检查失败：" + t;
+                ui.post(() -> showUpdateResult(e));
+                return;
+            }
+            ui.post(() -> {
+                refreshStatus();
+                if (p == null) {
+                    String cur = "已是最新（v" + BuildConfig.VERSION_NAME
+                            + "(" + BuildConfig.VERSION_CODE + ")）";
+                    AppLog.i("[更新] " + cur);
+                    showUpdateResult(cur);
+                    return;
+                }
+                showUpdateConfirm(p);
+            });
+        }, "ui-update-plan").start();
+    }
+
+    /**
+     * ⭐⭐ v2.133 更新确认框：**版本号 + 大小 + 公告正文**，按钮「立即更新」/「稍后」。
+     *
+     * <p>用户 2026-11-14 口径③：「确认弹窗显示**版本号 + 大小 + 公告正文**」。
+     * <p>风格照抄 {@link #showUpdateResult}（同一套 {@code AlertDialog.Builder}、
+     * 同一套 try/Throwable 兜底），**不引库、不自定义控件**。
+     * <p>⚠ 公告可能很长（线上 v1.77 那条 100+ 字）⇒ 正文包一层 {@link ScrollView} 放进
+     * {@code setView}，**不许截断成一行** ✗
+     */
+    private void showUpdateConfirm(JSONObject p) {
+        try {
+            boolean hot = "hot".equals(p.optString("kind", "apk"));
+            String id = p.optString("id", "?");
+            String vn = p.optString("versionName", "?");
+            long size = p.optLong("size", 0);
+            String notes = p.optString("notes", "").trim();
+            String title = hot
+                    ? ("发现更新 · 热补丁 " + id)
+                    : ("发现更新 v" + vn + " (" + id + ")");
+            StringBuilder sb = new StringBuilder();
+            sb.append(hot ? "类型：热补丁（下载后重启 MGAS 生效）"
+                    : "类型：整包（下载后走系统安装器）");
+            sb.append("\n大小：").append(mb(size));
+            if (hot) {
+                sb.append("　·　当前壳 v").append(vn);
+            }
+            sb.append("\n\n更新说明：\n").append(notes.isEmpty() ? "（清单里没写说明）" : notes);
+
+            TextView tv = new TextView(this);
+            tv.setText(sb.toString());
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            tv.setTextColor(UiKit.INK);
+            int pad = UiKit.dp(this, 18);
+            tv.setPadding(pad, UiKit.dp(this, 6), pad, UiKit.dp(this, 6));
+            ScrollView sv = new ScrollView(this);
+            sv.addView(tv);
+
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle(title)
+                    .setView(sv)
+                    .setPositiveButton("立即更新", (d, w) -> doUpdate(hot ? "hot" : "apk"))
+                    .setNegativeButton("稍后", (d, w) ->
+                            AppLog.i("[更新] 用户选了「稍后」，未下载：" + id))
+                    .show();
+            AppLog.i("[更新] 已弹确认框：" + title + " · " + mb(size));
+        } catch (Throwable t) {
+            AppLog.i("[更新] ⚠ 确认弹窗失败：" + t);
+        }
+    }
+
+    /** 字节数 → "0.4MB"（与 {@code Updater.mb} 同格式；确认框必须让用户看见大小） */
+    private static String mb(long bytes) {
+        return String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0);
+    }
+
+    /**
+     * ⭐ v1.41 热更新入口 ⚠ **v2.133 起只由确认框的「立即更新」调**（`hot` / `apk`）：
+     * 悬浮条 / 广播 / 界面仍走 {@code Updater.run}，但**不允许**在用户确认前调到这里。
+     *
+     * @param mode {@code hot} = 下补丁待重启生效 ／ {@code apk} = 下整包并弹系统安装器
      * ⚠ 必须后台线程：整包 70MB 下载几十秒，主线程会 ANR ✗
      */
     private void doUpdate(String mode) {

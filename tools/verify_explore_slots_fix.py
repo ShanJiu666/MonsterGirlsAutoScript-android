@@ -14529,6 +14529,199 @@ except Exception as _e131:             # noqa: BLE001
     check('v2.131 守门可运行（%r） TRACE=%s'
           % (_e131, _tb131.format_exc()[-700:].replace(chr(10), ' | ')), False)
 print()
+print('v2.133 更新前必须确认：后台只提示不安装 · 界面弹「立即更新/稍后」· 公告正文可滚动')
+#   用户 2026-11-14 三条口径（逐条落地）：
+#     ①「所有更新前都要弹确认」（含后台发现的热补丁）
+#     ②「后台检查保留，但只发现并提示，一律不安装」
+#     ③ 确认弹窗 = 版本号 + 大小 + 公告正文，按钮「立即更新」/「稍后」
+#   ⚠ 本组两处老坑各守一遍：
+#     · 撤回守门**先剥整行注释**再查（注释里逐字引用旧写法 ⇒ grep 假红，本仓踩过 4 次）
+#     · 切片一律 `.find()` + 判 >= 0（`.split()` 在源码被 stash 时抛异常，把后面断言全吞掉）
+try:
+    _JD133 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+    _up133 = io.open(os.path.join(_JD133, 'Updater.java'), encoding='utf-8').read()
+    _ma133 = io.open(os.path.join(_JD133, 'MainActivity.java'), encoding='utf-8').read()
+    _Q133 = chr(34)
+
+    def _strip_java_lines_133(_s):
+        # 剥掉**整行注释**（`//` / `/*` / 块注释的 `*` 开头行）
+        # ⚠ 本仓因「留档注释里逐字引用旧写法 ⇒ 字符串 grep 假红」已踩 4 次
+        #   （v1.62c / v1.67 / v1.70 / v1.77）⇒ 撤回守门一律**先剥注释再查**
+        _out = []
+        for _ln in _s.splitlines():
+            _t = _ln.strip()
+            if _t.startswith('//') or _t.startswith('/*') or _t.startswith('*'):
+                continue
+            _out.append(_ln)
+        return chr(10).join(_out)
+
+    def _java_block_133(_src, _anchor):
+        # 从 _anchor 之后第一个 `{` 起做花括号配平，返回块内文本；找不到返回 **None**
+        # ⚠ 绝不用 `.split()` / `.index()` —— 源码被 stash 时它们抛异常，把本组后面的
+        #   断言**全吞掉**（v1.66 / v1.68 各踩一次）⇒ 一律 `.find()` + 判 `>= 0`
+        _i = _src.find(_anchor)
+        if _i < 0:
+            return None
+        _j = _src.find('{', _i)
+        if _j < 0:
+            return None
+        _d = 0
+        for _k in range(_j, len(_src)):
+            _c = _src[_k]
+            if _c == '{':
+                _d += 1
+            elif _c == '}':
+                _d -= 1
+                if _d == 0:
+                    return _src[_j + 1:_k]
+        return None
+
+    def _upd_bad_calls_133(_seg, _banned):
+        # _seg 的**代码**（已剥整行注释）里出现过的禁用调用名；空 list = 干净
+        # ⚠ 切片是 None（锚点没找到）⇒ 返回 **None**，不许返回 []
+        #   （否则「没找到锚点」会被判成「干净」⇒ 假绿 ✗，正是牙齿测试要逼出来的那种）
+        if _seg is None:
+            return None
+        _code = _strip_java_lines_133(_seg)
+        return [_b for _b in _banned if (_b + '(') in _code]
+
+    _UP133 = _strip_java_lines_133(_up133)
+    _MA133 = _strip_java_lines_133(_ma133)
+
+    # ── A① 结构级：plan 只探测（无副作用）──
+    _plan133 = _java_block_133(_UP133, 'static JSONObject plan(Context ctx)')
+    _bad133 = _upd_bad_calls_133(_plan133, ['download', 'applyHot', 'installApk', 'writeBytes'])
+    check('v2.133 A① 结构级：`Updater.plan()` 存在，且函数体里**没有** download( / applyHot( /'
+          ' installApk( / writeBytes（已剥整行注释）—— 它在用户点「立即更新」**之前**被界面调，'
+          ' 一旦这里偷偷装包，「更新前确认」就是假的 ✗ · 切片=%s 命中=%s'
+          % ('None' if _plan133 is None else len(_plan133), _bad133),
+          _plan133 is not None and len(_plan133) > 30 and _bad133 == [])
+
+    _pof133 = _java_block_133(_UP133, 'static JSONObject planOf(Context ctx, JSONObject m)')
+    _badpof133 = _upd_bad_calls_133(_pof133,
+                                    ['download', 'applyHot', 'installApk', 'writeBytes'])
+    check('v2.133 A①b 结构级：`planOf`（plan 的判定体，run 也复用它）同样**无副作用**'
+          ' —— 只读清单 + state.json，不下载不写盘 · 切片=%s 命中=%s'
+          % ('None' if _pof133 is None else len(_pof133), _badpof133),
+          _pof133 is not None and len(_pof133) > 300 and _badpof133 == [])
+
+    # ── A② 结构级：run 的 bg / auto 分支都不许有安装动作 ──
+    _bg133 = _java_block_133(_UP133, 'if (' + _Q133 + 'bg' + _Q133 + '.equals(mode))')
+    _badbg133 = _upd_bad_calls_133(_bg133, ['applyHot', 'installApk'])
+    check('v2.133 A②a 结构级：run 的 **bg** 分支里不许有 applyHot( / installApk('
+          '（用户口径②：「后台检查保留，但只发现并提示，一律不安装」）· 切片=%s 命中=%s'
+          % ('None' if _bg133 is None else len(_bg133), _badbg133),
+          _bg133 is not None and len(_bg133) > 20 and _badbg133 == [])
+
+    _auto133 = _java_block_133(_UP133, 'if (' + _Q133 + 'auto' + _Q133 + '.equals(mode))')
+    _badauto133 = _upd_bad_calls_133(_auto133, ['applyHot', 'installApk'])
+    check('v2.133 A②b 结构级：run 的 **auto** 分支里不许有 applyHot( / installApk('
+          '（auto 以前 =「补丁优先、没有就整包」⇒ 按钮一点就下载+安装 ✗）· 切片=%s 命中=%s'
+          % ('None' if _auto133 is None else len(_auto133), _badauto133),
+          _auto133 is not None and len(_auto133) > 20 and _badauto133 == [])
+
+    # ── A②c 撤回守门：hot / apk 两个分支**必须还在**（确认之后那条路不能一起断）──
+    _hot133 = _java_block_133(_UP133, 'if (' + _Q133 + 'hot' + _Q133 + '.equals(mode))')
+    _apk133 = _java_block_133(_UP133, 'if (' + _Q133 + 'apk' + _Q133 + '.equals(mode))')
+    _hotcalls133 = _upd_bad_calls_133(_hot133, ['applyHot'])
+    _apkcalls133 = _upd_bad_calls_133(_apk133, ['installApk'])
+    check('v2.133 A②c 撤回守门：hot 分支仍调 applyHot(、apk 分支仍调 installApk('
+          '（用户在确认框点「立即更新」之后真下载的那条路**不许被一起删掉** ✗）'
+          ' · hot=%s apk=%s' % (_hotcalls133, _apkcalls133),
+          _hotcalls133 == ['applyHot'] and _apkcalls133 == ['installApk'])
+
+    # ── A③ 结构级：MainActivity 的确认路径四样俱全 ──
+    _ck133 = _java_block_133(_MA133, 'private void checkUpdate()')
+    _cf133 = _java_block_133(_MA133, 'private void showUpdateConfirm(')
+    _path133 = (_ck133 or '') + (_cf133 or '')
+    check('v2.133 A③ 结构级：确认路径（checkUpdate + showUpdateConfirm）必须同时含'
+          ' `Updater.plan(`（先探测）/ 立即更新（positive）/ 稍后（negative）/ notes（公告）'
+          ' · plan=%s 立即=%s 稍后=%s notes=%s'
+          % ('Updater.plan(' in _path133, '立即更新' in _path133,
+             '稍后' in _path133, 'notes' in _path133),
+          _ck133 is not None and _cf133 is not None
+          and all(_k in _path133 for _k in ('Updater.plan(', '立即更新', '稍后', 'notes')))
+
+    # ── A③b 撤回守门：按钮**不许**再直连 doUpdate(auto) ──
+    _btn133 = 'chk.setOnClickListener(v -> checkUpdate())'
+    _oldbtn133 = 'chk.setOnClickListener(v -> doUpdate(' + _Q133 + 'auto' + _Q133 + '))'
+    check('v2.133 A③b 撤回守门：「检查更新」按钮必须改调 checkUpdate()，**不许**再直连'
+          ' doUpdate(auto)（那条路一点就下载+安装 ✗）· 新=%s 旧=%s'
+          % (_btn133 in _ma133, _oldbtn133 in _MA133),
+          _btn133 in _ma133 and _oldbtn133 not in _MA133)
+
+    # ── A④ 结构级：确认框正文必须带**大小**与**公告正文**（且可滚动，不许截断）──
+    _cfok133 = _cf133 or ''
+    check('v2.133 A④ 结构级：确认框正文必须带 mb( 大小 + notes 公告正文 + 可滚动容器'
+          '（用户口径③：版本号 + 大小 + 公告正文；线上公告 100+ 字 ⇒ 不许截断成一行 ✗）'
+          ' · mb=%s notes=%s scroll=%s'
+          % ('mb(' in _cfok133, 'notes' in _cfok133, 'ScrollView' in _cfok133),
+          _cf133 is not None and 'mb(' in _cfok133 and 'notes' in _cfok133
+          and 'ScrollView' in _cfok133)
+
+    # ── B① 对照项：拿 A② 的判据去打**人为构造的旧写法** ⇒ 必须命中（证明判据不是恒真）──
+    _L133 = chr(10)
+    _oldbg133 = _L133.join([
+        '        if (' + _Q133 + 'bg' + _Q133 + '.equals(mode)) {',
+        '            if (hot != null && ' + _Q133 + '可用' + _Q133 + '.equals(hotVerdict)) {',
+        '                return applyHot(ctx, hot);',
+        '            }',
+        '            return null;',
+        '        }'])
+    _newbg133 = _L133.join([
+        '        if (' + _Q133 + 'bg' + _Q133 + '.equals(mode)) {',
+        '            JSONObject p = planOf(ctx, m);',
+        '            return p == null ? null : hintOf(p);',
+        '        }'])
+    _hit_old133 = _upd_bad_calls_133(_oldbg133, ['applyHot', 'installApk'])
+    _hit_new133 = _upd_bad_calls_133(_newbg133, ['applyHot', 'installApk'])
+    check('v2.133 B① 对照项：把 A② 的判据打在**人为构造的旧写法**（bg 里 return applyHot(...)，'
+          ' 就是 HEAD 的那段）⇒ 必须命中 [applyHot]；打在**新写法**上 ⇒ 必须为空。'
+          ' 否则判据恒真 = 门禁假绿 ✗ · 旧=%s 新=%s' % (_hit_old133, _hit_new133),
+          _hit_old133 == ['applyHot'] and _hit_new133 == [])
+
+    # ── B② 对照项：整行注释里引用 applyHot( **不算命中**（剥注释真的生效）──
+    _cmt133 = _L133.join([
+        '        // 旧写法是 return applyHot(ctx, hot); ← 留档注释里引用不算',
+        '        return null;'])
+    _cmt_hit133 = _upd_bad_calls_133(_cmt133, ['applyHot'])
+    check('v2.133 B② 对照项：**整行注释**里引用 applyHot( 不算命中 —— 本仓因注释假红 4 次，'
+          ' 剥注释必须真的生效 · 命中=%s' % (_cmt_hit133,), _cmt_hit133 == [])
+
+    # ── C① 撤回守门：更新后的播报链**没被删** ──
+    check('v2.133 C① 撤回守门：「✅ 已更新 + 更新说明」播报链没被删'
+          '（Updater.takeAnnounce / pendingAnnounce / MainActivity.announceHotUpdate）'
+          ' —— 那是**装完之后**的告知，与本次「更新前确认」互补，不许顺手删 ✗'
+          ' · takeAnnounce=%s pendingAnnounce=%s announce=%s'
+          % ('takeAnnounce()' in _UP133, 'pendingAnnounce = pid' in _UP133,
+             'announceHotUpdate()' in _MA133),
+          'public static String takeAnnounce()' in _UP133
+          and 'pendingAnnounce = pid' in _UP133
+          and 'private void announceHotUpdate()' in _MA133
+          and 'Updater.takeAnnounce()' in _MA133)
+
+    # ── C② 撤回守门：applyHot / installApk 两个本体仍在 ──
+    _afok133 = 'private static String applyHot(Context ctx, JSONObject hot)' in _UP133
+    _aiok133 = 'private static String installApk(Context ctx, JSONObject app)' in _UP133
+    check('v2.133 C② 撤回守门：applyHot / installApk **两个方法本体仍在**'
+          '（确认之后那条路不能断）· applyHot=%s installApk=%s' % (_afok133, _aiok133),
+          _afok133 and _aiok133)
+
+    # ── C③ 撤回守门：回滚 / 自检 / sha256 / 拉黑 一处都没动 ──
+    _keep133 = ['public static synchronized void bootRecover(Context ctx)',
+                'public static void onPythonStarted(Context ctx)',
+                'String got = sha256(zip);',
+                'String got = sha256(dst);',
+                '该补丁上次自检失败已拉黑']
+    check('v2.133 C③ 撤回守门：bootRecover / onPythonStarted / sha256 校验 / 拉黑判据原样保留'
+          '（本次只改「谁来触发下载」，回滚与校验一个字都不许动）· 五处逐一=%s'
+          % ([_k in _UP133 for _k in _keep133],),
+          all(_k in _UP133 for _k in _keep133))
+except Exception as _e133:             # noqa: BLE001
+    import traceback as _tb133
+    check('v2.133 守门可运行（%r） TRACE=%s'
+          % (_e133, _tb133.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

@@ -66,6 +66,16 @@ import java.util.zip.ZipInputStream;
  * ⚠ 回滚后 {@code sys.path} 仍指着一个<b>已不存在</b>的目录 —— 这是**故意的**：Python 找不到
  * 就自然回落 .imy 内置版，不需要重启进程（import 失败不会在 {@code sys.modules} 留残留）。
  *
+ * <h3>⭐⭐⭐ v2.133（2026-11-14 用户拍板）：<b>更新前必须确认</b></h3>
+ * <ul>
+ *   <li>{@link #plan} = <b>只探测</b>（读清单 + 本地 {@code state.json}；<b>不下载、不写盘</b>）</li>
+ *   <li>{@code run(bg)} / {@code run(auto)} = 只回一句提示，<b>一律不安装</b></li>
+ *   <li>{@code run(hot)} / {@code run(apk)} = 用户在确认框点「立即更新」<b>之后</b>才真下载/安装</li>
+ * </ul>
+ * ⚠ 为什么要把"后台自动装补丁"撤掉：用户原话「<b>所有更新前都要弹确认</b>（含后台发现的补丁）」
+ *   ＋「后台检查保留，但只<b>发现并提示</b>，<b>一律不安装</b>」——
+ *   原来 {@code bg} 一发现补丁就静默 {@code applyHot}，人根本不知道装了什么 ✗
+ *
  * <h3>为什么 APK 装法用 PackageInstaller.Session 而不是 FileProvider / MediaStore</h3>
  * · {@code file://} 在 API 24+ 抛 {@code FileUriExposedException} ✗<br>
  * · FileProvider 要引 androidx（本工程**没有** androidx，加依赖要联网拉包 ✗）<br>
@@ -380,12 +390,78 @@ public final class Updater {
         }
     }
 
+    // ───────────────────── 更新探测（**无副作用**，v2.133）─────────────────────
+
     /**
-     * 一个入口，三种用法（悬浮条按钮 / 广播 / 界面都用它，避免三份逻辑分叉）。
+     * ⭐⭐⭐ v2.133：**只探测、不动手**（用户 2026-11-14：「所有更新前都要弹确认」）。
      *
-     * @param mode {@code check} 只查并报告 ／ {@code hot} 补丁（下载待重启生效）
-     *             ／ {@code apk} 整包（下载 + 弹系统安装器）／ {@code auto} 补丁优先，没有就整包
+     * @return {@code null} = 无需更新；否则
+     *         {@code {"kind":"hot"|"apk","id":...,"versionName":...,"size":<long>,"notes":"..."}}
+     *
+     * <p>⚠⚠ <b>本方法只许读清单与本地状态</b>（清单 = 一次 HTTP GET；状态 = {@code hot/state.json}）：
+     * <b>绝不许下载、绝不许写文件</b> —— 它在用户点「立即更新」<b>之前</b>被界面调用，
+     * 一旦这里偷偷装包，"更新前确认"就变成假的 ✗（门禁 v2.133 A① 按结构钉住）。
+     *
+     * <p>⚠ 网络/解析失败<b>照常抛</b>，别吞成 null —— 吞了界面会显示"已是最新"，
+     * 那正是本仓反复踩的"判据 fail-open"坑（v1.62 veto 被冲掉 / v1.63 band 裁掉 HUD /
+     * v1.64 mk 是 dict / v1.71 轮首读成 None）。
+     */
+    public static JSONObject plan(Context ctx) throws Exception {
+        return planOf(ctx, fetchManifest());
+    }
+
+    /**
+     * {@link #plan} 的判定体（顺手给 {@link #run} 复用 —— 一次检查只拉一份清单）。
+     *
+     * <p>⚠ 同样**无副作用**：只读清单 + {@code state.json}（{@link #hotVerdict} 靠它判
+     * 「已装过 / 已拉黑 / 比 APK 旧」），不下载、不写盘。
+     */
+    private static JSONObject planOf(Context ctx, JSONObject m) throws Exception {
+        final int myVc = myVersionCode(ctx);
+        JSONObject app = m.optJSONObject("app");
+        JSONObject hot = m.optJSONObject("hot");
+
+        // 补丁优先（小、无感）—— 判据与 run(hot) 完全同源，别写第二份
+        if (hot != null && "可用".equals(hotVerdict(ctx, hot, myVc))) {
+            JSONObject p = new JSONObject();
+            p.put("kind", "hot");
+            p.put("id", hot.optString("id", "?"));
+            p.put("versionName", versionName(ctx));
+            p.put("size", hot.optLong("size", 0));
+            p.put("notes", hot.optString("notes", ""));
+            return p;
+        }
+        if (app != null && !app.isNull("url") && app.optInt("versionCode", 0) > myVc) {
+            JSONObject p = new JSONObject();
+            p.put("kind", "apk");
+            p.put("id", String.valueOf(app.optInt("versionCode", 0)));
+            p.put("versionName", app.optString("versionName",
+                    String.valueOf(app.optInt("versionCode", 0))));
+            p.put("size", app.optLong("size", 0));
+            p.put("notes", app.optString("notes", ""));
+            return p;
+        }
+        return null;
+    }
+
+    /** 把 {@link #plan} 的结果变成一句**给用户看**的提示（后台只提示、不安装） */
+    private static String hintOf(JSONObject p) {
+        String size = mb(p.optLong("size", 0));
+        String tail = "），去 MGAS 界面点「检查更新」确认安装";
+        if ("hot".equals(p.optString("kind", "apk"))) {
+            return "有新补丁 " + p.optString("id", "?") + "（" + size + tail;
+        }
+        return "有新整包 v" + p.optString("versionName", "?") + "（" + size + tail;
+    }
+
+    /**
+     * 一个入口，四种用法（悬浮条按钮 / 广播 / 界面都用它，避免三份逻辑分叉）。
+     *
+     * @param mode {@code check} 只查并报告 ／ <b>{@code bg} / {@code auto} 只探测 + 回一句提示
+     *             （v2.133：<b>一律不安装</b>）</b> ／ {@code hot} 补丁（下载待重启生效）
+     *             ／ {@code apk} 整包（下载 + 弹系统安装器）
      * @return 一句/几行给人看的结果（调用方会写进悬浮条日志行）
+     * @see #plan 无副作用的探测（界面"先确认再更新"用它，别用 {@code run(auto)}）
      */
     public static String run(Context ctx, String mode) {
         try {
@@ -404,37 +480,42 @@ public final class Updater {
                         + " · 整包：" + apkVerdict;
             }
 
-            // ⭐ bg = 后台自动（悬浮条一起来就跑）：**只自动装补丁**，整包只提示。
-            //   为什么不自动下整包：70MB + 流量 + 反正最后一定要用户点一下系统安装器
-            //   ⇒ 不如把选择权留给用户。返回 null = "没什么可说" ⇒ 调用方静默，不往日志刷噪音。
+            // ⭐⭐ v2.133（用户 2026-11-14 拍板）：
+            //   ①「**所有更新前都要弹确认**（含后台发现的补丁）」
+            //   ②「后台检查保留，但只**发现并提示**，**一律不安装**」
+            //   ⇒ bg 从"一发现补丁就静默 applyHot"改成"只探测 + 回一句提示"
+            //   返回 null = 没啥可说 ⇒ 调用方静默，不往日志刷噪音。
             if ("bg".equals(mode)) {
+                JSONObject p = planOf(ctx, m);
+                return p == null ? null : hintOf(p);
+            }
+
+            // ⭐⭐ v2.133：`auto` 原来是「补丁优先、没有就整包」⇒ **直接下载并安装** ✗
+            //   用户口径是"点「检查更新」→ 看清版本号/大小/公告 → 我再决定"
+            //   ⇒ auto 与 bg 同口径：**只探测、只回提示**；
+            //     真下载只走界面确认之后的 run(hot) / run(apk)
+            if ("auto".equals(mode)) {
+                JSONObject p = planOf(ctx, m);
+                if (p == null) {
+                    return "已是最新（v" + versionName(ctx) + "）· 补丁：" + hotVerdict;
+                }
+                return hintOf(p);
+            }
+
+            // ⭐ hot / apk = **用户在确认框点了「立即更新」之后**那条路（界面 / 广播调它）
+            if ("hot".equals(mode)) {
                 if (hot != null && "可用".equals(hotVerdict)) {
                     return applyHot(ctx, hot);
                 }
-                if (app != null && app.optInt("versionCode", 0) > myVc) {
-                    return "有新整包 v" + app.optString("versionName", "?")
-                            + "（进 MGAS 界面点「检查更新」即可装）";
-                }
-                return null;
-            }
-
-            boolean wantHot = "hot".equals(mode) || "auto".equals(mode);
-            boolean wantApk = "apk".equals(mode) || "auto".equals(mode);
-
-            // 补丁优先（小、无感）。auto 模式下"补丁可用"就不去下 70MB
-            if (wantHot && hot != null && "可用".equals(hotVerdict)) {
-                return applyHot(ctx, hot);
-            }
-            if (wantApk && app != null && app.optInt("versionCode", 0) > myVc) {
-                return installApk(ctx, app);
-            }
-            if ("hot".equals(mode)) {
                 return "补丁：" + hotVerdict + "（不用更）";
             }
             if ("apk".equals(mode)) {
+                if (app != null && app.optInt("versionCode", 0) > myVc) {
+                    return installApk(ctx, app);
+                }
                 return "整包：" + apkVerdict + "（不用更）";
             }
-            // auto：补丁不可用（或已是最新）且整包也不用更
+            // 其余（含 null 传进来）：只报状态，不动手
             return "已是最新（v" + versionName(ctx) + "）· 补丁：" + hotVerdict;
         } catch (Throwable t) {
             String msg = "更新检查失败：" + t;
