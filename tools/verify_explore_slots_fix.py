@@ -14885,13 +14885,20 @@ try:
                 and ('p.put("kind", "hot")' in _c))
 
     _pof135 = _blk135(_strip135(_up135), 'private static JSONObject planOf(')
-    check('v2.135 A① 结构级：planOf 只产出 kind=hot，**不再 optJSONObject("app") / 不再产 kind=apk**'
-          '（整包从探测层就不给，不是界面藏起来）· 判据=%s' % (_noapk135(_pof135),),
-          _noapk135(_pof135) is True)
+    # ⚠ 2026-11-14 改口径（用户：「更新系统能直接更新整包吗？」⇒ 要）：planOf 恢复整包分支。
+    #   判据从「只许 hot」翻成「hot + apk 两条都在」——**不是放宽，是需求变了**，
+    #   而 A③/A④ 补上"权限必须先查、弹窗必须提前说明"两把新锁。
+    _hot_sub135 = 'p.put("kind", "hot")' in (_pof135 or '')
+    _apk_sub135 = 'p.put("kind", "apk")' in (_pof135 or '')
+    _app_sub135 = 'optJSONObject("app")' in (_pof135 or '')
+    check('v2.135 A① 结构级：planOf 同时保留 hot 与 apk 两条分支（v2.135 曾只留 hot，'
+          '2026-11-14 用户要整包也能更 ⇒ 恢复）· hot=%s apk=%s app=%s'
+          % (_hot_sub135, _apk_sub135, _app_sub135),
+          _hot_sub135 and _apk_sub135 and _app_sub135)
 
-    check('v2.135 A② 结构级：「检查更新」无更新时的话术是「补丁已是最新」'
-          '（不再用"已是最新"暗示整包也最新，那是骗人）· 命中=%s'
-          % ('补丁已是最新' in _ma135,), '补丁已是最新' in _ma135)
+    check('v2.135 A② 结构级：两条都不可更时话术回到「已是最新（v…）」'
+          '（整包恢复后再说"补丁已是最新"等于把整包藏起来 ✗）· 命中=%s'
+          % ('已是最新（v' in _ma135,), '已是最新（v' in _ma135)
 
     check('v2.135 B① 撤销守门：整包的**安装能力**必须保留 —— installApk( 本体 + run 的 apk 分支'
           '（adb 广播 update --es mode apk 还靠它，别顺手删掉）· installApk=%s apk分支=%s'
@@ -14900,14 +14907,25 @@ try:
           ('private static String installApk(Context ctx, JSONObject app)' in _up135)
           and ('if ("apk".equals(mode))' in _up135))
 
-    check('v2.135 C① 对照项：同一判据打**带 apk 分支的旧 planOf**（改前那版）⇒ 必须 False'
-          '（否则 A① 恒真 = 白测）· 旧样本判据=%s'
-          % (_noapk135('JSONObject app = m.optJSONObject("app");'
-                       'if (app != null) { p.put("kind", "apk"); return p; }'
-                       'p.put("kind", "hot");'),),
-          _noapk135('JSONObject app = m.optJSONObject("app");'
-                    'if (app != null) { p.put("kind", "apk"); return p; }'
-                    'p.put("kind", "hot");') is False)
+    _hotonly135 = 'p.put("kind", "hot"); return p;'
+    _both_on_hotonly135 = (('p.put("kind", "hot")' in _hotonly135)
+                           and ('p.put("kind", "apk")' in _hotonly135))
+    check('v2.135 C① 对照项：同一判据打**只有 hot 的旧 planOf**（v2.135 那版）⇒ 必须 False'
+          '（否则 A① 恒真 = 白测）· 旧样本=%s' % (_both_on_hotonly135,),
+          _both_on_hotonly135 is False)
+
+    # ── A③ 顺序守卫：权限检查必须在 download 之前 ──
+    _ia135 = _blk135(_strip135(_up135),
+                     'private static String installApk(Context ctx, JSONObject app)') or ''
+    _pi135 = _ia135.find('canRequestPackageInstalls()')
+    _di135 = _ia135.find('download(url, dst')
+    check('v2.135 A③ 结构级：installApk 里「安装未知应用」检查必须在 download 之前'
+          '（反了就是白下 71MB 再被系统拦住 ✗）· perm@%d download@%d' % (_pi135, _di135),
+          _pi135 >= 0 and _di135 > _pi135)
+
+    check('v2.135 A④ 结构级：整包确认框必须**提前**写明要授权「安装未知应用」'
+          '（用户 2026-11-14 口径：授权后不自动继续，回来再点）· 命中=%s'
+          % ('首次装整包需要允许' in _ma135,), '首次装整包需要允许' in _ma135)
 except Exception as _e135:             # noqa: BLE001
     import traceback as _tb135
     check('v2.135 守门可运行（%r） TRACE=%s'

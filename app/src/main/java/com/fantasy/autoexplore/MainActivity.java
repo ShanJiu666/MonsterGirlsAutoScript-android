@@ -1841,7 +1841,8 @@ public class MainActivity extends Activity {
                 refreshStatus();
                 if (p == null) {
                     // 用户 2026-11-14：整包不提示（要整包自己去群里拿）⇒ 这里只说补丁
-                    String cur = "补丁已是最新（本机 v" + BuildConfig.VERSION_NAME
+                    // 2026-11-14：整包也恢复了提示 ⇒ 两条都没有才是真的"已是最新"
+                    String cur = "已是最新（v" + BuildConfig.VERSION_NAME
                             + "(" + BuildConfig.VERSION_CODE + ")）";
                     AppLog.i("[更新] " + cur);
                     showUpdateResult(cur);
@@ -1879,6 +1880,13 @@ public class MainActivity extends Activity {
                 sb.append("　·　当前壳 v").append(vn);
             }
             sb.append("\n\n更新说明：\n").append(notes.isEmpty() ? "（清单里没写说明）" : notes);
+            // ⭐ 2026-11-14：整包必然触发系统的「安装未知应用」授权 —— 提前在弹窗里说清，
+            //   别让用户点了「立即更新」才发现被拦住（用户口径：授权后不自动继续，回来再点）
+            if (!hot && Build.VERSION.SDK_INT >= 26
+                    && !getPackageManager().canRequestPackageInstalls()) {
+                sb.append("\n\n⚠ 首次装整包需要允许「安装未知应用」："
+                        + "点「立即更新」会先跳到设置页，授权后回来再点一次。");
+            }
 
             TextView tv = new TextView(this);
             tv.setText(sb.toString());

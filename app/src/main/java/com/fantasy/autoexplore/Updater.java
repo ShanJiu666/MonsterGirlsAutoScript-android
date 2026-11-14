@@ -432,13 +432,25 @@ public final class Updater {
             p.put("notes", hot.optString("notes", ""));
             return p;
         }
-        // ⭐⭐ 2026-11-14 用户口径（真机踩过之后定的）：
-        //   「**整包完全不提示，需要时我自己去群里要安装包**」
-        //   背景：补丁刚更完、一重启就立刻弹「发现更新 v2.134 · 71.4MB」⇒ 用户点下去，
-        //   先是白下 71MB，再被系统「安装未知应用 / 危险警告」拦住，观感极差 ✗
-        //   ⇒ 从**探测层**直接不给整包（不是靠界面不显示）：plan 永远不会返回 kind=apk。
-        //   ⚠ 整包安装能力**保留**（installApk / run("apk")），只留给 adb 调试面
-        //     （门禁 C① 守着，别顺手删掉）。
+        // ⭐⭐ 2026-11-14 用户改口径（原话：「更新系统能直接更新整包吗？」⇒ 要能）：
+        //   ① 热补丁优先（上面那段：小、无感）—— 有补丁就先更补丁
+        //   ② 没有可用补丁、且清单里整包版本更高 ⇒ 返回 kind=apk ⇒ 界面弹确认框
+        //      （确认框里会写明 71MB / 走系统安装器 / 需授权「安装未知应用」）
+        //   ③ 两条都没有 ⇒ null ⇒ 界面回「已是最新」
+        //   ⚠ 权限检查在 installApk **开头**（download 之前）：没授权只会跳设置页 +
+        //     回一句「回来再点一次更新」（用户 2026-11-14 明确要「不自动继续」）。
+        //   ⚠ 门禁 v2.135 A①/③/④ 钉着这三件事，改这里先看断言。
+        JSONObject app = m.optJSONObject("app");
+        if (app != null && !app.isNull("url") && app.optInt("versionCode", 0) > myVc) {
+            JSONObject p = new JSONObject();
+            p.put("kind", "apk");
+            p.put("id", String.valueOf(app.optInt("versionCode", 0)));
+            p.put("versionName", app.optString("versionName",
+                    String.valueOf(app.optInt("versionCode", 0))));
+            p.put("size", app.optLong("size", 0));
+            p.put("notes", app.optString("notes", ""));
+            return p;
+        }
         return null;
     }
 
