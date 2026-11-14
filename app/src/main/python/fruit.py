@@ -273,6 +273,7 @@ def _close_bag(b, log=None):
     #   写死坐标换机型就点空 ✗（PC 记过：面板 X 落在弹性区、归一化帧里根本看不见）
     #   读不到才用 BAG_CLOSE_X 兜底（1080 参考系、有 RefMapper 换算 ✓）
     try:
+        import guild_daily as GC
         _it = GC.ocr_items(b, tag="fruit_close")
         tap_target(b, _it, ("×", "X", "x", "✕", "✖", "关闭"), BAG_CLOSE_X,
                        log=log, tag="fruit_close", wait=1.8, use_dlg=True)

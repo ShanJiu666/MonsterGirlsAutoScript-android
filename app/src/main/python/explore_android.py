@@ -557,7 +557,9 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
         opt_solver=True, bag_every=0, save_first=True, stop_at_5am=False,
         auto_supply=False,
         guild_tasks=False, guild_alchemy=False, guild_intel=False,
-        recruit_free=False, ad_free=False, daily_first=False):
+        recruit_free=False, ad_free=False, daily_first=False,
+        stop_lucky=True, stop_peace=True, stop_elem_purple=True,
+        stop_elem_orange=True):
     """同步跑（阻塞）。一般请用 `start()` 起后台线程 ✓
 
     ⚠ 参数顺序 = Java 侧 `PyBridge.call("start", …)` 的位置参数顺序，
@@ -574,6 +576,14 @@ def run(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
     EL.INSTANCE_TAG = (tag or '').strip()
     EL.INSTANCE_DEV = 'android'
     EL.STOP_AT_5AM = bool(stop_at_5am)
+    # ⭐ v2.131【预言石碑四个「遇到就停」由界面传进来 —— 以前是写死的模块常量】
+    #   用户 2026-11-09：「『遇到就停』这个选项没在 app 里显示啊」
+    #   PC 端有整整一页 `bot_gui.py:2003`「预言石碑停止规则」，安卓端从来没有 ✗
+    #   ⚠ 默认 **True** = PC 同口径；界面四个勾选经 Prefs → start() 传到这里 ✓
+    EL.STOP_LUCKY = bool(stop_lucky)
+    EL.STOP_PEACE = bool(stop_peace)
+    EL.STOP_ELEM_PURPLE = bool(stop_elem_purple)
+    EL.STOP_ELEM_ORANGE = bool(stop_elem_orange)
     EL.__dict__['_ANDROID_STOP'] = False        # 清掉上一轮的停止标志
     if EL.INSTANCE_TAG:
         EL.WIN = os.path.join(EL.RUNS, EL.INSTANCE_TAG, 'loop')
@@ -625,7 +635,9 @@ def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
           opt_solver=True, bag_every=0, save_first=True, stop_at_5am=False,
           auto_supply=False,
           guild_tasks=False, guild_alchemy=False, guild_intel=False,
-          recruit_free=False, ad_free=False, daily_first=False):
+          recruit_free=False, ad_free=False, daily_first=False,
+          stop_lucky=True, stop_peace=True, stop_elem_purple=True,
+          stop_elem_orange=True):
     """后台线程启动探索（幂等：已在跑就拒绝）
 
     ⚠ **签名必须与 `run()` 完全一致**（显式形参，不是 `**kw`）：
@@ -650,7 +662,12 @@ def start(maps=1, max_round=45, deadline=900, min_stamina=25, tag='',
               recruit_free=bool(recruit_free),
               ad_free=bool(ad_free),
               # ⭐ v1.91：日常前置（刷图前先做）
-              daily_first=bool(daily_first))
+              daily_first=bool(daily_first),
+              # ⭐ v2.131：预言石碑四个「遇到就停」（界面勾选 ✓，默认 True）
+              stop_lucky=bool(stop_lucky),
+              stop_peace=bool(stop_peace),
+              stop_elem_purple=bool(stop_elem_purple),
+              stop_elem_orange=bool(stop_elem_orange))
     with _LOCK:
         if _STATE['running']:
             return 'already-running'

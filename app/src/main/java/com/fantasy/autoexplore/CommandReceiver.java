@@ -48,7 +48,10 @@ import android.content.Intent;
  *
  * ⚠⚠ 安全：Receiver 是 exported=true 且无鉴权 ⇒ 同设备任意 app 都能发广播。
  *   因此 `py`（= exec 任意 Python）/ `classify` / `overlay_state` / `overlay_roll` / `mask_check`
- *   这 5 个调试命令**只在 BuildConfig.DEBUG 时放行**（见 DEBUG_ONLY）；要调试请出 assembleArm64Debug。
+ *   / `set_inset` / `overlay_expand` 这些调试命令**只在 BuildConfig.DEBUG 时放行**（见 DEBUG_ONLY）；
+ *   要调试请出 assembleArm64Debug。
+ * ⚠⚠ 同样的闸门也必须管住 {@code MainActivity} 那条入口（am start -e cmd）—— 见
+ *   {@link #isDevOnlyCmd}；两个入口共用同一份名单，**不要再写第二份**。
  */
 public class CommandReceiver extends BroadcastReceiver {
 
@@ -75,6 +78,9 @@ public class CommandReceiver extends BroadcastReceiver {
             "overlay_roll",  // dev 钩子：滚动验证
             "mask_check",    // dev 钩子：涂平验证
             "set_inset",     // dev 钩子：手动注入顶部安全区（会改全局坐标换算）
+            "overlay_expand",// dev 钩子：强制展开/收起悬浮窗（绕过注入不进悬浮窗的限制）
+                             //   ⚠ 之前漏在名单外：release 包下任意 app 发这条广播
+                             //   即可强开/收起悬浮条 = 白嫖悬浮窗权限面
     };
 
     private static boolean isDebugOnly(String cmd) {
@@ -84,6 +90,20 @@ public class CommandReceiver extends BroadcastReceiver {
             }
         }
         return false;
+    }
+
+    /**
+     * ⭐ F5：把上面那份**唯一**的调试名单转出去给 {@link MainActivity} 的 cmd 入口复用。
+     *
+     * <p>背景：命令面有**两个**入口 —— 本 Receiver（{@code exported=true}）和
+     * {@code MainActivity.runIntentCmd}（{@code am start -e cmd ...}，manifest 里
+     * Activity 也是 {@code exported=true}）。此前只有 Receiver 有闸门 ⇒ release 包下
+     * 换 Activity 那条路同样能触发这些 dev 钩子。
+     * <p>⚠ 不在这里另写一份名单：本项目已经因为「两份白名单不一致」吃过亏
+     * ⇒ 名单只在 {@link #DEBUG_ONLY} 一处维护，两个入口调同一个判定。
+     */
+    public static boolean isDevOnlyCmd(String cmd) {
+        return isDebugOnly(cmd);
     }
 
     @Override
@@ -191,7 +211,13 @@ public class CommandReceiver extends BroadcastReceiver {
                             intent.getBooleanExtra("recruit_free", false),
                             intent.getBooleanExtra("ad_free", false),
                             // ⭐ v1.91：日常前置（`--ez daily_first true`）
-                            intent.getBooleanExtra("daily_first", false));
+                            intent.getBooleanExtra("daily_first", false),
+                            // ⭐ v2.131：预言石碑四个「遇到就停」（`--ez stop_elem_purple true`）
+                            //   ⚠ 默认值 = **用户点名**：只开「幸运」和「元素·橙」（2026-11-09）
+                            intent.getBooleanExtra("stop_lucky", true),
+                            intent.getBooleanExtra("stop_peace", false),
+                            intent.getBooleanExtra("stop_elem_purple", false),
+                            intent.getBooleanExtra("stop_elem_orange", true));
                     AppLog.i("[explore] " + r);
                     break;
                 }

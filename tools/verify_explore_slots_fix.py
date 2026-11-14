@@ -488,9 +488,16 @@ check('写死坐标的点击只剩「确认按钮双通道兜底」（实得 %d 
 check('面板点击统一走 _panel_tap（没生效会自动换通道 ✓）', '_panel_tap' in src)
 check('关背包不再盲点左上角 (96,96)（真机那里是 HUD ✗）',
       'b.tap(96, 96, wait=1.2)' not in src)
-check('背包 X / 页签走弹窗系真机标定（BAG_X_DLG / BAG_TAB_DLG）',
+# ⚠ v2.123 改写（不是放宽，是把当年那条**错的前提**换掉）：
+#   老断言要求 `equip_tab_anchor_dlg` 存在 —— 那是「升星时可以退写死坐标盲点装备页签」，
+#   而 2026-11-07 真机证明背包根本没开时它会点在大厅别处（用户：「点到其他敌方去了」）
+#   ⇒ 升星侧已**禁止**该盲点（`allow_anchor=False`），此名字不该再出现；
+#   `item_tab_anchor_dlg`（补给·道具页）**保留** —— 那条没有真机事故，
+#   且补给流程有「背包开没开」的独立前后校验 ✓
+check('背包 X / 页签走弹窗系真机标定（BAG_X_DLG / BAG_TAB_DLG；升星侧已禁盲点）',
       'BAG_X_DLG' in src and 'BAG_TAB_DLG' in src
-      and 'equip_tab_anchor_dlg' in src and 'item_tab_anchor_dlg' in src)
+      and 'item_tab_anchor_dlg' in src
+      and 'equip_tab_anchor_dlg' not in src)
 check('页签兜底不再用归一化系 EQUIP_TAB/ITEM_TAB 硬点',
       'b.tap(EQUIP_TAB[0], EQUIP_TAB[1]' not in src
       and 'b.tap(ITEM_TAB[0], ITEM_TAB[1]' not in src)
@@ -11721,6 +11728,2807 @@ except Exception as _e97:       # noqa: BLE001
 print()
 
 
+
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ㉖ v2.104【门禁断言 + 牙齿测试】—— 证明工作区里那 9 条缺陷修复**真的生效**，
+#   且以后有人改回去时**立刻红**（每条至少 1 条执行级断言：真调真函数，不是搜字符串）。
+#
+#   ⚠ 撤回守门一律**先剥整行注释再查**（本仓踩过 4 次：留档注释里逐字引用旧写法 ⇒ 假红 ✗）
+#   ⚠ 源码切片一律 .find() + 显式判 >= 0（.split(...)[1] 在被测文件被 stash 掉时抛异常
+#     ⇒ 把本组后面 8~10 条断言全吞掉 ✗）
+#   ⚠ 涉及模块级大写全局（apply_layout / android_run 会改写它们）的组：**先快照、后原样恢复**
+#     —— 否则本组之后的所有坐标/开关断言会被污染 ✗
+#   ⚠ 只允许**恢复原值**，不许 pop 被测模块的字典键（凭 _DLGS 那条教训）
+# ─────────────────────────────────────────────────────────────────────────
+print('=' * 78)
+print('㉖ v2.104 门禁断言：9 条缺陷修复的执行级证明 + 撤回守门（G1~G11）')
+
+
+import re as _re104      # 本组自带（re 在本脚本里 import 得很晚 ⇒ 直接用会 NameError）
+
+
+def _nocomment104(src):
+    """剥掉**整行注释**（# 开头）—— 撤回守门必须先剥，否则注释里引用的旧写法会假红"""
+    return chr(10).join(_ln for _ln in str(src).split(chr(10))
+                        if not _ln.strip().startswith('#'))
+
+
+def _func104(src, head):
+    """取一个**顶层函数**的源码切片（.find() + 显式判 >= 0；拿不到就抛，绝不静默返回空串）"""
+    _i = src.find(head)
+    if _i < 0:
+        raise RuntimeError('切片起点找不到：%r（源码被改/被 stash 掉？）' % (head,))
+    _j = src.find(chr(10) + 'def ', _i + len(head))
+    return src[_i:] if _j < 0 else src[_i:_j]
+
+
+def _body104(src, head):
+    """函数切片去掉**签名行**（签名里必然出现 times=3 / _sleep(b, sec) 这类字样 ✗）"""
+    _f = _func104(src, head)
+    _n = _f.find(chr(10))
+    return _f[_n + 1:] if _n >= 0 else ''
+
+
+def _snap104(mod):
+    """快照模块级**大写**全局（被改写后必须原样还回去）"""
+    return {k: v for k, v in vars(mod).items() if k.isupper()}
+
+
+def _restore104(mod, snap):
+    for _k, _v in snap.items():
+        try:
+            setattr(mod, _k, _v)
+        except Exception:       # noqa: BLE001
+            pass
+
+
+# ═══ G1（F1）ads.run 传 max_times=，不是 times= ═══
+#   旧代码 buy_with_ad(..., times=_times) ⇒ TypeError 被 run 里的 except 吞掉
+#   ⇒ **三次购买一次都没发生**，日志只剩 gold_error/clover_error/energy_error
+try:
+    import ads as _ads104
+    _sc104 = _nocomment104(io.open(os.path.join(MAPBOT, 'ads.py'),
+                                  encoding='utf-8').read())
+    _kw104 = []
+    _orig_bwa104 = _ads104.buy_with_ad
+
+    def _spy_bwa104(*a, **k):
+        _kw104.append(dict(k))
+        return 0
+
+    _ads104.buy_with_ad = _spy_bwa104
+    try:
+        # 有 HUD（顶部 N/M 体力计数）才会进到三连购买 ✓
+        _ads104.run(FakeBot([item('100/200', 90, 40)]), None,
+                    alchemy=False, times=2, dry=True)
+    finally:
+        _ads104.buy_with_ad = _orig_bwa104
+    check('v2.104 G1 ① 执行级：ads.run(times=2) 三次购买**都**收到 max_times=2'
+          '（旧代码传 times= ⇒ TypeError 被吞 ⇒ 一次都不调）· kwargs=%r'
+          % (_kw104,),
+          len(_kw104) == 3 and all(k.get('max_times') == 2 and 'times' not in k
+                                   for k in _kw104))
+    _bad104 = _re104.findall(r'(?<!max_)times\s*=', _body104(_sc104, 'def run('))
+    check('v2.104 G1 ② 撤回守门：ads.run 里不再有 times= 传参（剥注释后）· 命中=%r'
+          % (_bad104,), not _bad104)
+    import ads as _ads104       # noqa: F401 ← 元门禁 v1.42② 认 import X as _Y（上两条真调 ads.run ✓）
+except Exception as _e104g1:    # noqa: BLE001
+    check('v2.104 G1 门禁自查可运行（%r）' % (_e104g1,), False)
+print()
+
+# ═══ G2（F1b）buy_with_ad 里用的是 _entry（原来 "at": entry ⇒ NameError）═══
+try:
+    import ads as _ads104
+    _sc104 = _nocomment104(io.open(os.path.join(MAPBOT, 'ads.py'),
+                                   encoding='utf-8').read())
+    _orig_po104 = _ads104._panel_open
+    _ads104._panel_open = lambda *a, **k: False      # 逼它走"点资源图标 → 面板没开"
+    _err2104 = None
+    _log2104 = []
+    try:
+        _ads104.buy_with_ad(FakeBot([item('金币', 120, 1000)]), 'gold', _log2104)
+    except Exception as _e2104:     # noqa: BLE001
+        _err2104 = _e2104
+    finally:
+        _ads104._panel_open = _orig_po104
+    _op2104 = [x for x in _log2104 if x.get('ads') == 'open_panel']
+    _at2104 = _op2104[0].get('at') if _op2104 else None
+    check('v2.104 G2 ① 执行级：buy_with_ad 点资源图标后不抛 NameError，'
+          '且 open_panel 日志的 at 是坐标 · at=%r err=%r'
+          % (_at2104, _err2104),
+          _err2104 is None and bool(_op2104)
+          and isinstance(_at2104, (tuple, list)) and len(_at2104) == 2
+          and all(isinstance(_v, int) for _v in _at2104))
+    check('v2.104 G2 ② 撤回守门：ads.py 里不再有 "at": entry（剥注释后）· %s'
+          % ('干净 OK' if '"at": entry' not in _sc104 else '还在',),
+          '"at": entry' not in _sc104)
+    import ads as _ads104       # noqa: F401 ← 元门禁标记（G2① 真调 buy_with_ad ✓）
+except Exception as _e104g2:    # noqa: BLE001
+    check('v2.104 G2 门禁自查可运行（%r）' % (_e104g2,), False)
+print()
+
+# ═══ G3（F3）fruit._close_bag 的文字分支缺 import guild_daily as GC ═══
+#   旧代码走到 GC.ocr_items(...) ⇒ NameError ⇒ 被 except 吞成 close_err
+#   ⇒ 关背包一次都没试过（面板就那么挂着，后续整段日常跟着烂）
+try:
+    import fruit as _fr104
+    import guild_daily as _gd104      # noqa: F401 ← 先拿到**真模块**，再临时换掉 sys.modules
+    import explore_loop as _el104
+
+    _rec3104 = {'n': 0}
+
+    def _stub_ocr3104(b, *a, **k):
+        _rec3104['n'] += 1
+        return []
+
+    def _stub_log3104(log, e):
+        if isinstance(log, list):
+            log.append(e)
+
+    _stub3104 = types.ModuleType('guild_daily')
+    _stub3104.ocr_items = _stub_ocr3104
+    _stub3104.has = lambda items, t: False
+    _stub3104._log = _stub_log3104
+
+    _saved3104 = sys.modules.get('guild_daily')
+    _orig_elcb3104 = getattr(_el104, '_close_bag', None)
+
+    def _raise3104(*a, **k):
+        raise RuntimeError('v2.104：故意让 explore_loop._close_bag 失败 ⇒ 逼 fruit 走自己的分支')
+
+    sys.modules['guild_daily'] = _stub3104
+    _el104._close_bag = _raise3104
+    _log3104 = []
+    try:
+        _r3104 = _fr104._close_bag(FakeBot([]), _log3104)
+    finally:
+        _el104._close_bag = _orig_elcb3104
+        if _saved3104 is None:
+            sys.modules.pop('guild_daily', None)
+        else:
+            sys.modules['guild_daily'] = _saved3104
+    check('v2.104 G3 ① 执行级：fruit._close_bag 走到文字分支时**真调了**'
+          'guild_daily.ocr_items（旧代码缺 import ⇒ NameError、一次都不调）· 调用 %d 次 ret=%r'
+          % (_rec3104['n'], _r3104), _rec3104['n'] >= 1)
+
+    # 对照项：桩里的 ocr_items **抛异常** ⇒ 必须走 except（close_err）且返回 False
+    #   ⇒ 证明 G3① 的"调到了"不是恒真，也证明文字分支的兜底真的存在 ✓
+    def _ocr_raise3104(b, *a, **k):
+        raise RuntimeError('v2.104 桩：OCR 通道坏了')
+
+    _stub3104.ocr_items = _ocr_raise3104
+    _log3104b = []
+    sys.modules['guild_daily'] = _stub3104
+    _el104._close_bag = _raise3104
+    try:
+        _r3104b = _fr104._close_bag(FakeBot([]), _log3104b)
+    finally:
+        _el104._close_bag = _orig_elcb3104
+        if _saved3104 is None:
+            sys.modules.pop('guild_daily', None)
+        else:
+            sys.modules['guild_daily'] = _saved3104
+    _ce3104 = [x for x in _log3104b if x.get('fruit') == 'close_err']
+    check('v2.104 G3 ② 对照项：OCR 通道抛异常时走 except（close_err）且返回 False'
+          '（证明 G3① 不是恒真）· close_err=%d ret=%r'
+          % (len(_ce3104), _r3104b), bool(_ce3104) and _r3104b is False)
+    import fruit as _fr104      # noqa: F401 ← 元门禁标记（上两条真调 fruit._close_bag ✓）
+except Exception as _e104g3:    # noqa: BLE001
+    check('v2.104 G3 门禁自查可运行（%r）' % (_e104g3,), False)
+print()
+
+# ═══ G4（F4）guild_daily._sleep 的兜底不再是**自递归** _sleep(b, sec) ═══
+#   旧代码 except 里又调 _sleep(b, sec) ⇒ 无限递归 ⇒ RecursionError ⇒ 崩在热路径上
+try:
+    import guild_daily as _gd104
+    import time as _t104
+    _gsrc104 = _nocomment104(io.open(os.path.join(MAPBOT, 'guild_daily.py'),
+                                     encoding='utf-8').read())
+
+    class _Bot4(object):
+        def _sleep(self, sec):
+            raise RuntimeError('v2.104：bot._sleep 坏了（模拟通道异常/拿不到 bot）')
+
+    _ts4104 = []
+    _orig_ts104 = _t104.sleep
+    _t104.sleep = lambda sec: _ts4104.append(sec)
+    _err4104 = None
+    try:
+        _gd104._sleep(_Bot4(), 0.01)
+    except Exception as _e4104:     # noqa: BLE001
+        _err4104 = _e4104
+    finally:
+        _t104.sleep = _orig_ts104
+    check('v2.104 G4 ① 执行级：b._sleep 抛异常时兜底**退回 time.sleep** 且**不递归**'
+          '（旧代码自递归 ⇒ RecursionError）· time.sleep 调用 %d 次 err=%r'
+          % (len(_ts4104), _err4104),
+          _err4104 is None and 1 <= len(_ts4104) <= 2)
+    _sl4104 = _body104(_gsrc104, 'def _sleep(')
+    check('v2.104 G4 ② 撤回守门：_sleep 的 except 之后不再出现自递归 _sleep(b, sec)'
+          '（剥注释后）· %s'
+          % ('干净 OK' if ('_sleep(b, sec)' not in _sl4104
+                           and '_sleep(b,sec)' not in _sl4104) else '又递归了',),
+          '_sleep(b, sec)' not in _sl4104 and '_sleep(b,sec)' not in _sl4104)
+    import guild_daily as _gd104    # noqa: F401 ← 元门禁标记（G4① 真调 guild_daily._sleep ✓）
+except Exception as _e104g4:    # noqa: BLE001
+    check('v2.104 G4 门禁自查可运行（%r）' % (_e104g4,), False)
+print()
+
+# ═══ G5（F2）bag_upgrade 轮首重置 _hit, _ch ═══
+#   _hit 只在模板分支赋值，可 _where / tap_no_effect_retry 无条件读它
+#   ⇒ 走「OCR 找到背包二字」那一轮必然 UnboundLocalError ⇒ 被函数末尾 except 吞成
+#     {'bag':'error'} ⇒ **升星整块静默跳过**（本仓第 3 次同类）
+try:
+    import explore_loop as _el104
+    _esrc104 = _nocomment104(io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                                     encoding='utf-8').read())
+
+    class _ShimTime104(object):
+        """把 bag_upgrade 里的 time.sleep 换掉（热路径一堆 1.2s 等待 ⇒ 门禁不能真等）"""
+
+        def __init__(self, mod):
+            object.__setattr__(self, '_m104', mod)
+
+        def sleep(self, *a, **k):
+            return None
+
+        def __getattr__(self, k):
+            return getattr(object.__getattribute__(self, '_m104'), k)
+
+    class _Bot5104(FakeBot):
+        """第 1 帧给「选图界面 + 公会 + 背包」，之后给「不像背包」的画面
+
+        ⇒ 第 1 轮一定走**文字分支**（_hit 不被赋值）⇒ 命中旧代码的 UnboundLocalError；
+          背包判据不成立 ⇒ 正好走到读 _hit 的那行（_where）
+        """
+
+        def __init__(self):
+            FakeBot.__init__(self, [])
+            self._n5104 = 0
+
+        def ocr(self, *a, **k):
+            self._n5104 += 1
+            # ⚠ 实测（本组第一版就裁在这）：循环前有一句 items = []，
+            #   所以"第 1 帧给背包"根本进不了文字分支 —— 必须让**循环内的公会帧**
+            #   （第 2 次 ocr）带「公会 + 背包」才会走到 _bk 那条路
+            if self._n5104 == 1:
+                return [item('进入地图', 540, 300), item('快速扫荡', 200, 1700)]
+            if self._n5104 == 2:
+                return [item('公会', 120, 1780), item('背包', 900, 1700)]
+            return [item('结束冒险', 540, 300)]
+
+        def ocr_dlg(self, *a, **k):
+            return self.ocr()
+
+    _orig_time104 = _el104.time
+    _el104.time = _ShimTime104(_orig_time104)
+    _log5104 = []
+    _err5104 = None
+    try:
+        _el104.bag_upgrade(_Bot5104(), _log5104, tag='v2104_')
+    except Exception as _e5104:     # noqa: BLE001
+        _err5104 = _e5104
+    finally:
+        _el104.time = _orig_time104
+    _bad5104 = [x for x in _log5104 if x.get('bag') == 'error']
+    check('v2.104 G5 ① 执行级：走「背包」文字分支时 bag_upgrade 不再 UnboundLocalError'
+          '（旧代码被兜底吞成 {"bag":"error"} ⇒ 升星整块静默跳过）· error=%r err=%r'
+          % (_bad5104, _err5104),
+          not _bad5104 and _err5104 is None)
+    _i5104 = _esrc104.find('for _try in range(3):')
+    _j5104 = _esrc104.find('_hit, _ch = None', _i5104) if _i5104 >= 0 else -1
+    _k5104 = _esrc104.find('if not _guild_on(items)', _i5104) if _i5104 >= 0 else -1
+    check('v2.104 G5 ② 撤回守门：for _try in range(3): 之后**紧跟**轮首重置'
+          ' _hit, _ch = None，且排在第一次读 _hit 之前 · 重置@%d 首次读@%d'
+          % (_j5104, _k5104),
+          _i5104 >= 0 and _j5104 > _i5104 and (_k5104 < 0 or _j5104 < _k5104))
+    import explore_loop as _el104    # noqa: F401 ← 元门禁标记（G5① 真调 bag_upgrade ✓）
+except Exception as _e104g5:    # noqa: BLE001
+    check('v2.104 G5 门禁自查可运行（%r）' % (_e104g5,), False)
+print()
+
+# ═══ G6（F6）apply_layout 给 marks.GRID 补 cols/rows ═══
+#   marks.GRID 的契约是 **6 键**（marks.py:550/:605 直读 GRID['rows']/GRID['cols']）
+#   而 apply_layout 只给 4 键 ⇒ ADAPTIVE_LAYOUT 一开就 KeyError（休眠缺陷）
+try:
+    import explore_loop as _el104
+    import marks as _mk104
+    import spots as _sp104
+    import numpy as _np104
+    _el_snap104 = _snap104(_el104)
+    _mk_snap104 = _snap104(_mk104)
+    _sp_snap104 = _snap104(_sp104)
+    _mk_grid104 = getattr(_mk104, 'GRID', None)
+    _sp_grid104 = dict(_sp104.GRID) if isinstance(getattr(_sp104, 'GRID', None), dict) else None
+    try:
+        _el104.ADAPTIVE_LAYOUT = True        # 默认 False ⇒ 不打开就**直接早退**，测不到
+        _el104.apply_layout(720, 1600)
+        _g6104 = _mk104.GRID if isinstance(getattr(_mk104, 'GRID', None), dict) else {}
+        _spg6104 = _sp104.GRID if isinstance(getattr(_sp104, 'GRID', None), dict) else {}
+        check('v2.104 G6 ① 执行级：apply_layout(720,1600) 后 marks.GRID **同时**有'
+              ' cols/rows 且为整数（旧代码只给 4 键 ⇒ ADAPTIVE_LAYOUT 一开就 KeyError）'
+              ' · cols=%r rows=%r' % (_g6104.get('cols'), _g6104.get('rows')),
+              isinstance(_g6104.get('cols'), int) and isinstance(_g6104.get('rows'), int))
+        check('v2.104 G6 ② 执行级：同一布局下 spots.GRID 也是 6 键（两处必须同源 ——'
+              ' 注：spot 侧本就带 cols/rows，本条是**同源检查**，stash 掉修复时仍绿）'
+              ' · %r' % ({k: _spg6104.get(k) for k in ('cols', 'rows')},),
+              isinstance(_spg6104.get('cols'), int)
+              and isinstance(_spg6104.get('rows'), int))
+    finally:
+        _restore104(_el104, _el_snap104)
+        _restore104(_mk104, _mk_snap104)
+        _restore104(_sp104, _sp_snap104)
+        _mk104.GRID = _mk_grid104
+        if _sp_grid104 is not None and isinstance(getattr(_sp104, 'GRID', None), dict):
+            _sp104.GRID.clear()              # apply_layout 是**原地 update** ⇒ 引用式恢复不够 ✗
+            _sp104.GRID.update(_sp_grid104)
+        # explore_loop.GRID 是 spots.GRID 的别名 ⇒ 原地恢复后自动同步 ✓
+    _mk_keep104 = getattr(_mk104, 'GRID', None)
+    _mk104.GRID = {'x0': 1, 'y0': 2, 'cx': 3, 'cy': 4}      # 旧口径：只有 4 键
+    _kerr104 = None
+    try:
+        _mk104.probe_top_fast(_np104.zeros((1920, 1080, 3), _np104.uint8))
+    except Exception as _e6104:     # noqa: BLE001
+        _kerr104 = _e6104
+    finally:
+        _mk104.GRID = _mk_keep104
+    check('v2.104 G6 ③ 对照项：marks.GRID 若是旧 4 键，probe_top_fast() 必须 KeyError'
+          '（⇒ G6① 读的是真契约，不是恒真）· %r' % (_kerr104,),
+          isinstance(_kerr104, KeyError))
+    import marks as _mk104      # noqa: F401 ← 元门禁标记（上一行真调 probe_top_fast ✓）
+except Exception as _e104g6:    # noqa: BLE001
+    check('v2.104 G6 门禁自查可运行（%r）' % (_e104g6,), False)
+print()
+
+# ═══ G7（F7）_find_ui_tpl 走 fixed_ref.tpl_dirs()，不再只读资源包 ═══
+#   旧代码只认包内 templates/ui ⇒ 外置目录（MAPBOT_TPL_UI / App 外部私有目录）
+#   推上去的模板**永远看不见**，而且不报错（真机恒不生效）
+try:
+    import explore_loop as _el104
+    import shutil as _sh7104
+    import tempfile as _tf7104
+    _ui_src7104 = os.path.join(_ASSETS, 'templates', 'ui')
+    _ui_pngs7104 = sorted([_n for _n in os.listdir(_ui_src7104)
+                           if _n.lower().endswith('.png')]) \
+        if os.path.isdir(_ui_src7104) else []
+    if not _ui_pngs7104:
+        skip('v2.104 G7 执行级：_find_ui_tpl 走 fixed_ref.tpl_dirs()'
+             '（资源包里没有 ui 模板 ⇒ 跳过了"外置目录能被找到"，没验证）')
+    else:
+        _td7104 = _tf7104.mkdtemp(prefix='v2104_tpl_')
+        _td7104b = None
+        _pname7104 = 'v2104_probe_ui.png'
+        _sh7104.copyfile(os.path.join(_ui_src7104, _ui_pngs7104[0]),
+                         os.path.join(_td7104, _pname7104))
+        _env7104 = os.environ.get('MAPBOT_TPL_UI')
+        _hit7104 = None
+        _miss7104 = None
+        try:
+            os.environ['MAPBOT_TPL_UI'] = _td7104       # ① 外置目录里有这张模板
+            _el104._UI_TPL_CACHE.pop(_pname7104, None)
+            _el104._find_ui_tpl(FakeBot([]), _pname7104)
+            _hit7104 = _el104._UI_TPL_CACHE.get(_pname7104)
+            _td7104b = _tf7104.mkdtemp(prefix='v2104_tpl_empty_')
+            os.environ['MAPBOT_TPL_UI'] = _td7104b      # ② 同一模板放进**空**目录
+            _el104._UI_TPL_CACHE.pop(_pname7104, None)
+            _el104._find_ui_tpl(FakeBot([]), _pname7104)
+            _miss7104 = _el104._UI_TPL_CACHE.get(_pname7104)
+        finally:
+            if _env7104 is None:
+                os.environ.pop('MAPBOT_TPL_UI', None)
+            else:
+                os.environ['MAPBOT_TPL_UI'] = _env7104
+            _el104._UI_TPL_CACHE.pop(_pname7104, None)
+            _sh7104.rmtree(_td7104, ignore_errors=True)
+            if _td7104b:
+                _sh7104.rmtree(_td7104b, ignore_errors=True)
+        check('v2.104 G7 ① 执行级：外置目录（MAPBOT_TPL_UI）里的 ui 模板'
+              ' _find_ui_tpl 能找到并解码（旧代码只读包内 ⇒ 恒 None）· tpl=%r'
+              % (None if _hit7104 is None else 'ndarray%s' % (_hit7104.shape,),),
+              _hit7104 is not None)
+        check('v2.104 G7 ② 对照项：同一张模板放进**空**目录 ⇒ 必须找不到'
+              '（证明 G7① 不是恒真）· tpl=%r' % (_miss7104,), _miss7104 is None)
+    import explore_loop as _el104    # noqa: F401 ← 元门禁标记（G7① 真调 _find_ui_tpl ✓）
+except Exception as _e104g7:    # noqa: BLE001
+    check('v2.104 G7 门禁自查可运行（%r）' % (_e104g7,), False)
+print()
+
+# ═══ G8（F8）模块级 _GLOBAL_LOG = []（原来从未初始化）═══
+#   第一次 flush() 之前调 dump_summary() ⇒ NameError 被兜底吞掉 ⇒
+#   /sdcard/Download/autoexplore/mgas_log.txt（给朋友手机回传那份）**静默不写** ✗
+#   ⇒ 必须**全新进程**验（同进程里模块属性早就有值了，测不出"从未初始化"）
+try:
+    import explore_loop as _el104
+    import subprocess as _sp8104
+    import tempfile as _tf8104
+    import json as _js8104
+    _td8104 = _tf8104.mkdtemp(prefix='v2104_g8_')
+    _code8104 = chr(10).join([
+        'import sys, json, os',
+        'sys.path.insert(0, %r)' % (MAPBOT,),
+        'import explore_loop as e',
+        'ok = isinstance(e._GLOBAL_LOG, list) and e._GLOBAL_LOG == []',
+        'e.SUMMARY_PATH = os.path.join(%r, "last_summary.json")' % (_td8104,),
+        'e.dump_summary()',
+        'print(json.dumps({"ok": ok}))',
+        ''])
+    _p8104 = _sp8104.run([sys.executable, '-c', _code8104], cwd=MAPBOT, env=_ENV(),
+                         capture_output=True, timeout=180)
+    _ol8104 = (_p8104.stdout or b'').decode('utf-8', 'replace').strip().splitlines()
+    _el8104 = (_p8104.stderr or b'').decode('utf-8', 'replace').strip().splitlines()
+    _ok8104 = None
+    for _ln8104 in _ol8104:
+        try:
+            _ok8104 = bool(_js8104.loads(_ln8104).get('ok'))
+        except Exception:       # noqa: BLE001
+            pass
+    check('v2.104 G8 ① 执行级：**全新进程** import 后 _GLOBAL_LOG 即存在且是空 list，'
+          '那次从未 flush 的 dump_summary() 也不抛（旧代码 NameError）· rc=%s ok=%r err=%r'
+          % (_p8104.returncode, _ok8104, _el8104[-1:]),
+          _p8104.returncode == 0 and _ok8104 is True)
+    _sp8104_old = _el104.SUMMARY_PATH
+    _el104.SUMMARY_PATH = os.path.join(_td8104, 'cur_proc_summary.json')
+    _err8104b = None
+    try:
+        _el104.dump_summary()
+    except Exception as _e8104b:    # noqa: BLE001
+        _err8104b = _e8104b
+    finally:
+        _el104.SUMMARY_PATH = _sp8104_old
+    check('v2.104 G8 ② 执行级：本进程里 dump_summary() 也照常返回（不抛）· err=%r'
+          % (_err8104b,), _err8104b is None)
+    import explore_loop as _el104    # noqa: F401 ← 元门禁标记（G8② 真调 dump_summary ✓）
+except Exception as _e104g8:    # noqa: BLE001
+    check('v2.104 G8 门禁自查可运行（%r）' % (_e104g8,), False)
+print()
+
+# ═══ G9（F9）android_run 的 daily-first except 里不再用不存在的 log ═══
+#   android_run() 没有 log 形参（Java 侧 16 个位置参数的调用契约，**不能加**）
+#   ⇒ 旧代码 log.append(...) ⇒ NameError ⇒ **整局刷图根本不开始** ✗
+try:
+    import explore_loop as _el104
+    _esrc9104 = _nocomment104(io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                                      encoding='utf-8').read())
+    _el_snap9104 = _snap104(_el104)
+    # ⚠ _GLOBAL_LOG 用 getattr 兜住：**被 stash 掉的旧版没有它**，直接属性访问会让
+    #   整组在那一步就崩（后面 G9② 的撤回守门根本轮不到跑，报出来的红因也不对 ✗）
+    _orig9104 = (_el104.stop_requested, _el104.run_maps, _el104.red_locked,
+                 getattr(_el104, '_GLOBAL_LOG', None))
+
+    def _stop_raise9104():
+        raise RuntimeError('v2.104：故意让 daily-first 段抛（模拟日常前置崩掉）')
+
+    _el104.red_locked = lambda dev: None
+    _el104.stop_requested = _stop_raise9104
+    _el104.run_maps = lambda args: {'ran': 'stub'}
+    _el104._ANDROID_STOP = True          # 进 while 第一轮就 return ⇒ **绝不真连设备** ✓
+    _el104._GLOBAL_LOG = []
+    _err9104 = None
+    try:
+        _el104.android_run(maps=1, daily_first=True, guild_tasks=True)
+    except Exception as _e9104:         # noqa: BLE001
+        _err9104 = _e9104
+    finally:
+        _gl9104 = getattr(_el104, '_GLOBAL_LOG', [])
+        _el104.stop_requested, _el104.run_maps, _el104.red_locked = _orig9104[0:3]
+        _restore104(_el104, _el_snap9104)
+        if _orig9104[3] is not None:
+            _el104._GLOBAL_LOG = _orig9104[3]
+        else:
+            try:
+                del _el104._GLOBAL_LOG
+            except Exception:       # noqa: BLE001
+                pass
+    _df9104 = [x for x in (_gl9104 or []) if isinstance(x, dict)
+               and x.get('daily_first') == 'error']
+    check('v2.104 G9 ① 执行级：daily-first 段抛异常时**不抛 NameError**，'
+          '且 _GLOBAL_LOG 里落了 daily_first: error（旧代码 NameError ⇒ 整局不开跑）'
+          ' · err=%r 落=%d 条' % (_err9104, len(_df9104)),
+          not isinstance(_err9104, NameError) and len(_df9104) >= 1)
+    _an9104 = _body104(_esrc9104, 'def android_run(')
+    check('v2.104 G9 ② 撤回守门：android_run 函数体内不再出现 log.append（剥注释后）· %s'
+          % ('干净 OK' if 'log.append' not in _an9104 else '还在',),
+          'log.append' not in _an9104)
+    import explore_loop as _el104    # noqa: F401 ← 元门禁标记（G9① 真调 android_run ✓）
+except Exception as _e104g9:    # noqa: BLE001
+    check('v2.104 G9 门禁自查可运行（%r）' % (_e104g9,), False)
+print()
+
+# ═══ G10（F5）Java 侧 overlay_expand 进 DEBUG_ONLY + MainActivity 同一道闸门 ═══
+#   ⚠ 这一组**只能结构级**（Java 不在 Python 门禁里跑；不跑 gradle）—— 如实标注
+try:
+    _jdir104 = os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com', 'fantasy',
+                            'autoexplore')
+    _cr104 = io.open(os.path.join(_jdir104, 'CommandReceiver.java'),
+                     encoding='utf-8').read()
+    _ma104 = io.open(os.path.join(_jdir104, 'MainActivity.java'),
+                     encoding='utf-8').read()
+
+    def _jcode104(s):
+        """剥 Java 的整行注释（//、*、/*）—— 留档注释里逐字引用旧写法会假红 ✗"""
+        return chr(10).join([_l for _l in s.split(chr(10))
+                             if not (_l.strip().startswith('//')
+                                     or _l.strip().startswith('*')
+                                     or _l.strip().startswith('/*'))])
+
+    _crc104 = _jcode104(_cr104)
+    _mac104 = _jcode104(_ma104)
+    _i10104 = _crc104.find('String[] DEBUG_ONLY')
+    _j10104 = _crc104.find('};', _i10104) if _i10104 >= 0 else -1
+    _blk104 = _crc104[_i10104:_j10104] if (_i10104 >= 0 and _j10104 > _i10104) else ''
+    _names104 = _re104.findall(r'"([A-Za-z0-9_]+)"', _blk104)
+    check('v2.104 G10 ① CommandReceiver.DEBUG_ONLY 名单里含 overlay_expand'
+          '（旧代码只在 case 里 ⇒ release 包任意 app 可强开/收悬浮条）· 名单=%r'
+          % (_names104,), 'overlay_expand' in _names104)
+    _i10b104 = _mac104.find('void runIntentCmd(')
+    _j10b104 = _mac104.find(chr(10) + '    private ', _i10b104) if _i10b104 >= 0 else -1
+    _seg104 = _mac104[_i10b104:_j10b104] if (_i10b104 >= 0 and _j10b104 > _i10b104) else ''
+    check('v2.104 G10 ② MainActivity.runIntentCmd 里有 isDevOnlyCmd + BuildConfig.DEBUG'
+          ' 判断（第二个入口同一道闸门）· 段长=%d' % (len(_seg104),),
+          'isDevOnlyCmd' in _seg104 and 'BuildConfig.DEBUG' in _seg104)
+    _pgate104 = _seg104.find('isDevOnlyCmd')
+    _pcase104 = _seg104.find('case "overlay_expand"')
+    check('v2.104 G10 ③ 闸门排在 **case 分派之前**（在 switch 前拦，而不是事后才判）'
+          ' · 闸门@%d case@%d' % (_pgate104, _pcase104),
+          _pgate104 >= 0 and _pcase104 > _pgate104)
+    _ndef104 = _crc104.count('String[] DEBUG_ONLY') + _mac104.count('String[] DEBUG_ONLY')
+    check('v2.104 G10 ④ 只有**一份**名单（DEBUG_ONLY 在 Java 侧只定义一次，'
+          'MainActivity 复用不另立白名单 —— 两份名单漂移过一次）· 定义 %d 处、'
+          'MainActivity 里的 dev 名单 %d 份'
+          % (_ndef104, len(_re104.findall(r'String\[\]\s*\w*(?:DEV|DEBUG)\w*\s*=', _mac104))),
+          _ndef104 == 1
+          and not _re104.findall(r'String\[\]\s*\w*(?:DEV|DEBUG)\w*\s*=', _mac104))
+except Exception as _e104g10:   # noqa: BLE001
+    check('v2.104 G10 门禁自查可运行（%r）' % (_e104g10,), False)
+print()
+
+# ═══ G11（元）本轮 10 条修复**都有对应断言组** ═══
+#   防以后有人"顺手删掉一组"（删了这里立刻红）
+try:
+    _self104 = io.open(os.path.abspath(__file__), encoding='utf-8').read()
+    # ⚠ 表里**只写短名**，查的是拼出来的 'v2.104 G<n> '：否则表自己的文本就能命中，
+    #   这条元断言会恒真 ✗
+    _tbl104 = [('F1', 'G1'), ('F1b', 'G2'), ('F3', 'G3'), ('F4', 'G4'),
+               ('F2', 'G5'), ('F6', 'G6'), ('F7', 'G7'), ('F8', 'G8'),
+               ('F9', 'G9'), ('F5', 'G10'), ('元', 'G11')]
+    _miss104 = [_t[0] for _t in _tbl104
+                if ('v2.104 ' + _t[1] + ' ') not in _self104]
+    check('v2.104 G11 元：这 11 组断言**都还在**（谁删掉某组这里立刻红）· 缺=%r'
+          % (_miss104,), not _miss104)
+except Exception as _e104g11:   # noqa: BLE001
+    check('v2.104 G11 门禁自查可运行（%r）' % (_e104g11,), False)
+print()
+
+
+# ㉖⭐ v2.105【门禁断言 + 牙齿测试】—— 用户新口径（2026-10-02）：
+#   「装备升星后返回地图界面**不要点右上角的叉**，连点中心最下面的『开始冒险』**5 次**
+#    就稳定回到地图界面」落地成模块级 `_back_to_map()` 之后，必须**执行级**证明它真按口径跑；
+#   以后有人改回老写法（每轮先点 BAG_X_DLG / 6 轮 / 关完弹窗 continue 把这一轮吞掉）立刻红 ✗
+#   ⚠ 沿用 v2.104 的三条教训：撤回守门**先剥整行注释**再查（注释里逐字引用旧写法会假红）；
+#     源码切片一律 .find() + 显式判 >= 0；**不 pop 被测模块的字典键**（本组只临时换 say，
+#     且必须在 finally 里原样还回去 —— 泄漏会让后面所有断言静默无输出 ✗）
+print('=' * 78)
+print('㉖⭐ v2.105 门禁断言：升星收尾「连点开始冒险 5 次 / 一次都不点右上角 X」（G12①~⑦）')
+
+import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（下面真调 _back_to_map ✓）
+
+# 装备页文字：**不含** 「进入地图/快速扫荡/星界秘境」（`_on_select()` 的三个词），
+# 也**不含** 「返回/关闭/确定/确认/取消」（`_back_to_map()` 的弹窗判据）⇒ 纯粹的"还没回图"
+_EQ105 = [item('强化', 400, 900), item('装备精炼', 300, 760)]
+# 选图界面文字：`_on_select()` 认这三个词中的任意一个
+_MAP105 = [item('进入地图', 200, 1500)]
+
+
+class _BackBot105(object):
+    """`_back_to_map` 的最小桩：记 b.tap 坐标序列 + 数 b.tap_dlg 调用次数
+
+    ⚠ 真实 bot 的 `tap_dlg` 走**弹窗系**坐标（偏 C≈200px）——`_back_to_map` 一次都不许用 ✗
+    """
+
+    def __init__(self, frames=()):
+        self.taps = []
+        self.tap_dlg_n = 0
+        self.ocr_n = 0
+        self.frames = list(frames)
+
+    def ocr(self, *a, **k):
+        self.ocr_n += 1
+        _i = self.ocr_n - 1
+        if _i < len(self.frames):
+            return self.frames[_i]
+        return self.frames[-1] if self.frames else []
+
+    def tap(self, x, y, wait=0.0):
+        self.taps.append((int(x), int(y)))
+        return True
+
+    def tap_dlg(self, *a, **k):
+        self.tap_dlg_n += 1
+        return True
+
+
+def _bsa105(_bs):
+    """只数「开始冒险」锚点那一下 —— 关弹窗也走 b.tap ⇒ 必须按坐标区分，不能数 len(taps) ✓"""
+    _at = tuple(_el105.START_ADV)
+    return [_t for _t in _bs.taps if _t == _at]
+
+
+# ═══ G12① 执行级：上限就是 5（点满仍未回图 ⇒ 返回 False + 报警日志）═══
+#   同一桩在 G12② 复用（题目要求"同一桩跑一遍"）：ocr 恒返回装备页文字 ⇒ 永不见「进入地图」
+try:
+    _say105 = _el105.say
+    _el105.say = _noop          # say 只打屏；换成 noop 免刷屏（finally 原样还回去 ✓）
+    try:
+        _lg105 = []
+        _b105 = _BackBot105([_EQ105])
+        _r105 = _el105._back_to_map(_b105, _lg105)
+    finally:
+        _el105.say = _say105
+    _err105 = None
+except Exception as _e105a:     # noqa: BLE001
+    _lg105, _b105, _r105, _err105 = [], None, None, _e105a
+try:
+    _n105 = len(_bsa105(_b105)) if _b105 is not None else -1
+    check('v2.105 G12① 执行级：点满为止 ⇒ START_ADV **恰好 5 次**（用户口径上限；'
+          '老代码 6 轮 ✗）· 返回 False · log 有 back_done ok=False · '
+          '实点=%d START_ADV=%r 返回=%r err=%r'
+          % (_n105, tuple(_el105.START_ADV), _r105, _err105),
+          _n105 == 5 and _r105 is False
+          and any(isinstance(_e, dict) and _e.get('bag') == 'back_done'
+                  and _e.get('ok') is False for _e in _lg105))
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（上面真调了 _back_to_map ✓）
+except Exception as _e105g12a:      # noqa: BLE001
+    check('v2.105 G12① 门禁自查可运行（%r）' % (_e105g12a,), False)
+print()
+
+# ═══ G12② 执行级：一次都不点右上角的叉（G12① 那一桩的 tap 序列里不许出现）═══
+try:
+    _x105 = tuple(getattr(_el105, 'BAG_X_DLG', (1023, 215)))
+    _taps105 = _b105.taps if _b105 is not None else []
+    _hitx105 = [_t for _t in _taps105 if _t == _x105]
+    _dlgn105 = -1 if _b105 is None else _b105.tap_dlg_n
+    check('v2.105 G12② 执行级：同一桩跑一遍 ⇒ tap 序列里**没有** BAG_X_DLG%s、'
+          '且 b.tap_dlg 调用 **0 次**（弹窗系通道一次都没用）· 命中=%d tap_dlg=%d'
+          ' 实测序列=%r err=%r'
+          % (_x105, len(_hitx105), _dlgn105, _taps105, _err105),
+          _b105 is not None and not _hitx105 and _dlgn105 == 0)
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e105g12b:      # noqa: BLE001
+    check('v2.105 G12② 门禁自查可运行（%r）' % (_e105g12b,), False)
+print()
+
+# ═══ G12③ 执行级：见到「进入地图」立刻收手（不许盲点满 5 次）═══
+#   items 显式传起点帧 ⇒ ocr 的调用序号与「第几次点击之后」对齐：第 3 次 ocr 命中
+#   ⇒ 恰好点过 3 下 START_ADV（老代码这里会点满 6 下 ✗）
+try:
+    _say105 = _el105.say
+    _el105.say = _noop
+    try:
+        _lg3 = []
+        _b3 = _BackBot105([_EQ105, _EQ105, _MAP105])
+        _r3 = _el105._back_to_map(_b3, _lg3, items=list(_EQ105))
+    finally:
+        _el105.say = _say105
+    _n3 = len(_bsa105(_b3))
+    check('v2.105 G12③ 执行级：ocr 第 3 次见到「进入地图」⇒ START_ADV 只点了 **3** 次'
+          '（提前结束、不盲点）· 返回 True · log 有 back_ok · 实点=%d 返回=%r 序列=%r'
+          % (_n3, _r3, _b3.taps),
+          _n3 == 3 and _r3 is True
+          and any(isinstance(_e, dict) and _e.get('bag') == 'back_ok' for _e in _lg3))
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e105g12c:      # noqa: BLE001
+    check('v2.105 G12③ 门禁自查可运行（%r）' % (_e105g12c,), False)
+print()
+
+# ═══ G12④ 执行级：弹窗**不吞掉**这一轮（关完照样点一次 START_ADV）═══
+#   老代码：关完弹窗 `continue` ⇒ 5 轮里真正点到的 START_ADV 少一半 ✗
+try:
+    _cy105 = (int(_el105.LAYOUT.sy(600)) + int(_el105.LAYOUT.sy(1700))) // 2
+    _say105 = _el105.say
+    _el105.say = _noop
+    try:
+        _lg4 = []
+        _b4 = _BackBot105([_MAP105])       # 点完这一下就回图 ⇒ 只剩第 1 轮
+        _r4 = _el105._back_to_map(_b4, _lg4, items=[item('关闭', 540, _cy105)])
+    finally:
+        _el105.say = _say105
+    _pop4 = [_t for _t in _b4.taps if _t == (540, _cy105)]
+    _sa4 = _bsa105(_b4)
+    check('v2.105 G12④ 执行级：第 1 轮弹窗「关闭」cy=%d ∈ [sy(600), sy(1700)) ⇒ 关完'
+          '**照样**点一次 START_ADV（同一轮弹窗点击 1 + 开始冒险 1，顺序=关→点）· '
+          '弹窗=%d 开始冒险=%d 序列=%r err=%r'
+          % (_cy105, len(_pop4), len(_sa4), _b4.taps, _err105),
+          len(_pop4) == 1 and len(_sa4) == 1
+          and _b4.taps[:2] == [(540, _cy105), tuple(_el105.START_ADV)])
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e105g12d:      # noqa: BLE001
+    check('v2.105 G12④ 门禁自查可运行（%r）' % (_e105g12d,), False)
+print()
+
+# ═══ G12⑤ 执行级：起点已在地图 ⇒ 不盲点、也不重复取帧 ═══
+try:
+    _say105 = _el105.say
+    _el105.say = _noop
+    try:
+        _lg5 = []
+        _b5 = _BackBot105([_MAP105])
+        _r5 = _el105._back_to_map(_b5, _lg5, items=list(_MAP105))
+    finally:
+        _el105.say = _say105
+    check('v2.105 G12⑤ 执行级：items 已含「进入地图」⇒ **0 次点击**、返回 True'
+          '（连点前先判，绝不白点 ✗）· 点击=%d ocr=%d 返回=%r'
+          % (len(_b5.taps), _b5.ocr_n, _r5),
+          not _b5.taps and _r5 is True)
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e105g12e:      # noqa: BLE001
+    check('v2.105 G12⑤ 门禁自查可运行（%r）' % (_e105g12e,), False)
+print()
+
+# ═══ G12⑥ 撤回守门（结构级）：老写法不许回来 ═══
+#   ㈠ bag_upgrade **函数体内**不再出现 BAG_X_DLG（剥整行注释后 —— 该函数上方留档注释里
+#      逐字引用了旧写法，不剥就会假红 ✗）；切片用 .find('def bag_upgrade(') → 下一个顶层 def
+#   ㈡ `_back_to_map` 的 tries 默认值就是 **5**（6 轮 / 3 轮都不合用户口径 ✗）
+try:
+    _src105 = _nocomment104(io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                                    encoding='utf-8').read())
+    _body105 = _body104(_src105, 'def bag_upgrade(')
+    check('v2.105 G12⑥a 撤回守门（结构级）：bag_upgrade 函数体内不再出现 BAG_X_DLG'
+          '（已剥整行注释，切片 %d 字符）—— 谁把「每轮先点右上角的叉」加回来这里立刻红'
+          % (len(_body105),),
+          len(_body105) > 200 and 'BAG_X_DLG' not in _body105)
+    _code105 = _el105._back_to_map.__code__
+    _defs105 = tuple(_el105._back_to_map.__defaults__ or ())
+    _kw105 = dict(zip(_code105.co_varnames[_code105.co_argcount - len(_defs105):],
+                      _defs105)) if _defs105 else {}
+    check('v2.105 G12⑥b 撤回守门（结构级）：_back_to_map 的默认值 %r（参数名取自 '
+          'co_varnames）⇒ 上限就是 **5** · 取值=%r'
+          % (_defs105, _kw105.get('tries', '<缺 tries 参数>')),
+          _kw105.get('tries') == 5)
+    import explore_loop as _el105      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e105f:         # noqa: BLE001
+    check('v2.105 G12⑥ 门禁自查可运行（%r）' % (_e105f,), False)
+print()
+
+# ═══ G12⑦（元）这 6 条断言**都还在**（谁删掉一条这里立刻红）═══
+try:
+    _self105 = io.open(os.path.abspath(__file__), encoding='utf-8').read()
+    # ⚠ 表里**只写圈号**，查的是拼出来的 'v2.105 G12<n>'：否则表自己的文本就能命中 ✗
+    _tbl105 = ['①', '②', '③', '④', '⑤', '⑥']
+    _miss105 = [_t for _t in _tbl105 if ('v2.105 G12' + _t) not in _self105]
+    check('v2.105 G12⑦ 元：这 6 条断言（①~⑥）都还在 · 缺=%r' % (_miss105,),
+          not _miss105)
+except Exception as _e105g:        # noqa: BLE001
+    check('v2.105 G12⑦ 门禁自查可运行（%r）' % (_e105g,), False)
+print()
+
+
+# ㉗⭐ v2.106【门禁断言 + 牙齿测试】—— 用户新口径（2026-11-04）：
+#   「偶遇强敌」面板改成**遇到就开打**，且**全分辨率、禁止写死坐标**。两层都得**执行级**证明：
+#     ① 判据认得出（结构式「邀请挑战」+「开始战斗」，标题只作兼容入口）；
+#     ② 点的坐标**就是那颗 OCR 条目自己的 cx/cy** —— 换个坐标它必须跟着换（不是常量、不是
+#        dlg 常量、更不许写死）✓
+#   ⚠ 本组**不**用"数字符串出现次数"当判据（v1.23 ④ 那种脆弱断言别再复制）；
+#     撤回守门先剥整行注释再查；切片一律 .find() + 显式判 >= 0（绝不 .split()[1] / .index()）；
+#     ⚠ 只打桩 say/status/wait_end/close_x_panels，且必须 finally 原样还回去（泄漏会让后面断言静默 ✗）
+print('=' * 78)
+print('㉗⭐ v2.106 门禁断言：「偶遇强敌」遇到就打 · 点的是 OCR 条目自己的 cx/cy（G13①~⑥）')
+
+import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（下面真调 popups ✓）
+
+
+class _SpBot106(object):
+    """popups() 的最小桩：**两条点击通道分开记**（tap = 归一化帧 / tap_dlg = 弹窗系）
+
+    ⚠ 坐标对了通道错了在真机上照样点不中（偏 C≈209px）⇒ 断言必须同时看通道 ✓
+    """
+
+    fast_ok = False
+
+    def __init__(self):
+        self.taps = []
+        self.dlg_taps = []
+        self.closed_n = 0
+
+    def img(self):
+        return np.zeros((1920, 1080, 3), 'uint8')
+
+    def tap(self, x, y, wait=0.0):
+        self.taps.append((int(x), int(y)))
+        return True
+
+    def tap_dlg(self, x, y, wait=0.0):
+        self.dlg_taps.append((int(x), int(y)))
+        return True
+
+    def ocr(self, *a, **k):
+        return []
+
+
+def _sp_run106(items, tapped=(543, 1611), plan_road=None):
+    """跑一次真 popups()：say/status/wait_end/close_x_panels 打桩（finally 原样还回去 ✓）"""
+    _b, _lg = _SpBot106(), []
+    _s, _st = _el106.say, _el106.status
+    _we, _cx = _el106.wait_end, _el106.close_x_panels
+
+    def _cxp(*a, **k):          # X 兜底：只记"发生了关闭动作"，不跑 cv2
+        _b.closed_n += 1
+        return True
+    _el106.say = _noop
+    _el106.status = _noop
+    _el106.wait_end = lambda *a, **k: _lg.append({'fake': 'wait_end'})
+    _el106.close_x_panels = _cxp
+    try:
+        _proad = (set(plan_road) if plan_road is not None
+                  else ({tapped} if tapped else set()))
+        _ctx = {'tapped': tapped, 'plan_road': _proad, 'road': set()}
+        _rc, _err = _el106.popups(_b, items, _lg, _ctx), None
+    except Exception as _e:     # noqa: BLE001
+        _rc, _err = None, _e
+    finally:
+        _el106.say, _el106.status = _s, _st
+        _el106.wait_end, _el106.close_x_panels = _we, _cx
+    return {'rc': _rc, 'err': _err, 'taps': _b.taps, 'dlg': _b.dlg_taps,
+            'closed': _b.closed_n, 'log': _lg,
+            'strong': [e for e in _lg if isinstance(e, dict)
+                       and e.get('popup') == 'strong_panel'],
+            'skip': [e for e in _lg if isinstance(e, dict)
+                     and e.get('skip') == 'strong_closed']}
+
+
+# ═══ G13① 执行级：结构判据命中 ⇒ 点「开始战斗」**条目自己的** cx/cy、走归一化通道 ═══
+#   两个条目坐标**故意不同**：(412,1508) 是「邀请挑战」，(543,1611) 才是「开始战斗」
+#   ⇒ 点中 (543,1611) 才叫"读的是这颗按钮"；点到 (412,1508) 或任何常量都算红 ✗
+try:
+    _r1 = _sp_run106([item('邀请挑战', 412, 1508), item('开始战斗', 543, 1611)])
+    check('v2.106 G13① 执行级：items 含「邀请挑战」+「开始战斗」⇒ 认出 strong_panel 并'
+          '按**该条目自己的** cx/cy 点击(543,1611)、返回 battle/battle_clear · '
+          'rc=%r taps=%r dlg=%r strong=%d err=%r'
+          % (_r1['rc'], _r1['taps'], _r1['dlg'], len(_r1['strong']), _r1['err']),
+          _r1['err'] is None and len(_r1['strong']) == 1
+          and _r1['taps'] == [(543, 1611)] and not _r1['dlg']
+          and _r1['rc'] in ('battle', 'battle_clear'))
+    import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e106a:            # noqa: BLE001
+    check('v2.106 G13① 门禁自查可运行（%r）' % (_e106a,), False)
+print()
+
+# ═══ G13② 执行级：**不误判** —— 判据分层（v2.111 重钉，旧前提已被推翻）═══
+#   ⛔ v2.106 当时的判据是「邀请挑战 + 开始战斗 同时命中才算 strong」。
+#      2026-11-05 真机证伪：那要求 and，而「邀请挑战」是花体小字 OCR 常读不到 ⇒
+#      强敌面板被 fb(items, L['fight'])（**子串**「战斗」）的战斗分支抢走 ⇒
+#      日志只有 {'popup': 'fight_panel'}、0 条 strong_panel ✗
+#   ⇒ v2.111 改成三条任一 + 「整条等于」区分（源码 :6438-6462）：
+#      ① 标题 ② 邀请挑战+开始战斗 ③ 开始战斗单独命中 **且** 无整条「战斗」
+#   ⇒ 本组改成两条对照：③ 触发 / 普通战斗面板不触发 ✓
+try:
+    _r2 = _sp_run106([item('开始战斗', 543, 1611)])
+    check('v2.106 G13② 执行级（v2.111 重钉）：items 只有「开始战斗」、**无**整条「战斗」⇒'
+          ' **进** strong 分支并点它自己的坐标（旧前提「不进」已按真机证伪撤回）· '
+          'rc=%r taps=%r strong=%d err=%r'
+          % (_r2['rc'], _r2['taps'], len(_r2['strong']), _r2['err']),
+          _r2['err'] is None and len(_r2['strong']) == 1
+          and _r2['taps'] == [(543, 1611)] and _r2['rc'] in ('battle', 'battle_clear'))
+    _r2b = _sp_run106([item('战斗', 543, 1611)])
+    check('v2.106 G13②b 执行级（对照项）：items 是**整条**「战斗」（普通战斗面板）⇒'
+          ' **不**进 strong 分支（否则普通战斗会被当成强敌面板 ✗）· '
+          'rc=%r taps=%r strong=%d'
+          % (_r2b['rc'], _r2b['taps'], len(_r2b['strong'])),
+          _r2b['err'] is None and not _r2b['strong'] and not _r2b['taps'])
+    import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e106b:            # noqa: BLE001
+    check('v2.106 G13② 门禁自查可运行（%r）' % (_e106b,), False)
+print()
+
+# ═══ G13③ 执行级：标题兼容入口（别的分辨率标题不在丢弃带里）⇒ 仍认作 strong_panel ═══
+#   只有标题 ⇒ 量不到「开始战斗」⇒ 必须走 X 兜底关面板并返回 handled（不是死循环 ✗）
+try:
+    _r3 = _sp_run106([item('偶遇强敌', 540, 480)])
+    check('v2.106 G13③ 执行级：items 只有标题「偶遇强敌」⇒ 仍认作 strong_panel；'
+          '量不到「开始战斗」⇒ 走 X 兜底关面板、返回 handled · '
+          'rc=%r strong=%d 关闭=%d skip_log=%d taps=%r err=%r'
+          % (_r3['rc'], len(_r3['strong']), _r3['closed'], len(_r3['skip']),
+             _r3['taps'], _r3['err']),
+          _r3['err'] is None and len(_r3['strong']) == 1 and _r3['closed'] == 1
+          and _r3['rc'] == 'handled' and not _r3['taps'])
+    import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e106c:            # noqa: BLE001
+    check('v2.106 G13③ 门禁自查可运行（%r）' % (_e106c,), False)
+print()
+
+# ═══ G13④ 执行级：坐标**真的来自 OCR**（反例守卫）—— 改成 (111,222) 点击必须跟着变 ═══
+#   与 G13① 的 items 只差「开始战斗」的坐标 ⇒ 点出来仍是常量/固定标定就红 ✗
+try:
+    _r4 = _sp_run106([item('邀请挑战', 412, 1508), item('开始战斗', 111, 222)])
+    check('v2.106 G13④ 执行级：把「开始战斗」条目改成 (111,222) ⇒ 点击坐标**随之**变成'
+          '(111,222)（证明不是常量、也不是 dlg 常量）· rc=%r taps=%r dlg=%r strong=%d err=%r'
+          % (_r4['rc'], _r4['taps'], _r4['dlg'], len(_r4['strong']), _r4['err']),
+          _r4['err'] is None and _r4['taps'] == [(111, 222)] and not _r4['dlg']
+          and len(_r4['strong']) == 1 and _r4['rc'] in ('battle', 'battle_clear'))
+    import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e106d:            # noqa: BLE001
+    check('v2.106 G13④ 门禁自查可运行（%r）' % (_e106d,), False)
+print()
+
+# ═══ G13⑤ 撤回守门（结构级）：strong 分支切片里**没有**写死坐标形态 ═══
+#   ① 切片：'if fb(items, *L["strong"]) or (' → 下一个 '# ⭐⭐ 派遣探索面板'
+#      （**先在原文上切**：结束标记本身是注释行，先剥注释就找不到了 ✗）
+#   ② 再剥整行注释后查；③ 判据：无 tap_dlg(（通道不许写死）+ 无 (782, / (1588 元组字面量
+try:
+    _raw106 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _i106 = _raw106.find("_sp_norm = exb(items, L['fight'])")
+    _j106 = (_raw106.find('# ⭐⭐ 派遣探索面板', _i106 + 1) if _i106 >= 0 else -1)
+    _sl106 = _raw106[_i106:_j106] if (_i106 >= 0 and _j106 > _i106) else ''
+    _nc106 = _nocomment104(_sl106)
+    _hit106 = [_p for _p in ('tap_dlg(', '(782,', '(1588') if _p in _nc106]
+    check('v2.106 G13⑤ 撤回守门（结构级）：strong 分支切片（%d 字符，已剥整行注释）里'
+          '**没有**写死坐标 —— 无 tap_dlg( · 无 (782, / (1588 字面量 · '
+          '命中=%r 起点=%d 终点=%d'
+          % (len(_nc106), _hit106, _i106, _j106),
+          _i106 >= 0 and len(_nc106) > 500 and not _hit106)
+    import explore_loop as _el106      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y
+except Exception as _e106e:            # noqa: BLE001
+    check('v2.106 G13⑤ 门禁自查可运行（%r）' % (_e106e,), False)
+print()
+
+# ═══ G13⑥（元）这 5 条断言（①~⑤）**都还在**（谁删掉一条这里立刻红）═══
+try:
+    _self106 = io.open(os.path.abspath(__file__), encoding='utf-8').read()
+    # ⚠ 表里**只写圈号**，查的是拼出来的 'v2.106 G13<n>'：否则表自己的文本就能命中 ✗
+    _tbl106 = ['①', '②', '③', '④', '⑤']
+    _miss106 = [_t for _t in _tbl106 if ('v2.106 G13' + _t) not in _self106]
+    check('v2.106 G13⑥ 元：这 5 条断言（①~⑤）都还在 · 缺=%r' % (_miss106,),
+          not _miss106)
+except Exception as _e106f:            # noqa: BLE001
+    check('v2.106 G13⑥ 门禁自查可运行（%r）' % (_e106f,), False)
+# ㉘⭐ v2.107【门禁断言 + 牙齿测试】—— 真实事故（2026-11-06，已把整盘分类打歪）：
+#   PC 侧给了新图模板（无声沼泽 = S21001，33 个 sid）：模板拷进
+#   assets/mapbot_pack/templates/unit/S21001、PackInstaller.MARK 也提了 —— **却发不出去** ✗
+#   因为包内 server_datatable.json 还是**旧版**（Area_Spot 482 行 / 15 个区域、没有无声沼泽）
+#   ⇒ spots.code_of('无声沼泽') 返回 **None** ⇒ board_for() 回落成夏日海滩模板集
+#   ⇒ **整盘分类全错**。⇒ 本组把「**资源包与数据表一致**」钉成门禁：
+#     ① 表里必须有 ≥16 个区域，且 code_of('无声沼泽') == 'S21001'（表退回旧版 ⇒ 当场红 ✓）
+#     ② 「表 → 模板」：表里**每个**图码的**每个** sid 都要有模板目录且目录内 ≥1 个 png（缺失清单必须为空）
+#        ⚠ 方向只能是「表 → 模板」：S70001 **有模板但表里 0 行**，反过来要求是**假红** ✗
+#     ③ 无声沼泽专项：表行 ≥32 ＋ templates/unit/S21001 下 sid 目录 ≥32（33 个 sid 里表只登记 32 行 ✓）
+#     ④ 撤回守门：PackInstaller.MARK 的 .pack_v(N) ≥ 12（谁改回 v10/v11 这里红 ✓）
+#     ⑤ 元：这 4 条都还在
+#   ⚠ ①②③ 必须走**真子进程**：spots 在 import 期就把 MAPBOT_ROOT/MAPBOT_DT 读成模块常量，
+#     本门禁进程早已 import 过（DT 指向 app/src/main/python，那里**没有**表）⇒
+#     进程内改环境变量无效，只能子进程重导（同 v1.63 ⑩ / v2.104 G8 的做法 ✓）
+print('=' * 78)
+print('㉘⭐ v2.107 门禁断言：资源包与数据表一致 · 无声沼泽 S21001 全链路（G14①~⑤）')
+
+# ⚠ 探针源码：子进程里把资源根指到**包内**资产再 import spots（%r 两处 = PK, PY）
+_G14_SRC = '''# -*- coding: utf-8 -*-
+import io, json, os, sys
+PK, PY = %r, %r
+os.environ['MAPBOT_ROOT'] = PK
+os.environ['MAPBOT_DT'] = os.path.join(PK, 'server_datatable.json')
+os.environ['MAPBOT_RUNS'] = os.path.join(PK, 'runs')
+sys.path.insert(0, PY)
+out = {'err': None, 'pk': PK}
+try:
+    import spots
+    for _fn in (spots.spot_rows, spots.map_table):      # 模块级 _cached 包装 ⇒ 显式清缓存
+        _c = getattr(_fn, 'clear_cache', None)
+        if _c:
+            _c()
+    mt, rows = spots.map_table(), spots.spot_rows()
+    unit = os.path.join(PK, 'templates', 'unit')
+    miss, n_pair = [], 0
+    for _name in mt:
+        _code = mt[_name]
+        for _sid in rows:
+            if _sid.split('_')[0] != _code:
+                continue
+            n_pair += 1
+            _d = os.path.join(unit, _code, _sid)
+            if not os.path.isdir(_d):
+                miss.append(_sid + '@nodir')
+                continue
+            try:
+                _fs = os.listdir(_d)
+            except OSError:
+                _fs = []
+            if not [f for f in _fs if f.lower().endswith('.png')]:
+                miss.append(_sid + '@nopng')
+    t21 = os.path.join(unit, 'S21001')
+    d21 = ([f for f in os.listdir(t21) if os.path.isdir(os.path.join(t21, f))]
+           if os.path.isdir(t21) else [])
+    _dt = json.load(io.open(os.path.join(PK, 'server_datatable.json'), encoding='utf-8'))
+    out.update({'table_n': len(mt), 'names': sorted(mt),
+                'code_of': spots.code_of('无声沼泽'),
+                'rows_total': n_pair, 'missing_n': len(miss), 'missing': miss[:12],
+                's21001_rows': len([k for k in rows if k.split('_')[0] == 'S21001']),
+                's21001_tpl_dirs': len(d21), 'dt_rows': len(_dt['Area_Spot'])})
+except Exception as _e:
+    out['err'] = repr(_e)
+sys.stdout.write('G14JSON ' + json.dumps(out, ensure_ascii=True) + chr(10))
+'''
+
+
+def _g14_probe107():
+    """真子进程跑一遍（临时文件落系统 temp，**绝不**往仓里丢垃圾 ✗）；取它吐的 G14JSON 行"""
+    import re as _re
+    import subprocess as _sp
+    import tempfile as _tf
+    _src = _G14_SRC % (_ASSETS, _PY_SELF)
+    _fd, _path = _tf.mkstemp(suffix='.py', prefix='_g14_107_')
+    try:
+        with os.fdopen(_fd, 'w', encoding='utf-8') as _f:
+            _f.write(_src)
+        _r = _sp.run([sys.executable, _path], stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                     timeout=600, env=_ENV())
+        _o = _r.stdout.decode('utf-8', 'replace')
+        _m = _re.search(r'^G14JSON (.+)$', _o, _re.M)
+        if not _m:
+            raise RuntimeError('子进程没吐 G14JSON（exit=%d）：%r'
+                               % (_r.returncode, _o[-400:]))
+        _d = json.loads(_m.group(1))
+        _d['exit'] = _r.returncode
+        return _d
+    finally:
+        try:
+            os.remove(_path)
+        except OSError:
+            pass
+
+
+try:
+    _G14 = _g14_probe107()
+except Exception as _e107p:            # noqa: BLE001
+    _G14 = {'err': repr(_e107p), 'probe_failed': True}
+if _G14.get('err'):
+    print('   ⚠ 子进程探针出错：%r' % (_G14.get('err'),))
+print()
+
+# ═══ G14① 执行级：包内表真跑 ⇒ 条目数 ≥16 且无声沼泽认得出（旧表 ⇒ 红）═══
+try:
+    check("v2.107 G14① 执行级：拿**包内** server_datatable.json 真跑 map_table()/code_of() ⇒"
+          " 条目数 ≥ 16 且 code_of('无声沼泽') == 'S21001'"
+          "（表被换成旧版 ⇒ 这条当场红，2026-11-06 发的版就是这么错 ✗）· "
+          '条目=%r 表行=%r code_of=%r 区域=%r err=%r'
+          % (_G14.get('table_n'), _G14.get('dt_rows'), _G14.get('code_of'),
+             _G14.get('names'), _G14.get('err')),
+          not _G14.get('err') and (_G14.get('table_n') or 0) >= 16
+          and _G14.get('code_of') == 'S21001')
+    import spots as _sp107      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（上面真跑 spots.map_table/code_of 的子进程 ✓）
+except Exception as _e107a:            # noqa: BLE001
+    check('v2.107 G14① 门禁自查可运行（%r）' % (_e107a,), False)
+print()
+
+# ═══ G14② 执行级：「表 → 模板」全覆盖（缺失清单必须为空）═══
+#   ⚠ 只查这个方向：S70001 有模板但表里 0 行 —— 「模板 → 表」会假红 ✗
+try:
+    check('v2.107 G14② 执行级：「表 → 模板」全覆盖 —— 每个图码的每个 sid 都有模板目录且'
+          '目录内 ≥1 个 png（**不**反向要求「模板 → 表」：S70001 有模板但表里 0 行 ✓）· '
+          '配对=%r 行 缺失=%r %r 表行=%r err=%r'
+          % (_G14.get('rows_total'), _G14.get('missing_n'), _G14.get('missing'),
+             _G14.get('dt_rows'), _G14.get('err')),
+          not _G14.get('err') and (_G14.get('rows_total') or 0) > 0
+          and _G14.get('missing_n') == 0)
+    import spots as _sp107      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（上面真跑 spots.spot_rows 的子进程 ✓）
+except Exception as _e107b:            # noqa: BLE001
+    check('v2.107 G14② 门禁自查可运行（%r）' % (_e107b,), False)
+print()
+
+# ═══ G14③ 执行级：无声沼泽专项（表 32 行 + 33 个 sid 模板目录）═══
+try:
+    check('v2.107 G14③ 执行级：无声沼泽专项 —— 表里 S21001 行数 ≥ 32 且'
+          ' templates/unit/S21001 下 sid 目录数 ≥ 32（旧表 0 行 / 0 目录 ⇒ 红）· '
+          '表行=%r 模板目录=%r err=%r'
+          % (_G14.get('s21001_rows'), _G14.get('s21001_tpl_dirs'), _G14.get('err')),
+          not _G14.get('err') and (_G14.get('s21001_rows') or 0) >= 32
+          and (_G14.get('s21001_tpl_dirs') or 0) >= 32)
+    import spots as _sp107      # noqa: F401 ← 元门禁 v1.42 ② 认 import X as _Y（同一趟子进程的 S21001 切片 ✓）
+except Exception as _e107c:            # noqa: BLE001
+    check('v2.107 G14③ 门禁自查可运行（%r）' % (_e107c,), False)
+print()
+
+# ═══ G14④ 撤回守门（结构级）：MARK 版本号 ≥ 12 ═══
+#   ① 先剥**整行注释**（javadoc 头顶就写着「旧值 .pack_v3」⇒ 不剥会把旧号当成答案 ✗）
+#   ② 正则取 .pack_v(N)（**别钉字面量** —— 以后每次加资源还要往上 +1）
+try:
+    import re as _re107
+    _java107 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com',
+                                    'fantasy', 'autoexplore', 'PackInstaller.java'),
+                       encoding='utf-8').read()
+    _jnc107 = '\n'.join(_ln for _ln in _java107.split('\n')
+                        if not _ln.strip().startswith(('*', '//', '/*')))
+    _mkv107 = [int(x) for x in
+               _re107.findall(r'MARK\s*=\s*"\.pack_v(\d+)"', _jnc107)]
+    _mkall107 = [int(x) for x in _re107.findall(r'\.pack_v(\d+)', _jnc107)]
+    _mk107 = max(_mkv107) if _mkv107 else None
+    check('v2.107 G14④ 撤回守门（结构级）：PackInstaller.MARK 的 .pack_v(N) ≥ 12 ——'
+          ' 谁把它改回 v10/v11（资源换了标记不换 ⇒ 真机永远解不出新模板 ✗）这里立刻红 ·'
+          ' MARK=%r 全部版本=%r 剥注释后 %d 字符'
+          % (_mk107, _mkall107, len(_jnc107)),
+          _mk107 is not None and _mk107 >= 12)
+except Exception as _e107d:            # noqa: BLE001
+    check('v2.107 G14④ 门禁自查可运行（%r）' % (_e107d,), False)
+print()
+
+# ═══ G14⑤（元）这 4 条断言（①~④）**都还在**（谁删掉一条这里立刻红）═══
+try:
+    _self107 = io.open(os.path.abspath(__file__), encoding='utf-8').read()
+    # ⚠ 表里**只写圈号**，查的是拼出来的 'v2.107 G14<n>'：否则表自己的文本就能命中 ✗
+    _tbl107 = ['①', '②', '③', '④']
+    _miss107 = [_t for _t in _tbl107 if ('v2.107 G14' + _t) not in _self107]
+    check('v2.107 G14⑤ 元：这 4 条断言（①~④）都还在 · 缺=%r' % (_miss107,),
+          not _miss107)
+except Exception as _e107e:            # noqa: BLE001
+    check('v2.107 G14⑤ 门禁自查可运行（%r）' % (_e107e,), False)
+print()
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.108【用户报「情报点击位置不对」—— 盲点兜底 + 模板尺度失效，两个病叠在一起】
+#   实测（模拟器 127.0.0.1:16512 / 1280×2640 / C=153.75）：
+#     · 「情报」按钮真实位置：设备 (1184,493) ⇒ 参考系 (999,416) / dlg (1010,220)
+#     · 旧代码 b.tap(990,387)：y=387 > TOP_SPLIT_REF(300) ⇒ 走**锚底**分支
+#       ⇒ 设备 (1173,823) ⇒ **点低 330px**，落在按钮下方背景上 ✗
+#     · 旧模板 templates/guild_intel_btn.png 122×72 与当前 UI 尺度不符 ⇒
+#       多尺度最佳 0.537 < 0.90 ⇒ **层①从来没命中过** ⇒ 必然掉进盲点兜底 ✗✗
+#   修法（v2.108）：
+#     ① 模板换新：templates/ui/guild_intel_btn.png **146×53 只裁红底条**（真帧命中 1.000）
+#        ⛔ v2.108b：第一版裁了整块按钮（129×136）**含右上角红点徽标** ⇒ 徽标一消失
+#           （奖励领完）分数就从 1.000 掉到 **0.863 < 0.90** ⇒ 又点不到 ✗（实测）
+#           ⇒ 只裁「红底条 + 情报二字」，**与徽标无关**：有/无徽标两帧都是 1.000 ✓
+#     ② 盲点兜底**删除**：模板/OCR 都失败 ⇒ 记 intel:btn_missing 并 return False
+#     ③ PackInstaller.MARK .pack_v12 → .pack_v13（assets 变了不换标记 ⇒ 白改）
+print('=' * 78)
+print('⓯⭐ v2.108 「情报」入口：模板优先 + 删盲点兜底（标系错分支 + 模板尺度失效）')
+try:
+    _tpl108 = os.path.join(_ASSETS, 'templates', 'ui', 'guild_intel_btn.png')
+    _tpl108_old = os.path.join(_ASSETS, 'templates', 'guild_intel_btn.png')
+    _ok108 = os.path.exists(_tpl108)
+    _sz108 = -1
+    try:
+        import cv2 as _cv108
+        _im108 = _cv108.imread(_tpl108)
+        _sz108 = -1 if _im108 is None else _im108.shape[1]
+    except Exception:       # noqa: BLE001
+        _sz108 = -1
+    check('v2.108 A① 结构级：新模板在 templates/ui/（外置目录可覆盖；放 templates/ 根则 adb 推不进去）'
+          ' 且宽度 >= 100（旧 122x72 与当前 UI 不符）· 存在=%s 宽=%s 旧副本=%s'
+          % (_ok108, _sz108, os.path.exists(_tpl108_old)),
+          _ok108 and _sz108 >= 100 and not os.path.exists(_tpl108_old))
+
+    _gd108 = io.open(os.path.join(MAPBOT, 'guild_daily.py'), encoding='utf-8').read()
+    # ⚠ 剥整行注释再查：留档注释里必然逐字引用旧写法（本仓第六次踩这个坑）
+    _gd108c = '\n'.join([_l for _l in _gd108.split('\n')
+                         if not _l.lstrip().startswith('#')])
+    _blind108 = _gd108c.find('at = INTEL_BTN')
+    check('v2.108 A② 撤回守门（剥注释）：intel_open_panel 里**没有**盲点赋值 at = INTEL_BTN'
+          '（模板/OCR 都没认出就盲点 ⇒ 非 9:16 屏上必错 330px）· 命中=%d'
+          % _blind108,
+          _blind108 < 0)
+
+    import ast as _ast108
+    _t108 = _ast108.parse(_gd108)
+    _mod108 = set()
+    for _n108 in _t108.body:
+        if isinstance(_n108, _ast108.Assign):
+            for _tg108 in _n108.targets:
+                if isinstance(_tg108, _ast108.Name):
+                    _mod108.add(_tg108.id)
+    _has108 = 'INTEL_BTN' in _mod108
+    _mark108 = [ln for ln in _gd108.split('\n') if 'INTEL_BTN = ' in ln and '禁止盲点' in ln]
+    check('v2.108 A③ 撤回守门：INTEL_BTN 仍**有模块级定义**（v1.94 ② 依赖它抓 NameError）'
+          ' 且行内标注「禁止盲点」· 定义=%s 标注=%d' % (_has108, len(_mark108)),
+          _has108 and len(_mark108) >= 1)
+
+    # ── B① 执行级：真跑 _tpl_match（不是复刻）────────────────────────────────
+    import guild_daily as _GD108
+    _fx108 = os.path.join(PROJ, '_verify', 'guild_intel_dlg_16512.png')
+    if not os.path.exists(_fx108):
+        skip('v2.108 B① 执行级：真帧 fixture 缺失（_verify/guild_intel_dlg_16512.png）')
+    else:
+        _frame108 = _cv108.imread(_fx108)
+        _tplim108 = _cv108.imread(_tpl108)
+        _hits108 = _GD108._tpl_match(_frame108, _tplim108, thr=0.90, roi=None)
+        _h108 = _hits108[0] if _hits108 else (None, None, 0.0)
+        check('v2.108 B① 执行级：真帧上真跑 _tpl_match(thr=0.90) ⇒ 恰好 1 处、分数 >= 0.90、'
+              '位置 = 基线(139,142)±3 · n=%d at=(%s,%s) score=%.4f'
+              % (len(_hits108), _h108[0], _h108[1], _h108[2]),
+              len(_hits108) == 1 and _h108[2] >= 0.90
+              and abs((_h108[0] or 0) - 139) <= 3 and abs((_h108[1] or 0) - 142) <= 3)
+
+    # ── B② / B③ 执行级：真跑 intel_open_panel（模板命中 ⇒ 用 tap_dlg 点 1 次）──
+    class _FB108(object):
+        def __init__(self, dlg):
+            self.dlg = dlg
+            self.taps = []
+            self.n = 0
+        def snap(self, tag=''):
+            return None
+        def ocr(self, min_conf=0.35, band=None, tag='x'):
+            self.n += 1
+            if self.n == 1:
+                return [{'text': '攻略', 'cx': 30, 'cy': 30, 'conf': 0.9},
+                        {'text': '活动', 'cx': 300, 'cy': 30, 'conf': 0.9}]
+            return [{'text': '情报指南', 'cx': 540, 'cy': 300, 'conf': 0.9}]
+        def img_dlg(self):
+            return self.dlg
+        def tap(self, x, y, wait=1.2):
+            self.taps.append(('ref', x, y))
+            return True
+        def tap_dlg(self, x, y, wait=1.2):
+            self.taps.append(('dlg', x, y))
+            return True
+
+    # ── B④ 执行级：**徽标无关**（真缺陷：整块模板在"奖励领完"帧上只有 0.863）────
+    _fx108b = os.path.join(PROJ, '_verify', 'guild_intel_dlg_nobadge.png')
+    if not os.path.exists(_fx108b):
+        skip('v2.108 B④ 执行级：去徽标 fixture 缺失（_verify/guild_intel_dlg_nobadge.png）')
+    else:
+        _frb108 = _cv108.imread(_fx108b)
+        _hb108 = _GD108._tpl_match(_frb108, _tplim108, thr=0.90, roi=None)
+        _h108b = _hb108[0] if _hb108 else (None, None, 0.0)
+        check('v2.108 B④ 执行级：**去徽标帧**上仍须 >= 0.90（旧整块模板实测只有 0.863 ⇒ '
+              '奖励领完后「情报」再也点不开 ✗）· n=%d at=(%s,%s) score=%.4f'
+              % (len(_hb108), _h108b[0], _h108b[1], _h108b[2]),
+              len(_hb108) >= 1 and _h108b[2] >= 0.90)
+
+    # ── B⑤ 结构级：面板内的 X **必须走弹窗系**（v2.110 实测：ref 通道偏 365px）────
+    _cl108 = _gd108c
+    _i108 = _cl108.find('def intel_close_panel')
+    _j108 = _cl108.find('def run_intel', _i108) if _i108 >= 0 else -1
+    _seg108 = _cl108[_i108:_j108] if (_i108 >= 0 and _j108 > _i108) else ''
+    check('v2.108 B⑤ 执行级·结构（v2.110 修）：intel_close_panel 的 tap_target 必须 use_dlg=True'
+          '（面板 X 在 dlg(943,339)，走 ref 通道会落到设备 y≈219 ⇒ 差 365px 关不掉 ✗）'
+          ' · 找到=%d use_dlg=True=%d' 
+          % (_i108, _seg108.count('use_dlg=True')),
+          _i108 >= 0 and _seg108.count('use_dlg=True') >= 1)
+
+    _say_bak108 = _GD108._say
+    _load_bak108 = _GD108._load_tpl
+    try:
+        _GD108._say = lambda *a, **k: None
+        _b108 = _FB108(_frame108)
+        _r108 = _GD108.intel_open_panel(_b108, log=[], tag='t108')
+        check('v2.108 B② 执行级：模板命中 ⇒ intel_open_panel 返回 True、**只点 1 次**、'
+              '且走 tap_dlg（弹窗系；模板是在 dlg 帧上匹配的，尺度和坐标系同源）·'
+              ' ret=%s taps=%r' % (_r108, _b108.taps),
+              _r108 is True and len(_b108.taps) == 1 and _b108.taps[0][0] == 'dlg')
+
+        # 对照项：模板缩到 0.6 倍 ⇒ 必须 miss ⇒ 一次都不许点（证 fail-closed 真生效）
+        _bad108 = _cv108.resize(_tplim108, None, fx=0.6, fy=0.6,
+                                interpolation=_cv108.INTER_AREA)
+        _GD108._load_tpl = lambda *a, **k: _bad108
+        _b108b = _FB108(_frame108)
+        _log108b = []
+        _r108b = _GD108.intel_open_panel(_b108b, log=_log108b, tag='t108b')
+        _miss108 = [r for r in _log108b if r.get('intel') == 'btn_missing']
+        check('v2.108 B③ 执行级·对照项：模板尺度错(0.6x) ⇒ 必须 miss ⇒ 返回 False 且'
+              '**一次都不点**（旧代码这里会盲点 330px 之外）· ret=%s taps=%r btn_missing=%d'
+              % (_r108b, _b108b.taps, len(_miss108)),
+              _r108b is False and len(_b108b.taps) == 0 and len(_miss108) == 1)
+
+    finally:
+        _GD108._say = _say_bak108
+        _GD108._load_tpl = _load_bak108
+except Exception as _e108:              # noqa: BLE001
+    check('v2.108 守门可运行（%r）' % (_e108,), False)
+print()
+
+# ═══ v2.108 元：上面 6 条（A①~A③ / B①~B③）都还在 ═══
+try:
+    _self108 = io.open(os.path.abspath(__file__), encoding='utf-8').read()
+    _tbl108 = ['A①', 'A②', 'A③', 'B①', 'B②', 'B③', 'B④', 'B⑤']
+    _miss108b = [_t for _t in _tbl108 if ('v2.108 ' + _t) not in _self108]
+    check('v2.108 B⑥ 元：这 8 条断言（A①~③ / B①~⑤）都还在 · 缺=%r' % (_miss108b,),
+          not _miss108b)
+except Exception as _e108b:             # noqa: BLE001
+    check('v2.108 B⑥ 禁自查可运行（%r）' % (_e108b,), False)
+print()
+
+
+
+print()
+
+
+
+
+print('=' * 78)
+print('⓯ v2.111 遭遇/偶遇强敌：不许被「战斗」分支抢走（用户 2026-11-05 口径）')
+try:
+    _gd111 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c111 = '\n'.join([_l for _l in _gd111.split('\n') if not _l.lstrip().startswith('#')])
+    _i111 = _c111.find("_sp_norm = exb(items, L['fight'])")
+    _seg111 = _c111[_i111:_i111 + 700] if _i111 >= 0 else ''
+    check('v2.111 A① 结构级：强敌判据含「开始战斗」单独兜底(go_only)＋用 exb 严格相等排除普通战斗面板 · 位置=%d go_only=%d exb=%d'
+          % (_i111, _seg111.count('go_only'), _seg111.count("exb(items, L['fight'])")),
+          _i111 >= 0 and _seg111.count('go_only') >= 1 and _seg111.count("exb(items, L['fight'])") >= 1)
+    _i111b = _c111.find("log.append({'popup': 'strong_panel', 'by': _sp_by")
+    check('v2.111 A② 结构级：日志必须落 by 来源(title/inv+go/go_only)，否则真机复盘分不清哪条判据命中 · 命中=%d' % _i111b, _i111b >= 0)
+except Exception as _e111:             # noqa: BLE001
+    check('v2.111 守门可运行（%r）' % (_e111,), False)
+print()
+
+
+print('=' * 78)
+print('⓯ v2.112/v2.113 强敌必须来自规划路径 + 「提示」确认框点确定并留档')
+try:
+    _gd112 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c112 = '\n'.join([_l for _l in _gd112.split('\n') if not _l.lstrip().startswith('#')])
+    _i112 = _c112.find('_sp_forced = bool(tapped)')
+    _seg112 = _c112[_i112:_i112 + 900] if _i112 >= 0 else ''
+    check('v2.112 A① 结构级：强敌分支必须先过 **计划/开路路径** 闸(_sp_forced) + 落 strong_offroad_skip 日志（用户口径：只按规划点击的才打）· 位置=%d forced=%d skip=%d'
+          % (_i112, _seg112.count('_sp_forced'), _seg112.count('strong_offroad_skip')),
+          _i112 >= 0 and _seg112.count('_sp_forced') >= 2 and _seg112.count('strong_offroad_skip') >= 1)
+    _r7 = _sp_run106([item('开始战斗', 543, 1611)], tapped=(100, 100), plan_road=set())
+    _skip7 = [e for e in _r7['log'] if isinstance(e, dict) and e.get('popup') == 'strong_offroad_skip']
+    check('v2.112 B② 执行级·对照项：强敌面板出现但这次的点击**不在计划/开路路径上** ⇒ 必须**不接**（0 次点击、handled、落 strong_offroad_skip）· rc=%r taps=%r skip=%d'
+          % (_r7['rc'], _r7['taps'], len(_skip7)),
+          _r7['err'] is None and not _r7['taps'] and _r7['rc'] == 'handled' and len(_skip7) == 1)
+    _i113 = _c112.find("_cf_hint = exb(items, '提示')")
+    _seg113 = _c112[_i113:_i113 + 700] if _i113 >= 0 else ''
+    check('v2.113 A① 结构级：「提示」确认框必须**三条判据全中**（提示+确定+取消）才点确定，且 texts 写进 confirm_modal 日志（用户口径：遇到要点确定的记下来）· 位置=%d texts=%d cancel=%d'
+          % (_i113, _seg113.count('texts'), _seg113.count('cancel')),
+          _i113 >= 0 and _seg113.count('cancel') >= 1 and _seg113.count('confirm_modal') >= 1 and _seg113.count('texts') >= 1)
+except Exception as _e112:             # noqa: BLE001
+    check('v2.112/v2.113 守门可运行（%r）' % (_e112,), False)
+print()
+
+
+print('=' * 78)
+print('⓯ v2.114 求解器：观测已亮的块排前面（治「第一步点雾格」）')
+try:
+    _ms114 = io.open(os.path.join(MAPBOT, 'mapsolve.py'), encoding='utf-8').read()
+    _c114 = '\n'.join([_l for _l in _ms114.split('\n') if not _l.lstrip().startswith('#')])
+    _i114 = _c114.find('out.sort(key=lambda _t:')
+    check('v2.114/v2.127 A① 结构级：cells_for_plan 返回前必须按「点得动」稳定排序'
+          '（v2.127 起判据 = _lit_now：observed ＋ 地板不否决；全是雾时退化为原序）· 位置=%d litnow=%d'
+          % (_i114, _c114[_i114:_i114+200].count('_lit_now')),
+          _i114 >= 0 and '_lit_now' in _c114[_i114:_i114+200])
+    # ── B① 执行级：真跑真帧（map2 那份观测），断言顺序 = 亮的先
+    import cv2 as _cv114
+    import spots as _SP114, marks as _MK114
+    import explore_loop as _EL114, mapsim as _MS114, mapsolve as _MV114
+    _fr114 = os.path.join(PROJ, '_verify', 'plan_map2_S21001.png')
+    if not os.path.exists(_fr114):
+        skip('v2.114 B① 执行级：真帧 fixture 缺失（_verify/plan_map2_S21001.png）')
+    else:
+        _img114 = _cv114.imread(_fr114)
+        _cells114 = _SP114.Board('S21001').state(_img114)
+        _mk114 = _MK114.scan_board_fast(_img114)
+        _c114d = {'st': _cells114, 'marks': _mk114, 'buy': set(), 'buy_hidden': set()}
+        _st114 = {'obs': {}, 'marks': _mk114, 'nogo_rc': set(), 'done': set()}
+        _mg114 = _EL114._cells_for_model(_st114, _c114d, log=[], tag='v2114', mark_revealed=False)
+        _sim114 = _MS114.MapSim.from_observation(_mg114, _SP114.spot_rows())
+        _pr114 = _MV114.Problem(_sim114)
+        _cost114, _plan114 = _MV114.solve(_pr114, max_states=60000, max_secs=8, report={})
+        _cp114 = _pr114.cells_for_plan(_plan114 or [])
+        _ord114 = [tuple(rc) for rc, _bi, _w in _cp114]
+        _first114 = _ord114[0] if _ord114 else None
+        _firstobs = bool(getattr(_pr114.blocks.get(_cp114[0][1]) if _cp114 else None, 'observed', True))
+        check('v2.114 B① 执行级（真机帧）：map2 计划首步必须是**观测已亮**的格（改前是雾格 (1,3)，'
+              '真机 fogged_noop）· cost=%s order=%s 首步observed=%s'
+              % (_cost114, _ord114, _firstobs),
+              _cost114 == 16 and _ord114 == [(1, 4), (1, 3), (3, 1)] and _firstobs)
+
+        # ── B② 对照项：关掉排序（**并剥掉 v2.126 两条**）⇒ 必须回到旧顺序（证明不是恒真）
+        #   ⚠⚠ v2.126 起这个对照项必须**同时剥三层**：
+        #     \`block_revealed\` 认「观测里就亮的块」＋ \`EMPTY_ADJ\` 的邻居观测闸门 ——
+        #     这两条**自己就会**把首步落到观测已亮的格上 ⇒ 只关排序已复现不出旧顺序，
+        #     对照项与 B① 同时为真 ⇒ 假绿 ✗（本轮第一次跑门禁就是这么红的）
+        #   ⇒ 正确形态 = **「v2.114 排序 + v2.126 两条」一起剥掉** = 复现 v2.114 之前的行为。
+        #   实测（真机帧 \`_verify/plan_map2_S21001.png\`，四个变体逐个真跑）：
+        #     现状 / 只关排序 / 只剥 J / 剥 J+I ⇒ 全是 [(1,4),(1,3),(3,1)]
+        #     关排序 + 剥 J+I ⇒ [(1,3),(1,4),(3,1)] ✓ = 旧顺序，cost 恒 16 ✓
+        import types as _t114
+        _src114 = _ms114
+        _patched = _src114.replace('        out.sort(key=lambda _t: 0 if _lit_now(self.blocks.get(_t[1])) else 1)\n', '')
+        _patJ126 = ("        if _lit_now(self.blocks.get(bi)):\n"
+                    "            return True\n")
+        _patI126 = ("                _nb126 = prob.blocks.get(nb)\n"
+                    "                if _nb126 is not None and not getattr(_nb126, 'observed', False):\n"
+                    "                    continue\n")
+        _patched = _patched.replace(_patJ126, '').replace(_patI126, '')
+        if _patched == _src114:
+            check('v2.114 B② 对照项：无法构造"关掉排序"版本（锚点未命中）', False)
+        else:
+            _mod114 = _t114.ModuleType('mapsolve_nosort114')
+            _mod114.__dict__['__file__'] = _MV114.__file__
+            exec(compile(_patched, _MV114.__file__, 'exec'), _mod114.__dict__)
+            _pr2 = _mod114.Problem(_MS114.MapSim.from_observation(_mg114, _SP114.spot_rows()))
+            _c2, _p2 = _mod114.solve(_pr2, max_states=60000, max_secs=8, report={})
+            _cp2 = _pr2.cells_for_plan(_p2 or [])
+            _ord2 = [tuple(rc) for rc, _bi, _w in _cp2]
+            check('v2.114 B② 执行级·对照项：**关掉排序＋剥掉 v2.126** ⇒ 必须回到旧顺序 (1,3) 先'
+                  '（否则 B① 恒真）· cost=%s order=%s' % (_c2, _ord2),
+                  _c2 == 16 and _ord2 == [(1, 3), (1, 4), (3, 1)])
+except Exception as _e114:              # noqa: BLE001
+    check('v2.114 守门可运行(%r)' % (_e114,), False)
+print()
+
+
+
+
+print('=' * 78)
+print('⓯ v2.115 退图状态机：确认后不许再点「确定」/「结束冒险」（防切图）')
+try:
+    _el115 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c115 = '\n'.join([_l for _l in _el115.split('\n') if not _l.lstrip().startswith('#')])
+    _i115 = _c115.find('def finish_map')
+    _j115 = _c115.find(chr(10) + 'def ', _i115 + 10)
+    _fm115 = _c115[_i115:_j115] if (_i115 >= 0 and _j115 > _i115) else ''
+    check('v2.115 A① 结构级：finish_map 必须有 _end_state 状态机（0 未点 / 1 已点 / 2 已确认），'
+          '且 `_end_state = 2` 在**确认框点掉后**置位 · 切片=%d 赋值=%d'
+          % (len(_fm115), _fm115.count('_end_state')),
+          _i115 >= 0 and len(_fm115) > 3000 and _fm115.count('_end_state') >= 5)
+    check('v2.116 A② 撤回守门：确认框**必须靠识别**（取消+确定成对 ⇒ 必须点），守卫只能加在 `_ok_lone`（孤零零的确定）上'
+          '（缺一条 ⇒ 就会像真机那样多点一下：confirm_skipped_already / end_skipped_after_confirm）· 守卫=%d'
+          % _fm115.count('_ok_pair is not None'),
+          _fm115.count('_ok_pair is not None') >= 1 and '_ok_lone is not None and _end_state >= 2' in _fm115)
+    check('v2.116 A③ 撤回守门（**假成功出口已删**）：不许再用 `_post_confirm >= 5 ⇒ return True`（idle≥4 会走 unknown_panel_clear'
+          ' ⇒ 万能位盲点 (541,1890) ⇒ 在选图界面上正好点「开始冒险」⇒ 又开一局 ✗）· idle+=1 计数=%d'
+          % _fm115.count('back_to_menu_after_confirm'),
+          _fm115.count('back_to_menu_after_confirm') == 0 and '_post_confirm += 1' in _fm115)
+
+    # ── B① 执行级：打桩跑真 finish_map —— 场景「确认框已点掉，之后又 OCR 到结束冒险」──
+    import explore_loop as _EL115
+    class _FB115(object):
+        """按脚本逐轮喂 OCR；记录所有点击
+
+        ⚠ 必须区分两种 OCR：
+          · tag='pre' ⇒ finish_map **函数内**「等确认框」的窄带 OCR
+          · 其它       ⇒ 外层主循环的全屏 OCR
+        """
+        def __init__(self, rounds, confirm_rounds):
+            self.rounds = list(rounds)
+            self.confirm_rounds = list(confirm_rounds)
+            self.i = -1
+            self.pre = -1
+            self.taps = []
+            self.fast_ok = False
+        def snap(self, tag=''):
+            self.i += 1
+        def ocr(self, min_conf=0.35, band=None, tag='x'):
+            if tag == 'pre':
+                self.pre += 1
+                k = min(max(self.pre, 0), len(self.confirm_rounds) - 1)
+                return self.confirm_rounds[k]
+            k = min(max(self.i, 0), len(self.rounds) - 1)
+            return self.rounds[k]
+        def tap(self, x, y, wait=1.2):
+            self.taps.append((int(x), int(y)))
+            return True
+        def wait_change(self, *a, **k):
+            return True
+        def img(self):
+            return None
+        def ocr_dlg(self, *a, **k):
+            return []
+    def _it(t, cx, cy):
+        return {'text': t, 'cx': cx, 'cy': cy, 'conf': 0.95,
+                'x0': cx - 30, 'y0': cy - 12, 'x1': cx + 30, 'y1': cy + 12}
+    def _run_finish(rounds, confirm_rounds, timeout=20):
+        _bb = _FB115(rounds, confirm_rounds)
+        _s1, _s2 = _EL115.say, _EL115.status
+        _u1, _c1 = _EL115.universal_close, _EL115.close_x_panels
+        _m1 = _EL115._menu_tpl_on
+        _EL115.say = lambda *a, **k: None
+        _EL115.status = lambda *a, **k: None
+        _EL115.universal_close = lambda *a, **k: None
+        _EL115.close_x_panels = lambda *a, **k: 0
+        _EL115._menu_tpl_on = lambda: False
+        _lg = []
+        try:
+            _rc = _EL115.finish_map(_bb, _lg, timeout=timeout)
+        finally:
+            _EL115.say, _EL115.status = _s1, _s2
+            _EL115.universal_close, _EL115.close_x_panels = _u1, _c1
+            _EL115._menu_tpl_on = _m1
+        return _rc, _bb, _lg
+
+    # ── B① v2.116 核心：**停在确认框上不许跳过、不许假报成功** ──
+    #   真机 17:52 那把的还原：面板每一轮都是「提示 + 取消 + 确定」⇒ 必须点确定
+    _cf_round = [_it('结束冒险', 539, 771), _it('提示', 540, 380),
+                 _it('取消', 305, 958), _it('确定', 774, 958)]
+    _rc1, _b1, _l1 = _run_finish([_cf_round] * 6, [[]], timeout=12)
+    _taps1 = _b1.taps
+    _pair_taps = [t for t in _taps1 if abs(t[1] - 958) <= 3 and t[0] > 500]
+    _fake_ok = [r for r in _l1 if isinstance(r, dict)
+                and r.get('finish') in ('back_to_menu_after_confirm',)]
+    # ── B① v2.116 核心：**确认框必须被点掉，且不许假报成功** ──
+    #   ⚠ 夹具必须**每轮画面都变**（点掉后面板消失）——否则 finish_map 会认不出去、
+    #     一路 idle 到 timeout，点击次数自然暴涨（第一版就这么写的，靠 >=1 蒙过去 ✗）
+    _panel = [_it('结束冒险', 539, 771)]
+    _dlg = [_it('提示', 540, 380), _it('取消', 305, 958), _it('确定', 774, 958)]
+    _rc1, _b1, _l1 = _run_finish([_panel, _dlg] + [_panel, _dlg] * 2, [[]], timeout=12)
+    _pair_taps = [t for t in _b1.taps if abs(t[1] - 958) <= 3 and t[0] > 500]
+    _fake = [r for r in _l1 if isinstance(r, dict)
+             and r.get('finish') == 'back_to_menu_after_confirm']
+    # ── B① v2.116 核心：确认框必须被点掉，然后**正常收工**（不许卡、不许假报）──
+    #   ⚠ 夹具必须给出**终止条件**：最后一帧要有选图界面关键字（'快速扫荡'/'进入地图'），
+    #     否则 finish_map 永远认不到出口 ⇒ 一路 idle 到 timeout ⇒ 点击数暴涨 ✗
+    #     （我前两版都没给出口，靠 >=1 蒙过去 / 报 40 万次点击 —— 门禁当场抓出 ✓）
+    _panel = [_it('结束冒险', 539, 771)]
+    _dlg = [_it('提示', 540, 380), _it('取消', 305, 958), _it('确定', 774, 958)]
+    _menu = [_it('快速扫荡', 880, 1500), _it('进入地图', 880, 1200)]
+    _rc1, _b1, _l1 = _run_finish([_panel, _dlg, _menu], [[]], timeout=12)
+    _pair_taps = [t for t in _b1.taps if abs(t[1] - 958) <= 3 and t[0] > 500]
+    _fake = [r for r in _l1 if isinstance(r, dict)
+             and r.get('finish') == 'back_to_menu_after_confirm']
+    check('v2.116 B① 执行级：面板→弹窗→选图界面 三段 ⇒ 「取消+确定」成对 ⇒ **点掉确认框**，'
+          '然后由 back_to_menu 正常收工 · ret=%s 点确定=%d 假成功=%d 总点击=%d'
+          % (_rc1, len(_pair_taps), len(_fake), len(_b1.taps)),
+          _rc1 is True and len(_pair_taps) == 1 and not _fake and len(_b1.taps) <= 3)
+
+    # ── B② 对照项：没有配对取消 ⇒ 孤零零的确定（卡片字）⇒ 已确认后必须跳过 ──
+    _lone = [_it('结束冒险', 537, 771), _it('确定', 774, 958)]
+    # B2 时序必须真：先在函数内点掉确认框（_end_state 1->2），之后孤零零的确定才该被跳过
+    # 第一版直接给 [_panel,_lone,_menu] => 那时 _end_state 还是 1 => 点它合理 => 断言假红
+    _rc2, _b2, _l2 = _run_finish([_panel, _lone, _menu], [_dlg], timeout=12)
+    _skip2 = [r for r in _l2 if isinstance(r, dict)
+              and r.get('finish') == 'confirm_skipped_already']
+    _lone_taps = [t for t in _b2.taps if abs(t[1] - 958) <= 3]
+    #   原话：「第一次点是错的，每次都点不到确认，第二次能稳定点到确认」
+    #   真机铁证（loop5.json 96~100）：
+    #     97 end_confirmed          [773,**726**] ❌ 函数内自己算的坐标，每次都错（差 232px）
+    #     98 confirm_dialog_tapped  [774,**958**] ✅ 外层 _ok_pair（取消配对）算的，稳定命中
+    #   ⇒ 函数内那段**删掉点击、只留感知** ⇒ 整次退图「确定」只点 1 次 ✓
+    _i117 = _c115.find('def finish_map')
+    _j117 = _c115.find(chr(10) + 'def ', _i117 + 10)
+    _fm117 = _c115[_i117:_j117] if (_i117 >= 0 and _j117 > _i117) else ''
+    check('v2.117 A① 撤回守门：finish_map 里**不许**再有 b.tap(ok2[...])（函数内自己点确定）'
+          '—— 那段算的是归一化帧坐标 + 不判是否确认框 ⇒ 每次都点错（真机 726 vs 958）· 命中=%d'
+          % _fm117.count('b.tap(ok2['),
+          _fm117.count('b.tap(ok2[') == 0 and 'end_dialog_seen' in _fm117)
+    check('v2.117 A② 结构级：函数内改成**只感知**（end_dialog_seen），点击统一交给 _ok_pair ·'
+          ' seen=%d pair=%d' % (_fm117.count('end_dialog_seen'), _fm117.count('_ok_pair')),
+          _fm117.count('end_dialog_seen') >= 1 and _fm117.count('_ok_pair') >= 2)
+
+    _panel117 = [_it('结束冒险', 539, 771)]
+    _dlg117 = [_it('提示', 540, 380), _it('取消', 305, 958), _it('确定', 774, 958)]
+    _menu117 = [_it('快速扫荡', 880, 1500), _it('进入地图', 880, 1200)]
+    _rc117, _b117, _l117 = _run_finish([_panel117, _dlg117, _menu117], [[]], timeout=15)
+    _ok_taps = [t for t in _b117.taps if abs(t[1] - 958) <= 3]
+    _paired = [r for r in _l117 if isinstance(r, dict)
+               and r.get('finish') == 'confirm_dialog_tapped'
+               and r.get('paired_cancel') is True]
+    _n_end = len([t for t in _b117.taps if abs(t[1] - 771) <= 3])
+    check('v2.117 B① 执行级：面板→弹窗→选图界面 ⇒ 「确定」**只点 1 次**且来源是 paired_cancel'
+          '（v2.116 前会先点错一个 726 再点对 958）· ret=%s 点确定=%d 配对=%d 点结束=%d 总=%d'
+          % (_rc117, len(_ok_taps), len(_paired), _n_end, len(_b117.taps)),
+          _rc117 is True and len(_ok_taps) == 1 and len(_paired) == 1
+          and _n_end == 1 and len(_b117.taps) == 2)
+
+    _lone117 = [_it('结束冒险', 537, 771), _it('确定', 774, 958)]
+    # 时序必须真：先 panel(状态1) -> dlg(点配对=>状态2) -> lone(孤零零的确定，此时该跳过) -> menu
+    _rc117b, _b117b, _l117b = _run_finish([_panel117, _dlg117, _lone117, _menu117], [[]], timeout=15)
+    _ok_taps_b = [t for t in _b117b.taps if abs(t[1] - 958) <= 3]
+    check('v2.117 B② 执行级·对照项：**无配对取消** ⇒ 不是确认框 ⇒ 确定**一次都不点**'
+          '（那 1 次必须来自 dlg 的 paired_cancel；lone 那次要被跳过）· ret=%s 点确定=%d'
+          % (_rc117b, len(_ok_taps_b)),
+          _rc117b is True and len(_ok_taps_b) == 1
+          and any(r.get('finish') == 'confirm_dialog_tapped' for r in _l117b
+                  if isinstance(r, dict)))
+
+except Exception as _e115:              # noqa: BLE001
+    check('v2.115 守门可运行（%r）' % (_e115,), False)
+print()
+
+print('=' * 78)
+print('⓯ v2.118 退图前补点：战斗格/boss 也要补（按最初语义「点最近点过的那次」）')
+try:
+    _el118 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c118 = chr(10).join([_l for _l in _el118.split(chr(10)) if not _l.lstrip().startswith('#')])
+    _i118 = _c118.find('def final_collect')
+    _j118 = _c118.find(chr(10) + 'def ', _i118 + 10)
+    _fc118 = _c118[_i118:_j118] if (_i118 >= 0 and _j118 > _i118) else ''
+    check('v2.118 A① 撤回守门（剥注释）：战斗格/boss 分支**不许**再 `return 0` 跳过补点'
+          '（真机 loop8 idx67 `collect: fight_skip` ⇒ 用户看到「退图前没补点」✗）· fight_tapped=%d'
+          % _fc118.count('fight_tapped'),
+          _i118 >= 0 and _fc118.count('fight_tapped') >= 1
+          and 'fight_skip' not in _fc118)
+    check('v2.118 A② 结构级：战斗格分支**必须落到** b.tap(pos[0]（即不 return，继续走补点）'
+          ' 且补点后仍有面板收尾（panel_seen/bottom_close + force_unstick）· tap=%d panel=%d'
+          % (_fc118.count('b.tap(pos[0]'), _fc118.count('force_unstick')),
+          _fc118.count('b.tap(pos[0]') == 1 and _fc118.count('force_unstick') >= 1)
+
+    # ── B① 执行级：clicks[-1] 是 boss 格 ⇒ 必须真的点它 ──
+    import explore_loop as _EL118
+    class _FC118(object):
+        def __init__(self, inmap_items, after_items):
+            self.inmap = inmap_items
+            self.after = after_items
+            self.taps = []
+            self.n = 0
+            self.fast_ok = False
+        def snap(self, tag=''):
+            self.n += 1
+        def ocr(self, min_conf=0.35, band=None, tag='x'):
+            return self.inmap if tag == 'pre' else self.after
+        def tap(self, x, y, wait=1.2):
+            self.taps.append((int(x), int(y)))
+            return True
+        def tap_dlg(self, x, y, wait=1.2):
+            self.taps.append((int(x), int(y)))
+            return True
+        def wait_change(self, *a, **k):
+            return True
+        def img(self):
+            return None
+    def _it118(t, cx, cy):
+        return {'text': t, 'cx': cx, 'cy': cy, 'conf': 0.95,
+                'x0': cx - 30, 'y0': cy - 12, 'x1': cx + 30, 'y1': cy + 12}
+    _inmap118 = [_it118('无声沼泽[100]', 540, 170), _it118('结束冒险', 539, 771)]
+    _after118 = [_it118('无声沼泽[100]', 540, 170)]
+    _b118 = _FC118(_inmap118, _after118)
+    _st118 = {'clicked': [(396, 1506)], 'marks': {(4, 3): ['boss']},
+              'st': {(4, 3): {'sid': 'S21001_102'}}, 'obs': {}, 'slots_free': 0}
+    _s1a, _s2a = _EL118.say, _EL118.status
+    _EL118.say = lambda *a, **k: None
+    _EL118.status = lambda *a, **k: None
+    _lg118 = []
+    try:
+        _n118 = _EL118.final_collect(_b118, _lg118, _st118)
+    finally:
+        _EL118.say, _EL118.status = _s1a, _s2a
+    _ft118 = [r for r in _lg118 if isinstance(r, dict) and r.get('collect') == 'fight_tapped']
+    check('v2.118 B① 执行级：clicks[-1] 是 **boss 格** ⇒ 必须**真的点它**'
+          '（改前 return 0 一下都不点）· 返回=%s 点击=%r fight_tapped=%d'
+          % (_n118, _b118.taps, len(_ft118)),
+          len(_b118.taps) >= 1 and _b118.taps[0] == (396, 1506) and len(_ft118) == 1)
+
+    # ── B② 对照项：紫格仍必须跳过（别把 v1.63 的保护改没了）──
+    _st118b = {'clicked': [(396, 1506)], 'marks': {},
+               'st': {(4, 3): {'sid': 'S21001_221'}}, 'obs': {}, 'slots_free': 2}
+    _b118b = _FC118(_inmap118, _after118)
+    try:
+        _EL118.say = lambda *a, **k: None
+        _EL118.status = lambda *a, **k: None
+        _n118b = _EL118.final_collect(_b118b, [], _st118b)
+    finally:
+        _EL118.say, _EL118.status = _s1a, _s2a
+    check('v2.118 B② 执行级·对照项：**紫/橙探索格**（suffix 221 + 有空闲槽）⇒ 仍必须**跳过补点**'
+          '（v1.63 的保护不能被这次改动带坏）· 返回=%s 点击=%r'
+          % (_n118b, _b118b.taps),
+          _n118b == 0 and not _b118b.taps)
+except Exception as _e118:             # noqa: BLE001
+    import traceback as _tb118
+    check('v2.118 守门可运行（%r） TRACE=%s'
+          % (_e118, _tb118.format_exc()[-600:].replace(chr(10), ' | ')), False)
+print()
+
+
+print('=' * 78)
+print('⓯ v2.120 补点：记录必须落盘 + 要有**具体点击**日志（at/cell/changed）')
+try:
+    _el120 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c120 = chr(10).join([_l for _l in _el120.split(chr(10)) if not _l.lstrip().startswith('#')])
+    _i120 = _c120.find('def final_collect')
+    _j120 = _c120.find(chr(10) + 'def ', _i120 + 10)
+    _fc120 = _c120[_i120:_j120] if (_i120 >= 0 and _j120 > _i120) else ''
+    check('v2.120 A① 结构级：final_collect 必须记 **tap_exec**（at/cell/sid/changed/diff）'
+          '—— 用户要求「要有具体点击的日志，方便查」· tap_exec=%d'
+          % _fc120.count('tap_exec'),
+          _i120 >= 0 and _fc120.count('tap_exec') >= 1
+          and '"changed"' in _fc120)
+    # 两个出口都必须 flush
+    _i121 = _c120.find("final_collect(b, log, st)      # ⭐ 退出前固定补点")
+    _i122 = _c120.find("    final_collect(b, log, st)" + chr(10) + "    flush(log)")
+    check('v2.120 A② 撤回守门：**两个出口**在 final_collect 之后都必须 flush(log)'
+          '（否则 collect:* 只在内存里，loop_log.json 查不到 —— 本项目查了很久的坑 ✗）· 出口1=%d 出口2=%d'
+          % (_el120.count('flush(log)      # v2.120'), _i122),
+          _el120.count('flush(log)      # v2.120') >= 1 and _i122 >= 0)
+
+    import explore_loop as _EL120
+    if not hasattr(_EL120, 'final_collect'):
+        skip('v2.120 B① 执行级：final_collect 不存在')
+    else:
+        class _FC120(object):
+            def __init__(self):
+                self.taps = []
+                self.last_change = {'changed': True, 'dim': 1.0}
+            def snap(self, tag=''):
+                pass
+            def ocr(self, min_conf=0.35, band=None, tag='x'):
+                return [{'text': '无声沼泽[100]', 'cx': 540, 'cy': 170, 'conf': 0.95,
+                         'x0': 510, 'y0': 158, 'x1': 570, 'y1': 182}]
+            def tap(self, x, y, wait=1.2):
+                self.taps.append((int(x), int(y)))
+                return True
+            def img(self):
+                return None
+        _b120 = _FC120()
+        _st120 = {'clicked': [(396, 1506)], 'marks': {(4, 3): ['boss']},
+                  'st': {(4, 3): {'sid': 'S21001_102'}}, 'obs': {}, 'slots_free': 0}
+        _s1c, _s2c = _EL120.say, _EL120.status
+        _EL120.say = lambda *a, **k: None
+        _EL120.status = lambda *a, **k: None
+        _lg120 = []
+        try:
+            _n120 = _EL120.final_collect(_b120, _lg120, _st120)
+        finally:
+            _EL120.say, _EL120.status = _s1c, _s2c
+        _te = [r for r in _lg120 if isinstance(r, dict) and r.get('collect') == 'tap_exec']
+        check('v2.120 B① 执行级：boss 格补点 ⇒ 必须有 tap_exec 记录，且 at 与真正点的坐标一致 ·'
+              ' 点击=%r tap_exec=%d 记录=%s'
+              % (_b120.taps, len(_te), json.dumps(_te[0], ensure_ascii=False)[:120] if _te else None),
+              len(_te) == 1 and _te[0].get('at') == [396, 1506]
+              and _te[0].get('changed') is True and _te[0].get('cell') == '4,3')
+
+        # ── B② 对照项：紫格跳过 ⇒ 不能有 tap_exec（证明 tap_exec 只记录真点）──
+        _b120b = _FC120()
+        _st120b = {'clicked': [(396, 1506)], 'marks': {},
+                   'st': {(4, 3): {'sid': 'S21001_221'}}, 'obs': {}, 'slots_free': 2}
+        try:
+            _EL120.say = lambda *a, **k: None
+            _EL120.status = lambda *a, **k: None
+            _n120b = _EL120.final_collect(_b120b, [], _st120b)
+        finally:
+            _EL120.say, _EL120.status = _s1c, _s2c
+        check('v2.120 B② 执行级·对照项：紫格跳过补点 ⇒ **不许**有 tap_exec、也不许点击 ·'
+              ' 返回=%s 点击=%r' % (_n120b, _b120b.taps),
+              _n120b == 0 and not _b120b.taps)
+except Exception as _e120:             # noqa: BLE001
+    import traceback as _tb120
+    check('v2.120 守门可运行（%r） TRACE=%s'
+          % (_e120, _tb120.format_exc()[-600:].replace(chr(10), ' | ')), False)
+print()
+
+
+print('=' * 78)
+print('⓯ v2.121 点成功就记 done（治「同一批格跨轮反复点」）')
+try:
+    _el121 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _c121 = chr(10).join([_l for _l in _el121.split(chr(10)) if not _l.lstrip().startswith('#')])
+    # 锚点必须落在**条件**上，不能落在 done_after_success 上
+    #（那是 log.append 里的字符串，条件在它**前面** ⇒ 窗口取不到 ⇒ 假红）
+    _i121 = _c121.find('if (changed is not False and (cx, cy) not in marked_px')
+    _seg121 = _c121[_i121:_i121 + 700] if _i121 >= 0 else ''
+    check('v2.121 A① 结构级：点成功（changed is not False）且非标记/非商人格 ⇒ **必须记 done**'
+          '（否则下一轮计划把它算回来 ⇒ 再点一遍；真机 r0 点 4 格、r1 又点 3 格 ✗）· 位置=%d'
+          % _i121,
+          _i121 >= 0 and 'changed is not False' in _seg121 and 'done.add' in _seg121)
+    check('v2.121 A② 撤回守门：这条**必须排除 marked_px / buy_px**'
+          '（boss 可能要打两次、商人买完贴图仍在，立刻 done 会把后续步骤全跳过 ✗）· 排除=%d'
+          % (_seg121.count('marked_px') + _seg121.count('buy_px')),
+          _seg121.count('marked_px') >= 1 and _seg121.count('buy_px') >= 1)
+    check('v2.121 A③ 撤回守门：旧的 `cold >= 2` 规则**必须保留**（点了两次没反应的仍然拉黑）· 计数=%d'
+          % _c121.count('cold[(cx, cy)] >= 2'),
+          _c121.count('cold[(cx, cy)] >= 2') >= 1)
+except Exception as _e121:             # noqa: BLE001
+    import traceback as _tb121
+    check('v2.121 守门可运行（%r） TRACE=%s'
+          % (_e121, _tb121.format_exc()[-500:].replace(chr(10), ' | ')), False)
+print()
+
+
+print('=' * 78)
+print('⓯ v2.122 雾格的内容格（限时礼包等）也能进计划')
+try:
+    import targets_cfg as _T122
+    check('v2.122 A① 结构级：必须存在雾格专用门槛 FOGGED_NAME_SCORE_MIN，且比 NAME_SCORE_MIN 低'
+          '（雾把 NCC 压低 0.1~0.15）· NAME=%s FOGGED=%s'
+          % (getattr(_T122, 'NAME_SCORE_MIN', None),
+             getattr(_T122, 'FOGGED_NAME_SCORE_MIN', None)),
+          hasattr(_T122, 'FOGGED_NAME_SCORE_MIN')
+          and _T122.FOGGED_NAME_SCORE_MIN < _T122.NAME_SCORE_MIN)
+    check('v2.122 A② 结构级：is_target 必须接受 revealed 形参（否则分不了档）· 签名=%s'
+          % (str(__import__('inspect').signature(_T122.is_target))[:90],),
+          'revealed' in __import__('inspect').signature(_T122.is_target).parameters)
+
+    # ── B① 执行级：用真帧真模块，断言礼包进计划 ──
+    _fx122 = os.path.join(PROJ, '_verify', 'gift_fog_S21001.png')
+    if not os.path.exists(_fx122):
+        skip('v2.122 B① 执行级：真帧 fixture 缺失（_verify/gift_fog_S21001.png）')
+    else:
+        import cv2 as _cv122
+        import spots as _SP122, marks as _MK122
+        import mapsim as _MS122, mapsolve as _MV122
+        _img122 = _cv122.imread(_fx122)
+        _cells122 = _SP122.Board('S21001').state(_img122)
+        _mk122 = _MK122.scan_board_fast(_img122)
+        _st122 = {'obs': {k: dict(v) for k, v in _cells122.items()},
+                  'marks': _mk122, 'nogo_rc': set(), 'done': set()}
+        _c122 = {'st': _cells122, 'marks': _mk122,
+                 'buy': set(), 'buy_hidden': set()}
+        _mg122 = _EL120._cells_for_model(_st122, _c122, log=[], tag='v2122',
+                                         mark_revealed=False)
+        _gift122 = _mg122.get((1, 7)) or {}
+        _sim122 = _MS122.MapSim.from_observation(_mg122, _SP122.spot_rows())
+        _pr122 = _MV122.Problem(_sim122)
+        _cost122, _plan122 = _MV122.solve(_pr122, max_states=60000, max_secs=8, report={})
+        _ord122 = [tuple(rc) for rc, _b, _w in _pr122.cells_for_plan(_plan122 or [])]
+        check('v2.122 B① 执行级（真帧）：雾里的限时礼包 (1,7) 必须 target=True 且**进计划**'
+              '（改前 score 0.794 < 0.85 ⇒ 被丢）· target=%s score=%s order=%s'
+              % (_gift122.get('target'), _gift122.get('score'), _ord122),
+              _gift122.get('target') is True and (1, 7) in _ord122)
+
+        # ── B② 对照项：v1.78 那个真事故（score 0.441）必须仍被挡住 ──
+        check('v2.122 B② 执行级·对照项：雾格 score **0.441**（v1.78 真事故：认成礼包实为巨大沙堡）'
+              '必须仍判 False —— 否则门槛等于没设 · 0.441→%s 0.794→%s'
+              % (_T122.is_target('限时礼包', 'S21001_014', None, score=0.441, revealed=False),
+                 _T122.is_target('限时礼包', 'S21001_014', None, score=0.794, revealed=False)),
+              _T122.is_target('限时礼包', 'S21001_014', None, score=0.441, revealed=False) is False
+              and _T122.is_target('限时礼包', 'S21001_014', None, score=0.794, revealed=False) is True)
+
+        # ── B③ 对照项：已揭示格门槛不变（0.794 仍不够 0.85）──
+        check('v2.122 B③ 执行级·对照项：**已揭示**格仍用 0.85 ⇒ score 0.794 必须 False'
+              '（新门槛只对雾格生效，别放宽已揭示格）· 0.794→%s'
+              % (_T122.is_target('限时礼包', 'S21001_014', None, score=0.794, revealed=True),),
+              _T122.is_target('限时礼包', 'S21001_014', None, score=0.794, revealed=True) is False)
+except Exception as _e122:             # noqa: BLE001
+    import traceback as _tb122
+    check('v2.122 守门可运行（%r） TRACE=%s'
+          % (_e122, _tb122.format_exc()[-600:].replace(chr(10), ' | ')), False)
+print()
+
+print('=' * 78)
+print('⓰ v2.123 装备升星三修：①停止位 ②正面证据开背包 ③页签不许盲点')
+try:
+    import numpy as _np123
+    import explore_loop as _EL123
+    _src123 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+
+    def _core123(t):
+        return chr(10).join([_ln for _ln in t.split(chr(10))
+                             if not _ln.strip().startswith('#')])
+
+    def _slice123(a, b):
+        i = _src123.find(a)
+        if i < 0:
+            return ''
+        j = _src123.find(b, i + 1)
+        return _src123[i:j] if j > i else ''
+
+    _bag123 = _slice123('def bag_upgrade(', 'def fb(items, *labels):')
+    _bag123c = _core123(_bag123)
+    _back123 = _core123(_slice123('def _back_to_map(', 'def bag_upgrade('))
+    _ev123 = _slice123('def _bag_open_evidence(', 'def _img_diff(')
+    _ev123c = _core123(_ev123)
+    _sw123 = _core123(_slice123('def _bag_switch_tab(', 'def _close_bag('))
+    check('v2.123 A① 结构：bag_upgrade 每一步前都有停止位（事故前整段一次都没有 ⇒ 点 ■ 后再也停不下来）· stop_checked %d 次'
+          % (_bag123.count('stop_checked('),),
+          _bag123.count('stop_checked(') >= 5)
+    check('v2.123 A② 结构：_back_to_map 循环内也查停止位（否则收尾连点 5 次「开始冒险」停不下来）· %s'
+          % ('有' if ('if stop_requested():' in _back123 and 'back_stopped' in _back123) else '缺',),
+          'if stop_requested():' in _back123 and 'back_stopped' in _back123)
+    check('v2.123 A③ 结构：升星改用严格判据 _bag_open_evidence，且**不再**用宽松的 _bag_panel_open 判开背包（宽松那条把公会大厅认成背包）· %s'
+          % ('OK' if ('_op, _how = _bag_open_evidence(b, items)' in _bag123c
+                       and '_bag_panel_open(' not in _bag123c) else '缺',),
+          '_op, _how = _bag_open_evidence(b, items)' in _bag123c
+          and '_bag_panel_open(' not in _bag123c)
+    check('v2.123 A④ 结构：_bag_open_evidence 里**颜色不再是判据**（老判据 fr >= BAG_PANEL_THR 就是事故主因）· 出现 %d 次'
+          % (_ev123c.count('BAG_PANEL_THR'),),
+          _ev123c.count('BAG_PANEL_THR') == 0
+          and 'text:%s' in _ev123 and 'tpl:%s' in _ev123)
+    check('v2.123 A⑤ 倒向守门：_bag_panel_open **没被顺手改坏**（它还负责「关背包/补给」——那里判错只少点一次 X，宽松是对的）· %s'
+          % ('有 OK' if 'if fr >= BAG_PANEL_THR:' in _core123(_slice123(
+              'def _bag_panel_open(', 'def _bag_open_evidence(')) else '缺',),
+          'if fr >= BAG_PANEL_THR:' in _core123(_slice123(
+              'def _bag_panel_open(', 'def _bag_open_evidence(')))
+    check('v2.123 A⑥ 结构：_bag_switch_tab 有 allow_anchor 开关，且锚点分支被它挡住（if _pt and allow_anchor）· %s'
+          % ('OK' if ('allow_anchor=True' in _sw123
+                      and 'if _pt and allow_anchor:' in _sw123) else '缺',),
+          'allow_anchor=True' in _sw123 and 'if _pt and allow_anchor:' in _sw123)
+    check('v2.123 A⑦ 结构：升星切页签时传 allow_anchor=False · %s'
+          % ('OK' if "_bag_switch_tab(b, '装备', log=log, tag=tag, allow_anchor=False)" in _bag123 else '缺',),
+          "_bag_switch_tab(b, '装备', log=log, tag=tag, allow_anchor=False)" in _bag123)
+    check('v2.123 A⑧ 撤回归档守门：升星里**不再**出现 BAG_TAB_DLG 盲点坐标（已先把 // 与 # 整行注释剥掉再查，否则注释里的名字会假红）· %s'
+          % ('OK' if "BAG_TAB_DLG.get('装备'" not in _bag123c else '仍残留',),
+          "BAG_TAB_DLG.get('装备'" not in _bag123c)
+
+    class _B123(object):
+        """升星流程打桩：brown ⇒ img() 造一帧「大片棕色」(= 公会大厅那种)，没有 OCR 文字"""
+
+        def __init__(self, brown=True, dlg_items=None, tap_ok=True):
+            self.taps = []
+            self._brown = brown
+            self._dlg_items = dlg_items
+            self.tap_ok = tap_ok
+
+        def img(self):
+            if not self._brown:
+                return None
+            a = _np123.zeros((1920, 1080, 3), _np123.uint8)
+            a[:, :, 0] = 60
+            a[:, :, 1] = 100
+            a[:, :, 2] = 150
+            return a
+
+        def img_dlg(self):
+            return self.img()
+
+        def ocr_dlg(self, tag=None):
+            return list(self._dlg_items or [])
+
+        def ocr(self, tag=None, band=None):
+            return []
+
+        def tap(self, x, y, wait=0.0):
+            self.taps.append((int(x), int(y)))
+            return self.tap_ok
+
+        def tap_dlg(self, x, y, wait=0.0):
+            self.taps.append(('dlg', int(x), int(y)))
+            return self.tap_ok
+
+        def snap(self, tag=None):
+            return None
+
+    _guild123 = [{'text': t} for t in ('PID:222025', 'Ver:1.2.3.0', '5650370',
+                                       '48748', '1195', '兑换商店开启', '计', '05:53:41')]
+    _b123a = _B123()
+    _op123a, _how123a = _EL123._bag_open_evidence(_b123a, _guild123)
+    check('v2.123 B①(b) 执行级：公会大厅那帧**必须判没开**（事故原话：panel-color 0.91 就判开了 ⇒ 后面三处盲点）· %s / %s'
+          % (_op123a, _how123a),
+          _op123a is False)
+    _old123, _oldhow123 = _EL123._bag_panel_open(_b123a, _guild123)
+    check('v2.123 B①(b-2) 对照项：同一帧喂**旧判据** _bag_panel_open 必须判开（证明 B①(b) 抓的是真缺陷、不是恒假）· %s / %s'
+          % (_old123, _oldhow123),
+          _old123 is True)
+    _op123c, _how123c = _EL123._bag_open_evidence(_B123(False), [{'text': '装备'}])
+    _c123saved = _EL123._DLGS.get('C')
+    _EL123._DLGS['C'] = 209.0
+    try:
+        _op123d, _how123d = _EL123._bag_open_evidence(_B123(False, [{'text': '素材'}]), [])
+    finally:
+        _EL123._DLGS['C'] = None
+    check('v2.123 B①(c) 执行级：正面证据两条通道都要能判开（归一化帧文字 / 弹窗帧文字）· text=%s / dlg=%s'
+          % ((_op123c, _how123c), (_op123d, _how123d)),
+          _op123c is True and _op123d is True)
+
+    _EL123._DLGS['C'] = 209.0
+    try:
+        _b123e = _B123(False)
+        _ok123e = _EL123._bag_switch_tab(_b123e, '装备', [], 't123', True)
+        _n123e = len(_b123e.taps)
+        _b123f = _B123(False)
+        _ok123f = _EL123._bag_switch_tab(_b123f, '装备', [], 't123', False)
+        _n123f = len(_b123f.taps)
+    finally:
+        _EL123._DLGS['C'] = None
+    check('v2.123 B② 执行级：allow_anchor=False ⇒ 认不到页签时**零点击**（事故就是这里盲点 (345,315)）· 允许=%s/%d 下 禁止=%s/%d 下'
+          % (_ok123e, _n123e, _ok123f, _n123f),
+          _n123e >= 1 and _ok123e is True and _n123f == 0 and _ok123f is False)
+
+    _EL123._ANDROID_STOP = True
+    try:
+        _b123g = _B123(False)
+        _lg123 = []
+        _r123g = _EL123._back_to_map(_b123g, _lg123, 't123', [], 5)
+        _n123g = len(_b123g.taps)
+    finally:
+        _EL123._ANDROID_STOP = False
+    check('v2.123 C① 执行级：收到停止 ⇒ _back_to_map 返回 False 且**零点击**（用户：「升星过程中怎么还不能停止？？」）· ret=%s taps=%d'
+          % (_r123g, _n123g),
+          _r123g is False and _n123g == 0)
+    _b123h = _B123(False)
+    _r123h = _EL123._back_to_map(_b123h, [], 't123', [], 5)
+    check('v2.123 C①(对照) 没有停止位时 _back_to_map 照常点「开始冒险」（证明 C① 不是恒真）· ret=%s taps=%d'
+          % (_r123h, len(_b123h.taps)),
+          len(_b123h.taps) >= 1)
+except Exception as _e123:              # noqa: BLE001
+    import traceback as _tb123
+    check('v2.123 守门可运行（%r） TRACE=%s'
+          % (_e123, _tb123.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('=' * 78)
+print('⓱ v2.125 进图第一次规划就要把宝库排进去（雾格 + 领先度通道，只管商人/宝库）')
+try:
+    import targets_cfg as _T125
+    import inspect as _insp125
+    _src125 = io.open(os.path.join(MAPBOT, 'targets_cfg.py'), encoding='utf-8').read()
+    _el125 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+
+    def _core125(t):
+        return chr(10).join([_ln for _ln in t.split(chr(10))
+                             if not _ln.strip().startswith('#')])
+
+    _c125 = _core125(_src125)
+    _e125c = _core125(_el125)
+    check('v2.125 A① 结构：is_target 必须接受 top 形参（否则领先度拿不到数据 —— 本项目第 N 次「判据装好了但拿不到数据」）· 签名=%s'
+          % (str(_insp125.signature(_T125.is_target))[:80],),
+          'top' in _insp125.signature(_T125.is_target).parameters)
+    check('v2.125 A② 结构：调用点真的把 top 传下去了（只加形参不传参 = 静默失效）· %s'
+          % ('有' if ('top=_vv.get(' + chr(39) + 'top' + chr(39) + ')') in _e125c else '缺',),
+          ('top=_vv.get(' + chr(39) + 'top' + chr(39) + ')') in _e125c)
+    check('v2.125 A③ 守门：放行只对商人/宝库开（_is_buy_out_name 存在且被调用）—— 其它特殊方块误报要打一整座沙堡 4 场战斗 · def %d / call %d'
+          % (_c125.count('def _is_buy_out_name('), _c125.count('_is_buy_out_name(')),
+          _c125.count('def _is_buy_out_name(') >= 1
+          and _c125.count('_is_buy_out_name(') >= 2)
+    check('v2.125 A④ 守门：已揭示格（revealed=True）不走领先度通道（雾才需要这条；亮格继续用 0.85 严判）· %s'
+          % ('有' if 'revealed is False' in _c125 else '缺',),
+          'revealed is False' in _c125)
+
+    # ── B① 执行级：复现 18:16 第二张图进图那帧（黄金宝库 fog 0.624 / 领先 0.344）──
+    _tt125 = [(0.624, 'S21001_016'), (0.618, 'S21001_016'), (0.617, 'S21001_016'),
+              (0.28, 'S21001_014'), (0.274, 'S21001_202')]
+    _r125a = _T125.is_target('黄金宝库', 'S21001_016', [],
+                             score=0.624, revealed=False, top=_tt125)
+    check('v2.125 B① 执行级：复现 18:16 那格（黄金宝库 fog 0.624 / 领先 0.344）=> 必须判**是目标**（否则第一次规划照样漏掉它）· %r'
+          % (_r125a,), _r125a is True)
+    _r125b = _T125.is_target('限时礼包', 'S21001_014', [], score=0.441, revealed=False,
+                             top=[(0.441, 'S21001_014'), (0.101, 'S21001_001')])
+    check('v2.125 B② 守门：限时礼包同样雾格、同样领先 0.34 => 必须**仍被拦**（证明不是「一放宽全放宽」）· %r'
+          % (_r125b,), _r125b is False)
+    _r125c = _T125.is_target('黄金宝库', 'S21001_016', [], score=0.303, revealed=False,
+                             top=[(0.303, 'S21001_016'), (0.262, 'S21001_001')])
+    check('v2.125 B③ 对照项：真机语料里那种假宝库（0.303 / 领先 0.041）必须**仍被拦**（28 个误报里最大领先度只有 0.081）· %r'
+          % (_r125c,), _r125c is False)
+    _r125d = _T125.is_target('黄金宝库', 'S21001_016', [], score=0.624, revealed=True, top=_tt125)
+    check('v2.125 B④ 守门：**已揭示**的宝库分数不够仍必须拦（lead 通道只管雾格）· %r'
+          % (_r125d,), _r125d is False)
+    _r125e = _T125.is_target('黄金宝库', 'S21001_016', [], score=0.624, revealed=False, top=None)
+    check('v2.125 B⑤ fail-open：拿不到 top => 退回旧行为（少放行，不是多放行）· %r'
+          % (_r125e,), _r125e is False)
+    _lm125 = _T125._lead_margin([(0.62, 'A'), (0.61, 'A'), (0.28, 'B')])
+    check('v2.125 B⑥ 执行级：领先度只跟**不同的模板**比（同一模板的其他摆放位不算「另一个答案」）· 0.62/0.61(A) vs 0.28(B) => %.3f'
+          % (_lm125,), abs(_lm125 - 0.34) < 1e-06)
+except Exception as _e125:              # noqa: BLE001
+    import traceback as _tb125
+    check('v2.125 守门可运行（%r） TRACE=%s'
+          % (_e125, _tb125.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+
+print('=' * 78)
+print('⓰ v2.126 首步点雾格的真正来源：选格判据没认「观测里已亮的块」')
+try:
+    _ms126 = io.open(os.path.join(MAPBOT, 'mapsolve.py'), encoding='utf-8').read()
+    _c126 = chr(10).join([_l for _l in _ms126.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+    _i126 = _c126.find('def block_revealed(')
+    _j126 = _c126.find(chr(10) + '    def ', _i126 + 10)
+    _br126 = _c126[_i126:_j126] if (_i126 >= 0 and _j126 > _i126) else ''
+    check('v2.126 A① 结构：block_revealed 必须承认「观测里已亮的块本来就点得动」'
+          '（它一直只做纯邻接推演 ⇒ 候选集 visible() 用 obs_lit 放行、选格这边不认 ⇒ 不同源）· 切片=%d'
+          % (len(_br126),),
+          _i126 >= 0 and "_lit_now(self.blocks.get(bi))" in _br126)
+    _i126b = _c126.find('EMPTY_ADJ |= bit[nb]')
+    _nb126c = _c126[max(0, _i126b - 700):_i126b] if _i126b >= 0 else ''
+    check('v2.126 A② 结构：EMPTY_ADJ 只收「观测里已亮的块」'
+          '（原来是逐格判 ⇒ 同一片草丛里另一格自己没挨营地就被当「已连锁吃掉」⇒ 雾块被误判成开局已揭示）· 位置=%d'
+          % (_i126b,),
+          _i126b >= 0 and "not getattr(_nb126, 'observed', False)" in _nb126c)
+    _i126c = _c126.find('if pick is None:')
+    check('v2.126 A③ 撤回守门：cells_for_plan 的 `pick = cells[0]` 兜底**保持 PC 原样不许动**'
+          '（v1.61 已实证：改它会破坏揭示链推演；真缺口在判据本身，不在兜底）· 兜底=%d'
+          % (_c126.count('pick = cells[0]'),),
+          _c126.count('pick = cells[0]') == 1)
+
+    # ── B① 执行级：真机帧（无声沼泽 map 24 进图那帧）首步必须是「观测已亮」的格 ──
+    import cv2 as _cv126
+    import spots as _SP126, marks as _MK126
+    import explore_loop as _EL126, mapsim as _MS126, mapsolve as _MV126
+    _fr126 = os.path.join(PROJ, '_verify', 'fog_block_S21001.png')
+    if not os.path.exists(_fr126):
+        skip('v2.126 B① 执行级：真帧 fixture 缺失（_verify/fog_block_S21001.png）')
+    else:
+        _img126 = _cv126.imread(_fr126)
+        _cells126 = _SP126.Board('S21001').state(_img126)
+        _mk126 = _MK126.scan_board_fast(_img126)
+        _cd126 = {'st': _cells126, 'marks': _mk126, 'buy': set(), 'buy_hidden': set()}
+        _st126 = {'obs': {}, 'marks': _mk126, 'nogo_rc': set(), 'done': set()}
+        _mg126 = _EL126._cells_for_model(_st126, _cd126, log=[], tag='v2126',
+                                         mark_revealed=False)
+        _sim126 = _MS126.MapSim.from_observation(_mg126, _SP126.spot_rows())
+        _pr126 = _MV126.Problem(_sim126)
+        _cost126, _plan126 = _MV126.solve(_pr126, max_states=60000, max_secs=8, report={})
+        _cp126 = _pr126.cells_for_plan(_plan126 or [])
+        _ord126 = [tuple(rc) for rc, _bi, _w in _cp126]
+        _fo126 = bool(getattr(_pr126.blocks.get(_cp126[0][1]) if _cp126 else None,
+                              'observed', True))
+        check('v2.126 B① 执行级（真机帧）：无声沼泽首步必须是**观测已亮**的格 -- 22:15 真机首步是'
+              ' `2,3`（雾）⇒ `tap: fogged_noop` ⇒ 连唯一目标 `1,1` 一起被 `give_up_step` 摘掉'
+              ' · cost=%s order=%s 首步observed=%s' % (_cost126, _ord126, _fo126),
+              _cost126 == 12 and _ord126 == [(1, 5), (1, 4), (1, 3), (1, 1)]
+              and _fo126 is True)
+
+        # ── B② 对照项：剥掉 v2.126 两条 ⇒ 必须复现事故那版计划（证明 B① 不是恒真）──
+        import types as _t126
+        _patJ126 = ('        if _lit_now(self.blocks.get(bi)):' + chr(10)
+                    + '            return True' + chr(10))
+        _patI126 = ('                _nb126 = prob.blocks.get(nb)' + chr(10)
+                    + '                if _nb126 is not None and not getattr(_nb126, '
+                    + chr(39) + 'observed' + chr(39) + ', False):' + chr(10)
+                    + '                    continue' + chr(10))
+        _old126 = _ms126.replace(_patJ126, '').replace(_patI126, '')
+        if _old126 == _ms126:
+            check('v2.126 B② 对照项：无法剥掉 v2.126 两条（锚点未命中）—— 请同步更新夹具', False)
+        else:
+            _mod126 = _t126.ModuleType('mapsolve_old126')
+            _mod126.__dict__['__file__'] = _MV126.__file__
+            exec(compile(_old126, _MV126.__file__, 'exec'), _mod126.__dict__)
+            _pr126b = _mod126.Problem(_MS126.MapSim.from_observation(
+                _mg126, _SP126.spot_rows()))
+            _c126b, _p126b = _mod126.solve(_pr126b, max_states=60000, max_secs=8, report={})
+            _cp126b = _pr126b.cells_for_plan(_p126b or [])
+            _ord126b = [tuple(rc) for rc, _bi, _w in _cp126b]
+            _fo126b = bool(getattr(_pr126b.blocks.get(_cp126b[0][1]) if _cp126b else None,
+                                   'observed', True))
+            check('v2.126 B② 执行级·对照项：**剥掉 v2.126 两条** ⇒ 必须回到事故那版'
+                  ' order=[(2,3),(1,1)]、首步 observed=False（否则 B① 恒真）'
+                  ' · cost=%s order=%s 首步observed=%s' % (_c126b, _ord126b, _fo126b),
+                  _c126b == 12 and _ord126b == [(2, 3), (1, 1)] and _fo126b is False)
+
+    # ── C① 守门：obs_lit 那条「地板说是雾 ⇒ 不许放行」的否决仍在（别被本条顺手改坏）──
+    check('v2.126 C① 守门：obs_lit 掩码里的 `floor_lit is False` 否决仍在'
+          '（观测说亮、地板说是雾 ⇒ 仍剔掉；本条只加放行方向，不动否决方向）· 出现=%d'
+          % (_c126.count(chr(39) + 'floor_lit' + chr(39) + ') is False'),),
+          (chr(39) + 'floor_lit' + chr(39) + ') is False') in _c126)
+except Exception as _e126:              # noqa: BLE001
+    import traceback as _tb126
+    check('v2.126 守门可运行（%r） TRACE=%s'
+          % (_e126, _tb126.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print('=' * 78)
+print('v2.127 手机端与 PC 口径对齐：片内挑格先挑「点得动的格」+ 判据收成 _lit_now')
+try:
+    _ms127 = io.open(os.path.join(MAPBOT, 'mapsolve.py'), encoding='utf-8').read()
+    _c127 = chr(10).join([_l for _l in _ms127.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+
+    # A1 结构级：单一判据 _lit_now 必须存在，判据 = observed + 地板否决
+    _i127 = _c127.find('def _lit_now(')
+    _j127 = _c127.find(chr(10) + 'def ', _i127 + 10)
+    _fn127 = _c127[_i127:_j127] if (_i127 >= 0 and _j127 > _i127) else ''
+    check('v2.127 A1 结构级：必须存在单一判据 _lit_now（observed + 地板否决）——'
+          ' 本项目第六次同族病「判据不同源」：候选集用 obs_lit、挑格/排序用裸 observed'
+          ' · 切片=%d' % (len(_fn127),),
+          _i127 >= 0
+          and "getattr(b, 'observed', False)" in _fn127
+          and (chr(39) + 'floor_lit' + chr(39) + ') is not False') in _fn127)
+
+    # A2 结构级：三处调用点都必须读同一个判据
+    _br127 = _c127.find('def block_revealed(')
+    _br127e = _c127.find(chr(10) + '    def ', _br127 + 10)
+    _brb127 = _c127[_br127:_br127e] if (_br127 >= 0 and _br127e > _br127) else ''
+    _ipick127 = _c127.find('            pick = None')
+    _ipick127e = _c127.find('out.append((rc_of(pick), bi, w))', _ipick127)
+    _pick127 = (_c127[_ipick127:_ipick127e]
+                if (_ipick127 >= 0 and _ipick127e > _ipick127) else '')
+    _isort127 = _c127.find('out.sort(key=lambda _t:')
+    _sort127 = _c127[_isort127:_isort127 + 120] if _isort127 >= 0 else ''
+    check('v2.127 A2 结构级：三处（block_revealed 快路径 / 片内挑格 / 步序排序）'
+          '必须都读 _lit_now（PC 的 cells_for_plan 是两段式：先挑 observed 格、'
+          '挑不到再退回邻接推演）· 早退=%d 挑格=%d 排序=%d'
+          % (_brb127.count('_lit_now'), _pick127.count('_lit_now'),
+             _sort127.count('_lit_now')),
+          '_lit_now(self.blocks.get(bi))' in _brb127
+          and _pick127.count('_lit_now') >= 1
+          and '_lit_now' in _sort127)
+
+    # A3 撤回守门：片内挑格仍保留 PC 那句「挑不到就退回邻接推演」
+    check('v2.127 A3 撤回守门：片内挑格只加放行、不删退路 ——'
+          ' _lit_now 之后必须有 if pick is None: + block_revealed 那段（PC 原样两段式）· 段=%d'
+          % (_pick127.count('block_revealed'),),
+          'if pick is None:' in _pick127
+          and 'block_revealed' in _pick127)
+
+    # A4 撤回守门：pick = cells[0] 兜底保持 PC 原样
+    check('v2.127 A4 撤回守门：cells_for_plan 的 pick = cells[0] 兜底仍未被动 · 兜底=%d'
+          % (_c127.count('pick = cells[0]'),),
+          _c127.count('pick = cells[0]') == 1)
+
+    # A5 守门：判据必须从 spot 读 floor_lit
+    check('v2.127 A5 守门：_lit_now 从 spot 读 floor_lit，'
+          '绝不用 getattr(b, floor_lit)（恒 None ⇒ 判据静默失效）· getattr=%d'
+          % (_fn127.count("getattr(b, 'floor_lit'"),),
+          "getattr(b, 'floor_lit'" not in _fn127 and _fn127.count('spot') >= 1)
+
+    # B1 执行级：真机帧（2026-11-16 10:51 map2 第 2 张）首步必须是地板说亮的格
+    import cv2 as _cv127
+    import spots as _SP127, marks as _MK127
+    import explore_loop as _EL127, mapsim as _MS127, mapsolve as _MV127
+    _fr127 = os.path.join(PROJ, '_verify', 'stepfog_S21001.png')
+    if not os.path.exists(_fr127):
+        skip('v2.127 B1 执行级：真帧 fixture 缺失（_verify/stepfog_S21001.png）')
+    else:
+        _img127 = _cv127.imread(_fr127)
+        _cells127 = _SP127.Board('S21001').state(_img127)
+        _mk127 = _MK127.scan_board_fast(_img127)
+        _cd127 = {'st': _cells127, 'marks': _mk127, 'buy': set(), 'buy_hidden': set()}
+        _st127 = {'obs': {}, 'marks': _mk127, 'nogo_rc': set(), 'done': set()}
+        _mg127 = _EL127._cells_for_model(_st127, _cd127, log=[], tag='v2127',
+                                         mark_revealed=False)
+        _pr127 = _MV127.Problem(_MS127.MapSim.from_observation(_mg127, _SP127.spot_rows()))
+        _cost127, _plan127 = _MV127.solve(_pr127, max_states=60000, max_secs=8, report={})
+        _cp127 = _pr127.cells_for_plan(_plan127 or [])
+        _ord127 = [tuple(rc) for rc, _bi, _w in _cp127]
+        _v127 = _mg127.get(_ord127[0]) if _ord127 else {}
+        _fl127 = (_v127 or {}).get('floor_lit')
+        _ra127 = (_v127 or {}).get('ratio')
+        check('v2.127 B1 执行级（真机帧）：首步必须是地板说亮的格 —— 事故是首步 3,6'
+              '（块级 observed=True、ratio 0.794 过 0.75 线，可 floor_lit=False、'
+              '地板 106 = 该帧纯雾值）⇒ 真机 fogged_noop · cost=%s order=%s 首步 floor_lit=%s ratio=%s'
+              % (_cost127, _ord127, _fl127, _ra127),
+              _cost127 == 15
+              and _ord127 == [(1, 6), (2, 3), (3, 1), (2, 6), (3, 6)]
+              and _fl127 is True)
+
+        # B2 对照项：把 _lit_now 退回裸 observed ⇒ 必须复现事故那版
+        import types as _t127
+        _bare127 = ('    return (b.spot or {}).get(' + chr(39) + 'floor_lit' + chr(39)
+                    + ') is not False' + chr(10))
+        _bare127new = '    return True' + chr(10)
+        _old127 = _ms127.replace(_bare127, _bare127new)
+        if _old127 == _ms127:
+            check('v2.127 B2 对照项：无法把 _lit_now 退回裸 observed（锚点未命中）'
+                  ' —— 请同步更新夹具', False)
+        else:
+            _mod127 = _t127.ModuleType('mapsolve_bare127')
+            _mod127.__dict__['__file__'] = _MV127.__file__
+            exec(compile(_old127, _MV127.__file__, 'exec'), _mod127.__dict__)
+            _pr127b = _mod127.Problem(
+                _MS127.MapSim.from_observation(_mg127, _SP127.spot_rows()))
+            _c127b, _p127b = _mod127.solve(_pr127b, max_states=60000, max_secs=8, report={})
+            _cp127b = _pr127b.cells_for_plan(_p127b or [])
+            _ord127b = [tuple(rc) for rc, _bi, _w in _cp127b]
+            _fl127b = (_mg127.get(_ord127b[0]) or {}).get('floor_lit') if _ord127b else None
+            check('v2.127 B2 执行级·对照项：判据退回裸 observed ⇒ 必须复现事故那版'
+                  ' order 首位 3,6、floor_lit=False（否则 B1 恒真）'
+                  ' · cost=%s order=%s 首步 floor_lit=%s' % (_c127b, _ord127b, _fl127b),
+              _c127b == 15
+              and _ord127b == [(3, 6), (1, 6), (2, 3), (3, 1), (2, 6)]
+              and _fl127b is False)
+except Exception as _e127:              # noqa: BLE001
+    import traceback as _tb127
+    check('v2.127 守门可运行（%r） TRACE=%s'
+          % (_e127, _tb127.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('=' * 78)
+print('v2.128 宝箱怪死循环：判价取「价格行最左那件」+ 关面板必须传标题/结构判据 + 入口看 nogo')
+try:
+    _bp128 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+    # ⚠ 先剥**整行注释**再查字符串：留档注释里必然逐字引用旧写法 ⇒ 假红（本仓已踩 4 次）
+    _c128 = chr(10).join([_l for _l in _bp128.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+    _el128 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _e128 = chr(10).join([_l for _l in _el128.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+
+    # ── A1 结构级：判价必须取「价格行最左那件」，不再按离推算列心最近 ──
+    _i128 = _c128.find('_ps = sorted((prices or [])')
+    _j128 = _c128.find('leftmost_price', _i128) if _i128 >= 0 else -1
+    _seg128 = _c128[_i128:_j128 + 40] if (_i128 >= 0 and _j128 > _i128) else ''
+    check('v2.128 A1 结构级：装备判价取「价格行最左那件」（位置判据，不是价格判据）'
+          ' —— 真机日志 card_x=191 price=1 prices=[[73,8],[289,1]]：'
+          ' 旧写法 min(abs(x-191)) 挑中 289（1 草）⇒ 判不是 8 草 ⇒ 永不买；'
+          ' 而 73 那件正是 8 草的装备 · 切片=%d'
+          % (len(_seg128),),
+          _i128 >= 0
+          and 'eq_x = int(_ps[0][0]) if _ps else' in _seg128
+          and 'leftmost_price' in _seg128)
+
+    # ── A2 撤回守门：旧的最近邻挑法必须**不在**代码里（只在注释里留档）──
+    _old128 = 'min(prices, key=lambda t: abs(t[0] - eq_x))'
+    check('v2.128 A2 撤回守门：旧写法 ' + _old128 + ' 已从代码里清除（剥注释后计数=0）· 计数=%d'
+          % (_c128.count(_old128),), _c128.count(_old128) == 0)
+
+    # ── A3 结构级：判的是哪件、点的就是哪件（同源）──
+    check('v2.128 A3 结构级：_mimic_buy_one 收到的必须是 eq_x（判价那件的真 OCR x），'
+          ' 不是常量 MIMIC_CARD_X —— 否则会出现「判 8 草却买 1 草那件」· 调用=%d'
+          % (_c128.count('_mimic_buy_one(b, log, eq_x)'),),
+          '_mimic_buy_one(b, log, eq_x)' in _c128)
+
+    # ── A4 结构级：mimic_flow 里每一处 close_panel 都必须带 title ──
+    _ncall128 = _c128.count(chr(39) + 'mimic_') - 0
+    _ncp128 = _c128.count('close_panel(b, log, ' + chr(39) + 'mimic')
+    _nttl128 = _c128.count('title=_MIMIC_TITLES')
+    check('v2.128 A4 结构级：mimic_flow 的每处 close_panel 都必须传 title=_MIMIC_TITLES'
+          ' —— 真机铁证：整份日志 close_panel 记录 **0 条**（没 title ⇒ panel_still_open'
+          ' 恒判「面板没开」⇒ close_panel 第一行 return 0，连日志都不落）· 调用=%d 带title=%d'
+          % (_ncp128, _nttl128),
+          _ncp128 >= 5 and _nttl128 >= _ncp128)
+
+    # ── A5 结构级：panel_still_open 的 _dl 分支里必须问 structured ──
+    _i128b = _c128.find('def panel_still_open(')
+    _j128b = _c128.find(chr(10) + 'def ', _i128b + 10)
+    _fn128 = _c128[_i128b:_j128b] if (_i128b >= 0 and _j128b > _i128b) else ''
+    _idl128 = _fn128.find('if _dl:')
+    _its128 = _fn128.find('_its_now = None')
+    _dlb128 = _fn128[_idl128:_its128] if (_idl128 >= 0 and _its128 > _idl128) else ''
+    check('v2.128 A5 结构级：panel_still_open 在「弹窗帧读到文字」时也必须问 structured'
+          ' —— 原来 structured 只在 _dl 为空时才被问 ⇒ 面板开着（读到文字）时永远问不到'
+          ' ⇒ 恒判「面板没开」⇒ 关不掉 · _dl段=%d structured=%d'
+          % (len(_dlb128), _dlb128.count('structured(_dl)')),
+          _dlb128.count('structured(_dl)') >= 1
+          and '_panelish' in _dlb128)
+
+    # ── A6 结构级：宝箱怪分支入口必须看 nogo_rc / mimic_bought ──
+    _ie128 = _e128.find(chr(39) + '宝箱怪' + chr(39) + ' in t:')
+    _ee128 = _e128.find('传承祭坛' + chr(39) + ' in t:', _ie128) if _ie128 >= 0 else -1
+    _mb128 = _e128[_ie128:_ee128] if (_ie128 >= 0 and _ee128 > _ie128) else ''
+    check('v2.128 A6 结构级：popups 的宝箱怪分支入口必须先看 nogo_rc / mimic_bought'
+          ' —— 真机 30 轮都落了 nogo_tagged(cell 4,4)，可面板一开着就又进来'
+          ' （nogo 只挡「再点这格」，挡不住「面板还在」）· 段=%d reentry_skip=%d nogo_rc=%d'
+          % (len(_mb128), _mb128.count('reentry_skip'), _mb128.count('nogo_rc')),
+          len(_mb128) > 0
+          and 'reentry_skip' in _mb128
+          and 'nogo_rc' in _mb128
+          and 'mimic_reentry' in _mb128
+          and _mb128.count('return ' + chr(39) + 'handled' + chr(39)) >= 1)
+
+    # ── B1 执行级：_mimic_panel_like 真喂真机 texts ⇒ 必须认成面板 ──
+    import buypanels as _BP128
+    _mt128 = [{'text': _s} for _s in (
+        '机巧宝箱怪', '我能发掘传承于装备之内的隐藏能力，',
+        '传承装备比普通装备拥有更多的词条。',
+        '未传承', '未传承', '未传承', '未传承', '帮助', '+', '#2')]
+    check('v2.128 B1 执行级：_mimic_panel_like(真机面板 texts) 必须 True'
+          ' （面板没有「返回/关闭/取消」⇒ 只能靠结构判据）· 结果=%s'
+          % (_BP128._mimic_panel_like(_mt128),),
+          _BP128._mimic_panel_like(_mt128) is True)
+
+    # ── B2 执行级·负样本：普通地图文字不能被认成宝箱怪面板 ──
+    _neg128 = [{'text': _s} for _s in ('开始冒险', '返回', '确定', '探索产出')]
+    check('v2.128 B2 执行级·负样本：普通地图/按钮文字不得认成宝箱怪面板 · 结果=%s'
+          % (_BP128._mimic_panel_like(_neg128),),
+          _BP128._mimic_panel_like(_neg128) is False)
+
+    # ── B3 执行级：真跑判价那段源码（exec 真实切片，不是抄一遍）──
+    _pk128 = _c128.find('    _ps = sorted((prices or [])')
+    _pe128 = (_c128.find('    eq_price = (_ps[0][1] if _ps else None)', _pk128)
+               if _pk128 >= 0 else -1)
+    if _pk128 >= 0 and _pe128 > _pk128:
+        _ln128 = _c128.find(chr(10), _pe128)
+        _pick128 = _c128[_pk128:_ln128]
+        _ns128 = {'prices': [(73, 8), (289, 1)],
+                  'MIMIC_CARD_X': (191, 407, 623, 839), 'MIMIC_EQUIP_COL': 0}
+        exec(compile('if True:' + chr(10) + _pick128 + chr(10), '<mimic_pick>', 'exec'),
+             _ns128)
+        check('v2.128 B3 执行级：喂真机价格 [[73,8],[289,1]] ⇒ 必须判第 1 件 x=73'
+              ' / 8 草（= 会买）· eq_x=%s eq_price=%s'
+              % (_ns128.get('eq_x'), _ns128.get('eq_price')),
+              _ns128.get('eq_x') == 73 and _ns128.get('eq_price') == 8)
+
+        # ── B4 对照项：同一份价格喂**旧写法** ⇒ 必须复现事故（判 289 / 1 草 ⇒ 不买）──
+        _oldb128 = (chr(10).join([
+            '    eq_col = MIMIC_EQUIP_COL',
+            '    eq_x = MIMIC_CARD_X[eq_col]',
+            '    eq_price = None',
+            '    if prices:',
+            '        _px, _pv = min(prices, key=lambda t: abs(t[0] - eq_x))',
+            '        eq_price = _pv',
+        ]) + chr(10))
+        _ns128b = {'prices': [(73, 8), (289, 1)],
+                   'MIMIC_CARD_X': (191, 407, 623, 839), 'MIMIC_EQUIP_COL': 0}
+        exec(compile('if True:' + chr(10) + _oldb128, '<mimic_pick_old>', 'exec'), _ns128b)
+        # ⚠ 旧写法里 eq_x **恒等于 MIMIC_CARD_X[0]=191**（它只用来算最近邻），
+        #   真正被挑错的是 price —— 与真机日志逐字一致：{card_x:191, price:1}
+        check('v2.128 B4 执行级·对照项：旧写法喂同一份价格 ⇒ 必须复现事故'
+              ' （card_x=191 但 price=1 ⇒ 判「不是 8 草」⇒ 永不买，否则 B3 恒真）'
+              ' · eq_x=%s eq_price=%s'
+              % (_ns128b.get('eq_x'), _ns128b.get('eq_price')),
+              _ns128b.get('eq_x') == 191 and _ns128b.get('eq_price') == 1
+              and _ns128b.get('eq_price') != 8)
+    else:
+        check('v2.128 B3 对照项：无法定位判价切片（锚点未命中）—— 请同步更新夹具', False)
+
+    # ── C1 结构级：_MIMIC_TITLES 两条标题都在 PANEL_X_TITLES 白名单里 ──
+    _ipx128 = _bp128.find('PANEL_X_TITLES = (')
+    _wpx128 = _bp128[_ipx128:_ipx128 + 400] if _ipx128 >= 0 else ''
+    check('v2.128 C1 结构级：_MIMIC_TITLES 的两条标题必须都在 PANEL_X_TITLES 白名单里'
+          ' （否则「标题行红 X」那条路永远不命中）· 金属=%s 机巧=%s'
+          % ('金属宝箱怪' in _wpx128, '机巧宝箱怪' in _wpx128),
+          _ipx128 >= 0
+          and '金属宝箱怪' in _wpx128
+          and '机巧宝箱怪' in _wpx128
+          and '_MIMIC_TITLES' in _c128)
+
+    # ── D1 撤回守门：装备列仍是「第 0 列」（用户口径），没被改成按价格筛 ──
+    check('v2.128 D1 撤回守门：MIMIC_EQUIP_COL 仍是 0（用户口径「从左数第一个必定是装备」），'
+          ' 且判价不是在按价格挑（否则会去买 8 草的符文 —— PC 踩过）· col0=%s 按价挑=%d'
+          % ('MIMIC_EQUIP_COL = 0' in _c128,
+             _c128.count('if _pv == MIMIC_TARGET_PRICE')),
+          'MIMIC_EQUIP_COL = 0' in _c128
+          and _c128.count('if _pv == MIMIC_TARGET_PRICE') == 0)
+except Exception as _e128:              # noqa: BLE001
+    import traceback as _tb128
+    check('v2.128 守门可运行（%r） TRACE=%s'
+          % (_e128, _tb128.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+
+print('v2.129 宝箱怪买装备：放大 OCR 坐标只除一次 + 「刷新在屏」一票否决 + 详情页换真证据')
+try:
+    _bp129 = io.open(os.path.join(MAPBOT, 'buypanels.py'), encoding='utf-8').read()
+    _c129 = chr(10).join([_l for _l in _bp129.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+
+    # ---------- A1 结构级：_ocr_zoom_file 不得再除以 scale ----------
+    _i129 = _c129.find('def _ocr_zoom_file(')
+    _j129 = _c129.find(chr(10) + 'def ', _i129 + 10)
+    _f129 = _c129[_i129:_j129] if (_i129 >= 0 and _j129 > _i129) else ''
+    check('v2.129 A1 结构级：_ocr_zoom_file 的反算除数必须是「引擎实际缩放 x scale」'
+          ' （_f = min(1080/w, 1920/h) * scale），**不能**再写死 / scale'
+          ' —— 真机探针 RAWZOOM=219/435/651/867（= MIMIC_PRICE_X 真值），'
+          ' 旧写法 ÷3 得 73/145/217/289 ⇒ 点卡点到列外 ⇒ 详情页没打开 · 切片=%d 旧写法=%d'
+          % (len(_f129), _f129.count('/ scale')),
+          _i129 >= 0 and len(_f129) > 400
+          and '/ scale' not in _f129
+          and '_f = max(' in _f129
+          and _f129.count('/ 4.0 / _f') >= 2)
+
+    # ---------- A2 撤回守门：旧的详情页判据必须已从代码清除 ----------
+    _old129 = "('尚未拥有', '已拥有', '未拥有'), 300, 750"
+    check('v2.129 A2 撤回守门：旧详情页判据 ' + _old129 + ' 已从代码清除（剥注释后计数=0）'
+          ' —— 本游戏详情页**没有**这三个词（真机逐字：月祭法球/副手/法师/+6/获取地图/取消追踪）'
+          ' ⇒ has_detail 恒 False（日志逐字 has_detail:false）· 计数=%d'
+          % _c129.count(_old129), _c129.count(_old129) == 0)
+
+    # ---------- A3 结构级：详情页正面证据换成真机读到的词 ----------
+    _i129m = _c129.find('_MIMIC_DETAIL_MARKS = (')
+    _j129m = _c129.find('def _mimic_panel_like(', _i129m) if _i129m >= 0 else -1
+    _mseg129 = _c129[_i129m:_j129m] if (_i129m >= 0 and _j129m > _i129m) else ''
+    check('v2.129 A3 结构级：_MIMIC_DETAIL_MARKS 必须含真机详情页逐字读到的证据'
+          ' （取消追踪 / 获取地图）· 切片=%d 取消追踪=%s 获取地图=%s'
+          % (len(_mseg129), '取消追踪' in _mseg129, '获取地图' in _mseg129),
+          _i129m >= 0
+          and '取消追踪' in _mseg129
+          and '获取地图' in _mseg129)
+
+    # ---------- A4 结构级：「刷新在屏 ⇒ 不点任何数字」的一票否决必须在 ----------
+    check('v2.129 A4 结构级：购买键搜索必须有「屏幕上有『刷新』⇒ 货架页 ⇒ 一个数字都不点」'
+          ' 的否决 —— 真机 00:17 点的 (912,1271.75) 正是「刷新」的价格 1@(915,1271)，'
+          ' 它落在 MIMIC_BUY_Y_RANGE(1245,1665) 内且 cx915>570 ⇒ 旧条件全中 ⇒ 点成刷新 ✗'
+          ' · 否决=%s 刷新判定=%s'
+          % ("if _shelf:" in _c129, "'刷新' in _s" in _c129),
+          "if _shelf:" in _c129 and "'刷新' in _s" in _c129)
+
+    # ---------- B1 执行级：喂真机 RAWZOOM 原始坐标 ⇒ 必须恢复成真值 ----------
+    _i129z = _f129.find(chr(10) + '    _h1, _w1 = big.shape[:2]')
+    _i129z = (_i129z + 1) if _i129z >= 0 else -1
+    _j129z = _f129.find('return out', _i129z) if _i129z >= 0 else -1
+    _seg129z = _f129[_i129z:_j129z] if (_i129z >= 0 and _j129z > _i129z) else ''
+    if _seg129z.strip():
+        _Shape129 = type('S129', (), {'shape': (309, 3240, 3)})
+        def _box129(_x):
+            return [[_x - 8, 45], [_x + 8, 45], [_x + 8, 57], [_x - 8, 57]]
+        _ns129z = {'big': _Shape129(), 'scale': 3, 'y0': 1045,
+                   'res': [[_box129(219), '#8', 0.99], [_box129(435), '# 4', 0.95],
+                           [_box129(651), '#8', 0.98], [_box129(867), '# 4', 0.96]]}
+        exec(compile('if True:' + chr(10) + _seg129z, '<zoom129>', 'exec'), _ns129z)
+        _got129 = [(t[0], t[2]) for t in (_ns129z.get('out') or [])]
+        check('v2.129 B1 执行级：喂真机 RAWZOOM 的 canvas 系坐标 219/435/651/867（y=51，'
+              ' BIG=309x3240 ⇒ 引擎 k=1/3）⇒ 必须恢复成 band 系 219/435/651/867、'
+              ' y=51+1045=1096（与 MIMIC_PRICE_X 真值逐字吻合）· 实得=%s' % (_got129,),
+              _got129 == [(219, 1096), (435, 1096), (651, 1096), (867, 1096)])
+
+        # ---------- B2 执行级·对照项：退回旧写法 / scale ⇒ 必须复现 73/217 事故 ----------
+        _oldseg129z = chr(10).join([('    _f = float(scale)'
+                                     if '_f = max(' in _l else _l)
+                                    for _l in _seg129z.split(chr(10))])
+        _ns129o = {'big': _Shape129(), 'scale': 3, 'y0': 1045,
+                   'res': _ns129z['res']}
+        exec(compile('if True:' + chr(10) + _oldseg129z, '<zoom129o>', 'exec'), _ns129o)
+        _got129o = [(t[0], t[2]) for t in (_ns129o.get('out') or [])]
+        check('v2.129 B2 执行级·对照项：把反算退回首版 / scale ⇒ 必须复现事故坐标'
+              ' 73/145/217/289、y=1062（否则 B1 恒真、证明不了是这次修好的）· 实得=%s'
+              % (_got129o,),
+              _got129o == [(73, 1062), (145, 1062), (217, 1062), (289, 1062)])
+    else:
+        check('v2.129 B1 对照项：无法定位放大反算切片（锚点未命中）—— 请同步更新夹具', False)
+
+    # ---------- B3/B4 执行级：真机两帧喂进购买键搜索 ----------
+    _i129b = _c129.find('    det = None' + chr(10) + '    _shelf = False')
+    _tail129b = "        src = 'fallback'"
+    _j129b = _c129.find(_tail129b, _i129b) if _i129b >= 0 else -1
+    _seg129b = (_c129[_i129b:_j129b + len(_tail129b)]
+                if (_i129b >= 0 and _j129b > _i129b) else '')
+    if _seg129b.strip():
+        _ns129m = {}
+        exec(compile(_c129[_i129m:_j129m], '<marks129>', 'exec'), _ns129m)
+        _MARKS129 = _ns129m.get('_MIMIC_DETAIL_MARKS', ())
+        # 真机弹窗帧 00:22（货架页）逐字
+        _SHELF129 = [{'text': '金属宝箱怪', 'cx': 689, 'cy': 602},
+                     {'text': '我这里有很多不错的宝贝，要来看看', 'cx': 669, 'cy': 704},
+                     {'text': '8', 'cx': 240, 'cy': 1096},
+                     {'text': '刷新', 'cx': 895, 'cy': 1229},
+                     {'text': '刷新时优先出现当前地图尚未获得的装备和符文',
+                      'cx': 414, 'cy': 1261},
+                     {'text': '1', 'cx': 915, 'cy': 1271}]
+        # 真机弹窗帧 00:26（详情页）逐字
+        _DET129 = [{'text': '月祭法球', 'cx': 540, 'cy': 435},
+                   {'text': '副手', 'cx': 732, 'cy': 556},
+                   {'text': '法师', 'cx': 890, 'cy': 556},
+                   {'text': '+6', 'cx': 226, 'cy': 794},
+                   {'text': '黑暗【2】', 'cx': 235, 'cy': 918},
+                   {'text': '获取地图', 'cx': 173, 'cy': 1368},
+                   {'text': '点击图标立即前往冒险', 'cx': 828, 'cy': 1369},
+                   {'text': '无声沼泽', 'cx': 147, 'cy': 1496},
+                   {'text': '取消追踪', 'cx': 249, 'cy': 1577},
+                   {'text': '8', 'cx': 900, 'cy': 1578}]
+
+        def _run129(_items_, _seg):
+            _ns = {'bot': None, 'log': [], 'MIMIC_BUY_BTN': (879, 1580),
+                   'MIMIC_BUY_Y_RANGE': (1245, 1665),
+                   '_MIMIC_DETAIL_MARKS': _MARKS129,
+                   '_items': (lambda _b: _items_),
+                   '_sleep': (lambda *a: None), '_invalidate': (lambda *a: None)}
+            exec(compile('if True:' + chr(10) + _seg, '<buy129>', 'exec'), _ns)
+            return _ns
+
+        _r129 = _run129(_SHELF129, _seg129b)
+        check('v2.129 B3 执行级：喂真机**货架页**那帧（刷新@895,1229 + 刷新价格 1@915,1271）'
+              ' ⇒ 必须**一个购买键都不选**、不盲点（用户报的「点成刷新」就是它）'
+              ' · btn=%s shelf=%s src=%s'
+              % (_r129.get('btn'), _r129.get('_shelf'), _r129.get('src')),
+              _r129.get('btn') is None
+              and _r129.get('src') == 'fallback'
+              and _r129.get('_shelf') is True
+              and _r129.get('det') is None)
+
+        _r129d = _run129(_DET129, _seg129b)
+        check('v2.129 B4 执行级：喂真机**详情页**那帧（取消追踪@249,1577 + 真购买键 8@900,1578）'
+              ' ⇒ 必须选出 (900,1578,chr(56)) 那件 8 草价格按钮，且 has_detail=True'
+              ' · btn=%s det=%s src=%s'
+              % (_r129d.get('btn'), _r129d.get('det'), _r129d.get('src')),
+              _r129d.get('btn') == (900, 1578, '8')
+              and bool(_r129d.get('det'))
+              and _r129d.get('src') == 'ocr')
+
+        # ---------- B5 执行级·对照项：摘掉刷新否决 ⇒ 必须复现货架页点刷新 ----------
+        _oldseg129b = _seg129b.replace('if _shelf:', 'if False:').replace(
+            "_shelf = any(('刷新' in _s) for _s in _txt)", '_shelf = False')
+        _r129o2 = _run129(_SHELF129, _oldseg129b)
+        check('v2.129 B5 执行级·对照项：把「刷新在屏」的否决摘掉 ⇒ 必须复现事故'
+              ' （选出 (915,1271,\'1\') 那个刷新的价格 ⇒ 点下去就是刷新）'
+              ' · btn=%s（否则 B3 恒真、证明不了是这次修好的）' % (_r129o2.get('btn'),),
+              _r129o2.get('btn') is not None
+              and _r129o2.get('btn')[0] == 915
+              and _r129o2.get('btn')[1] == 1271)
+    else:
+        check('v2.129 B3 对照项：无法定位购买键搜索切片（锚点未命中）—— 请同步更新夹具', False)
+except Exception as _e129:              # noqa: BLE001
+    import traceback as _tb129
+    check('v2.129 守门可运行（%r） TRACE=%s'
+          % (_e129, _tb129.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('v2.130 预言石板抽到要停的牌：判停必须真的停（两条分支同口径 + 一路传到 run_one_map）')
+try:
+    _el130 = io.open(os.path.join(MAPBOT, 'explore_loop.py'), encoding='utf-8').read()
+    _e130 = chr(10).join([_l for _l in _el130.split(chr(10))
+                          if not _l.lstrip().startswith('#')])
+
+    # ── A1 结构级：判停收成唯一实现 _foretell_stop_act ──
+    _i130 = _e130.find('def _foretell_stop_act(')
+    _j130 = _e130.find(chr(10) + 'def ', _i130 + 10)
+    _fn130 = _e130[_i130:_j130] if (_i130 >= 0 and _j130 > _i130) else ''
+    check('v2.130 A1 结构级：判停必须是唯一实现 _foretell_stop_act()'
+          ' —— 真机 2026-11-09 21:56 停机就是因为「两条预言分支里只有一条带判停」· 切片=%d'
+          % (len(_fn130),),
+          _i130 >= 0 and len(_fn130) > 400
+          and 'return ' + chr(39) + 'foretell_stop' + chr(39) in _fn130
+          and 'STOP_ELEM_PURPLE' in _fn130 and 'STOP_ELEM_ORANGE' in _fn130
+          and 'STOP_LUCKY' in _fn130 and 'STOP_PEACE' in _fn130)
+
+    # ── A2 结构级：两条预言分支都要调它 ──
+    _n130 = _e130.count('return _foretell_stop_act(b, log, ctx, _fout)')
+    check('v2.130 A2 结构级：popups 的两条预言分支（v2.67 结构提前拦 / v1.78 elif 名字）'
+          ' 都必须接判停 —— 事故就是结构那条只做了计数就 return handled · 调用=%d'
+          % (_n130,), _n130 >= 2)
+
+    # ── A3 撤回守门：旧的内联判停块必须已清除（只在注释里留档）──
+    _old130 = '_do_stop = bool(_why) and ('
+    check('v2.130 A3 撤回守门：旧的内联判停 ' + _old130 + ' 已从代码清除（剥注释后计数=0）'
+          ' —— 两处各写一份正是「一边有一边没有」的来源 · 计数=%d' % (_e130.count(_old130),),
+          _e130.count(_old130) == 0)
+
+    # ── A4 结构级：one_round 必须有 act == foretell_stop 出口 ──
+    _i130b = _e130.find('def one_round(')
+    _j130b = _e130.find(chr(10) + 'def ', _i130b + 10)
+    _or130 = _e130[_i130b:_j130b] if (_i130b >= 0 and _j130b > _i130b) else ''
+    _s130 = chr(39) + 'foretell_stop' + chr(39)
+    check('v2.130 A4 结构级：one_round 必须把 act == foretell_stop 传出去'
+          ' —— 事故时 popups 明明返回了它，而 one_round 只认 kicked/insufficient/'
+          ' blocked/battle*/handled ⇒ 被当普通值忽略 ⇒ 一路空转到 maxed · 切片=%d'
+          % (len(_or130),),
+          _i130b >= 0 and len(_or130) > 2000
+          and ('act == ' + _s130) in _or130
+          and ('return ' + _s130) in _or130)
+
+    # ── A5 结构级：final_collect 必须排除 foretell_stop（现场保留）──
+    _i130c = _e130.find(chr(39) + 'kicked' + chr(39) + ', ' + chr(39) + 'red_equip' + chr(39))
+    _line130c = _e130[_i130c:_i130c + 200] if _i130c >= 0 else ''
+    check('v2.130 A5 结构级：final_collect 的排除表必须含 foretell_stop'
+          ' —— 抽到要停的牌时面板原样留着，补点会点在那个面板上（用户口径：现场保留）· 行=%r'
+          % (_line130c[:110],),
+          _i130c >= 0 and 'foretell_stop' in _line130c)
+
+    # ── B1~B3 执行级：真跑 _foretell_stop_act ──
+    class _B130(object):
+        def snap(self, *a, **k):
+            return '/sdcard/Download/autoexplore/bagdbg/foretell_stop_r41.png'
+    _ns130 = {'STOP_LUCKY': True, 'STOP_PEACE': True,
+              'STOP_ELEM_PURPLE': True, 'STOP_ELEM_ORANGE': True,
+              'say': (lambda *a, **k: None), 'status': (lambda *a, **k: None),
+              'os': os, 'b': _B130()}
+    exec(compile(_fn130, '<foretell_stop_act>', 'exec'), _ns130)
+    _act130 = _ns130.get('_foretell_stop_act')
+    _log130 = []
+    _r130 = _act130(_B130(), _log130, {'flags': {'round': 41}},
+                    {'acts': ['stop_before_pick'], 'stop': '元素·紫色', 'picked': []})
+    check('v2.130 B1 执行级：喂真机那一帧（元素·紫色 / stop_before_pick）'
+          ' ⇒ 必须返回 foretell_stop 且落一条 stop 日志（不退图、保留现场）· 返回=%s 日志=%s'
+          % (_r130, [sorted(x.keys()) for x in _log130]),
+          _r130 == 'foretell_stop'
+          and any(str(x.get('stop') or '') == 'foretell_元素·紫色' for x in _log130))
+
+    _ns130b = dict(_ns130)
+    _ns130b['STOP_ELEM_PURPLE'] = False
+    exec(compile(_fn130, '<foretell_stop_act2>', 'exec'), _ns130b)
+    _log130b = []
+    _r130b = _ns130b['_foretell_stop_act'](
+        _B130(), _log130b, {'flags': {'round': 41}},
+        {'acts': ['stop_before_pick'], 'stop': '元素·紫色', 'picked': []})
+    check('v2.130 B2 执行级·对照项：关掉「元素·紫色 遇到就停」⇒ 必须返回 handled'
+          ' 且落 stop_skipped_by_pref（否则 B1 恒真 = 不管开关都停）· 返回=%s' % (_r130b,),
+          _r130b == 'handled'
+          and any(x.get('foretell') == 'stop_skipped_by_pref' for x in _log130b))
+
+    _log130c = []
+    _r130c = _act130(_B130(), _log130c, {'flags': {'round': 7}},
+                     {'acts': ['pick'], 'stop': None, 'picked': ['丰收']})
+    check('v2.130 B3 执行级·对照项：正常抽完（stop=None）⇒ 必须 handled'
+          ' （否则每次点开预言石板都会停）· 返回=%s 日志=%d' % (_r130c, len(_log130c)),
+          _r130c == 'handled' and not _log130c)
+except Exception as _e130x:             # noqa: BLE001
+    import traceback as _tb130
+    check('v2.130 守门可运行（%r） TRACE=%s'
+          % (_e130x, _tb130.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
+print('v2.131 预言石碑「遇到就停」：四个开关必须能在 app 里关（以前是写死的模块常量）')
+try:
+    _ma131 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com',
+                                   'fantasy', 'autoexplore', 'MainActivity.java'),
+                     encoding='utf-8').read()
+    _pf131 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com',
+                                   'fantasy', 'autoexplore', 'Prefs.java'),
+                     encoding='utf-8').read()
+    _ov131 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com',
+                                   'fantasy', 'autoexplore', 'OverlayService.java'),
+                     encoding='utf-8').read()
+    _cr131 = io.open(os.path.join(PROJ, 'app', 'src', 'main', 'java', 'com',
+                                   'fantasy', 'autoexplore', 'CommandReceiver.java'),
+                     encoding='utf-8').read()
+    _ea131 = io.open(os.path.join(MAPBOT, 'explore_android.py'),
+                     encoding='utf-8').read()
+    _el131 = io.open(os.path.join(MAPBOT, 'explore_loop.py'),
+                     encoding='utf-8').read()
+    import re as _re131
+
+    # ── A1 结构级：配置页必须有这张卡（四个开关都在）──
+    check('v2.131 A1 结构级：配置页必须有「预言石碑 · 遇到就停」这张卡 + 四个勾选'
+          ' —— 用户 2026-11-09：「『遇到就停』这个选项没在 app 里显示啊」· 卡=%s 勾=%d'
+          % ('预言石碑 · 遇到就停' in _ma131,
+             _ma131.count('Prefs.stop')),
+          '预言石碑 · 遇到就停' in _ma131
+          and _ma131.count('Prefs.stop') >= 4
+          and all(('%s(this)' % _k) in _ma131 for _k in (
+              'Prefs.stopLucky', 'Prefs.stopPeace',
+              'Prefs.stopElemPurple', 'Prefs.stopElemOrange')))
+
+    # ── A2 结构级：Prefs 四个 getter/setter，**默认值按用户口径**（幸运/元素橙 开，其余关）──
+    check('v2.131 A2 结构级：Prefs 四个 stop 开关齐全，且默认值 = 用户口径'
+          ' （2026-11-09：「四个开关就幸运和元素橙默认打开」）· getter=%d setter=%d'
+          % (_pf131.count('public static boolean stop'),
+             _pf131.count('public static void setStop')),
+          _pf131.count('public static boolean stop') == 4
+          and _pf131.count('public static void setStop') == 4
+          and ('"stop_lucky", true' in _pf131)
+          and ('"stop_elem_orange", true' in _pf131)
+          and ('"stop_peace", false' in _pf131)
+          and ('"stop_elem_purple", false' in _pf131))
+
+    # ── A2b 结构级：广播入口的默认值必须与 Prefs **一致**（两处漂移 = 静默不一致 ✗）──
+    check('v2.131 A2b 结构级：广播入口 `CommandReceiver` 的四个默认值必须与 Prefs 一致'
+          ' · 幸运=%s 和平=%s 紫=%s 橙=%s'
+          % ('"stop_lucky", true' in _cr131, '"stop_peace", false' in _cr131,
+             '"stop_elem_purple", false' in _cr131,
+             '"stop_elem_orange", true' in _cr131),
+          ('"stop_lucky", true' in _cr131)
+          and ('"stop_peace", false' in _cr131)
+          and ('"stop_elem_purple", false' in _cr131)
+          and ('"stop_elem_orange", true' in _cr131))
+
+    # ── A3 结构级：两个启动入口都要把四个开关**传下去** ──
+    check('v2.131 A3 结构级：悬浮条 ▶ 与广播启动都必须把四个开关传给 `start()`'
+          ' —— 只加界面不传参 = 静默失效 · ovl=%d recv=%d'
+          % (_ov131.count('Prefs.stop'),
+             _cr131.count('stop_elem_purple')),
+          _ov131.count('Prefs.stop') >= 4
+          and all(('"%s"' % _k) in _cr131 for _k in (
+              'stop_lucky', 'stop_peace', 'stop_elem_purple', 'stop_elem_orange')))
+
+    # ── A4 结构级：explore_android.run/start 都要收四个形参并写回 EL ──
+    _i131 = _ea131.find('def start(')
+    _j131 = _ea131.find('def ', _i131 + 10)
+    _st131 = _ea131[_i131:_j131] if (_i131 >= 0 and _j131 > _i131) else ''
+    check('v2.131 A4 结构级：explore_android 的 run/start 都要收这四个形参，'
+          ' run 里要写回 `EL.STOP_*`（不然界面勾了等于没勾 ✗）· start切片=%d 写回=%d'
+          % (len(_st131), _ea131.count('EL.STOP_ELEM_PURPLE = bool(')),
+          _ea131.count('EL.STOP_ELEM_PURPLE = bool(') == 1
+          and _ea131.count('EL.STOP_LUCKY = bool(') == 1
+          and _ea131.count('stop_elem_orange=bool(') >= 1
+          and _ea131.count('stop_elem_orange=True') == 2)
+
+    # ── A5 结构级：explore_loop 的四个常量必须还能被覆写（不是被删掉）──
+    check('v2.131 A5 结构级：`explore_loop` 仍以模块级 STOP_* 为判据（覆写才生效）'
+          ' —— 判据不许改成读环境变量或硬编码 · 常量=%d 判据=%d'
+          % (sum(_el131.count('STOP_%s = True' % _k) for _k in
+                 ('LUCKY', 'PEACE', 'ELEM_PURPLE', 'ELEM_ORANGE')),
+             _el131.count('and STOP_ELEM_PURPLE')),
+          # ⚠ 默认值是**用户口径**：只有 幸运 / 元素·橙 是 True（2026-11-09）
+          ('STOP_LUCKY = True' in _el131)
+          and ('STOP_ELEM_ORANGE = True' in _el131)
+          and ('STOP_PEACE = False' in _el131)
+          and ('STOP_ELEM_PURPLE = False' in _el131)
+          and 'and STOP_ELEM_PURPLE' in _el131
+          and 'os.environ.get(' + chr(39) + 'MAPBOT_STOP' not in _el131)
+
+    # ── B1 执行级：真跑 `_foretell_stop_act`，把 EL.STOP_* 关掉 ⇒ 必须不停 ──
+    _i131b = _el131.find('def _foretell_stop_act(')
+    _j131b = _el131.find(chr(10) + 'def ', _i131b + 10)
+    _fn131 = _el131[_i131b:_j131b] if (_i131b >= 0 and _j131b > _i131b) else ''
+    if _fn131.strip():
+        class _B131(object):
+            def snap(self, *a, **k):
+                return ''
+        def _mk131(**kw):
+            ns = {'STOP_LUCKY': True, 'STOP_PEACE': True,
+                  'STOP_ELEM_PURPLE': True, 'STOP_ELEM_ORANGE': True,
+                  'say': (lambda *a, **k: None), 'status': (lambda *a, **k: None),
+                  'os': os}
+            ns.update(kw)
+            exec(compile(_fn131, '<stop131>', 'exec'), ns)
+            return ns['_foretell_stop_act']
+        _f131 = _mk131()
+        _lg131 = []
+        _r131 = _f131(_B131(), _lg131, {'flags': {}},
+                      {'acts': ['stop_before_pick'], 'stop': '元素·紫色', 'picked': []})
+        check('v2.131 B1 执行级：默认（四个都开）喂真机那一帧 ⇒ 必须停 foretell_stop'
+              ' · 返回=%s' % (_r131,), _r131 == 'foretell_stop')
+        _f131b = _mk131(STOP_ELEM_PURPLE=False, STOP_ELEM_ORANGE=False,
+                        STOP_LUCKY=False, STOP_PEACE=False)
+        _lg131b = []
+        _r131b = _f131b(_B131(), _lg131b, {'flags': {}},
+                        {'acts': ['stop_before_pick'], 'stop': '元素·紫色', 'picked': []})
+        check('v2.131 B2 执行级：**用户在界面上把四个都关掉** ⇒ 必须返回 handled'
+              ' 且落 stop_skipped_by_pref（证明开关真的能关掉停机）· 返回=%s' % (_r131b,),
+              _r131b == 'handled'
+              and any(x.get('foretell') == 'stop_skipped_by_pref' for x in _lg131b))
+        _f131c = _mk131(STOP_ELEM_PURPLE=False)
+        _r131c = _f131c(_B131(), [], {'flags': {}},
+                        {'acts': ['stop_before_pick'], 'stop': '元素·橙色', 'picked': []})
+        check('v2.131 B3 执行级·对照项：只关紫色 ⇒ 抽到**橙色**仍必须停'
+              ' （四个开关互相独立，别一关全关 ✗）· 返回=%s' % (_r131c,),
+              _r131c == 'foretell_stop')
+
+        # ── B4 执行级：**出厂默认**必须按用户口径（幸运/元素橙 停，和平/紫 不停）──
+        #   用 `explore_loop` 模块里真实的四个常量值，模拟「用户从没勾过任何开关」
+        _def131 = {}
+        for _k131 in ('STOP_LUCKY', 'STOP_PEACE', 'STOP_ELEM_PURPLE',
+                      'STOP_ELEM_ORANGE'):
+            _mm131 = _re131.search('^%s\s*=\s*(True|False)' % _k131, _el131,
+                                   _re131.M)
+            _def131[_k131] = bool(_mm131 and _mm131.group(1) == 'True')
+        _fdef131 = _mk131(**_def131)
+        _rdef131 = []
+        for _w131 in ('幸运', '和平·金属宝箱怪', '元素·紫色', '元素·橙色'):
+            _rdef131.append(_fdef131(_B131(), [], {'flags': {}},
+                                     {'acts': ['stop_before_pick'], 'stop': _w131,
+                                      'picked': []}))
+        check('v2.131 B4 执行级：**出厂默认**喂真机四种牌 ⇒ 幸运=停 和平=停 紫=停 橙=停'
+              ' 里必须恰好是「幸运停、和平**不**停、紫**不**停、橙停」'
+              ' （用户 2026-11-09：「四个开关就幸运和元素橙默认打开」）· 四种=%s 默认=%s'
+              % (_rdef131, _def131),
+              _def131 == {'STOP_LUCKY': True, 'STOP_PEACE': False,
+                          'STOP_ELEM_PURPLE': False, 'STOP_ELEM_ORANGE': True}
+              and _rdef131 == ['foretell_stop', 'handled', 'handled',
+                               'foretell_stop'])
+    else:
+        check('v2.131 B1 对照项：无法定位 _foretell_stop_act 切片 —— 请同步更新夹具', False)
+except Exception as _e131:             # noqa: BLE001
+    import traceback as _tb131
+    check('v2.131 守门可运行（%r） TRACE=%s'
+          % (_e131, _tb131.format_exc()[-700:].replace(chr(10), ' | ')), False)
+print()
 print('=' * 78)
 print('通过 %d 项，失败 %d 项，跳过 %d 项' % (len(OK), len(BAD), len(SKIP)))
 if BAD:

@@ -301,7 +301,73 @@ NAME_SCORE_MIN = 0.85
 #:   !! fail-open：score 为 None => 不拦（老调用点行为一字不变）
 EXPLORE_SCORE_MIN = 0.39
 
-def is_target(name, sid, marks=None, cfg=None, score=None):
+#: ⛔ v2.122 **雾格（未揭示）的名字门槛 —— 比已揭示格低**
+#:   用户 2026-11-07 报：「我要雾格的礼包也能认出来并且排到计划里」
+#:   ---- 为什么不能用 0.85 ----
+#:     雾把 NCC 压低：实测 `1,7` 限时礼包 在雾里 **score=0.794 / ratio=0.683**
+#:     ⇒ 0.85 把它挡掉 ⇒ **所有雾里的内容格（礼包/宝箱怪/勇者之墓/石碑）系统性丢失** ✗
+#:   ---- 为什么 0.70 是安全的 ----
+#:     · v1.78 那个真事故（PC `5,6` 认成限时礼包但 score **0.441**）⇒ **仍被挡住** ✓
+#:     · 本帧真礼包 0.794 ⇒ 通过 ✓
+#:   ⚠ 只作用于「**靠名字**」这一支（探索格走 EXPLORE_SCORE_MIN，不受影响 ✓）
+#:   ⚠ fail-open：score 为 None ⇒ 不拦（与既有口径一致 ✓）
+FOGGED_NAME_SCORE_MIN = 0.70
+
+# ==== v2.125 ==== 【雾格商人/宝库：给「领先度」开一条通道】
+#
+#   ---- 真机铁证（2026-11-07 18:16 第二张图 无声沼泽，进图那帧 r_181645_0.png）----
+#     该格 (3,3) 分类器 top-1 就是 S21001_016 黄金宝库，但
+#       score 0.624   <   FOGGED_NAME_SCORE_MIN 0.70   => is_target False
+#       => 第一次规划里没有它 => 计划走完直接退图，宝库一次没点
+#     而它领先第一个不同模板 0.344（0.624 对 0.280）—— 判得毫不含糊
+#
+#   ---- 为什么分数低不等于认不准 ----
+#     实测：把该格像素亮化到 ratio=1.0 再重算模板匹配，分数一点没变（NCC 归一化）
+#     => 雾是盖层，压的是亮度不是形状 => 雾格的绝对分数天然被压低，不能当唯一判据
+#
+#   ---- 分离度（真机 8 帧语料，_tmpman/calib_margin.py 可复跑）----
+#     真宝库（雾格）：margin 0.344
+#     全部 28 个假商人/宝库（雾格）：margin 0.000 ~ 0.081
+#       （旅行商人/黄金宝库模板形状相近，雾里乱猜时两个都能拿到 ~0.2，谁都不领先）
+#     => 门槛取 0.15：真值在 2 倍以上，误报最大值不到它一半
+#
+#   只对商人/宝库开这条（spots.BUY_OUT_NAMES）。
+#     其它特殊方块（限时礼包/祭坛/沙堡）误报的代价是打一整座沙堡 4 场战斗
+#     （见 v1.78 那条 PC 事故）=> 它们必须继续用绝对分数门槛
+FOG_BUY_MARGIN_MIN = 0.15
+
+
+def _lead_margin(top):
+    """top-1 相对「第一个不同模板」的领先度；算不出来 => None（fail-open）"""
+    try:
+        if not top:
+            return None
+        _s1, _id1 = float(top[0][0]), str(top[0][1] or '')
+        _best_other = None
+        for _t in top[1:]:
+            if str(_t[1] or '') == _id1:
+                continue            # 同一模板的其他摆放位不算「不同答案」
+            _v = float(_t[0])
+            if _best_other is None or _v > _best_other:
+                _best_other = _v
+        if _best_other is None:
+            return None             # 只有一个模板有候选 => 分不出领先度 => 不据此放行
+        return _s1 - _best_other
+    except Exception:           # noqa: BLE001
+        return None
+
+
+def _is_buy_out_name(name):
+    """是不是商人/宝库（与 spots.BUY_OUT_NAMES 同源；拿不到 spots => False）"""
+    try:
+        import spots as _sp
+        return name in tuple(getattr(_sp, 'BUY_OUT_NAMES', ()) or ())
+    except Exception:           # noqa: BLE001
+        return False
+
+
+def is_target(name, sid, marks=None, cfg=None, score=None, revealed=None,
+              top=None):
     """⭐ 该格是不是「当前配置下要拿的目标」
 
     ⚠ 2026-10-01：**拉黑地块一律不是目标**（哪怕它在配置里被勾上了 ✓ ——
@@ -346,8 +412,18 @@ def is_target(name, sid, marks=None, cfg=None, score=None):
         #   ⚠ **fail-open**：score 是 None / 转不了 float ⇒ **不拦**（保守 ✓）
         if score is not None:
             try:
-                if float(score) < NAME_SCORE_MIN:
-                    return False
+                # v2.122：雾格用更低门槛（revealed=False）
+                #   雾把分数压低 0.1~0.15 => 统一用 0.85 会把雾里的内容格全丢掉
+                _min = (NAME_SCORE_MIN if revealed is not False
+                        else FOGGED_NAME_SCORE_MIN)
+                if float(score) < _min:
+                    # v2.125：雾格的商人/宝库再看一眼「领先度」
+                    #   真机铁证：黄金宝库 score 0.624（< 0.70）但领先 0.344
+                    #   => 只差这 0.076 就把整座宝库瞎掉（见上面 FOG_BUY_MARGIN_MIN）
+                    _lm = _lead_margin(top)
+                    if not (revealed is False and _is_buy_out_name(name)
+                            and _lm is not None and _lm >= FOG_BUY_MARGIN_MIN):
+                        return False
             except (TypeError, ValueError):
                 pass
         return True

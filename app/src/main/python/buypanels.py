@@ -1496,8 +1496,28 @@ def panel_still_open(bot, title=None, structured=None):
                 if any(any(t in (x.get('text') or '') for x in _dl)
                        for t in _titles):
                     return True
+                # ⛔⛔ v2.128【标题没匹配上时，**必须再问一次 structured 才能判死】**
+                #   真机铁证（bagdbg/mgas_log.txt 2026-11-08 16:41~16:43，连 30 轮）：
+                #     宝箱怪面板开着，可它的文字只有「机巧宝箱怪/我能发掘传承…/未传承×4/帮助」
+                #     ⇒ 没有「返回/关闭/取消」⇒ _panelish=False ⇒ 这里直接 return False
+                #     ⇒ close_panel 开头就 return 0 ⇒ **一次都不点、连日志都不落** ⇒ 面板永开 ✗✗
+                #   而 v2.80 加的 `structured`（结构特征逃生口）**只在下面 _dl 为空时才被问** ⇒
+                #     「弹窗帧读到了文字」恰恰是「面板真的开着」的时候 ⇒ 逃生口**永远是死的** ✗
+                #   ⇒ 只加放行：structured 命中就当真开着（不改 _panelish 的原有判定）✓
+                if not _panelish and structured is not None:
+                    try:
+                        if structured(_dl):
+                            return True
+                    except Exception:       # noqa: BLE001
+                        pass
                 # 标题没匹配上，但**有面板级按钮**也算开着（结果框换了一层）
                 return _panelish
+            if structured is not None:
+                try:
+                    if structured(_dl):
+                        return True
+                except Exception:       # noqa: BLE001
+                    pass
             return _panelish
         # 弹窗帧一条都没读到（OCR 失败）⇒ 退回归一化帧标题判据（保守）
     _its_now = None
@@ -1875,6 +1895,19 @@ def _ocr_zoom_file(bot, y0, y1, scale, tag):
         res, _sec = _ocr()(tmp)
     except Exception:       # noqa: BLE001
         return []
+    # ⛔⛔⛔ v2.129【反算除数 = 引擎**实际**缩放 × scale，不是 scale】
+    #   ---- 真机铁证（2026-11-09 00:26，金属宝箱怪面板，端上探针）----
+    #     BAND (103,1080,3) -> BIG (309,3240,3)
+    #     RAWZOOM  = 219 / 435 / 651 / 867   <= **真值**（与 MIMIC_PRICE_X 逐字吻合）
+    #     旧写法 ÷scale ⇒ 73 / 145 / 217 / 289  <= 日志里那个假的 [[73,8],[217,8]]
+    #   ⇒ 根因：`_AndroidOcr.__call__` 会把**任何非 1080x1920 的图**先按
+    #     `k = min(1080/w, 1920/h)` 缩放再左上贴黑底（mapbot.py:116-122）
+    #     ⇒ 它返回的坐标是 **canvas 系**；band 系 = canvas / k / scale
+    #     ⇒ 放大 3 倍后 w=3240 => k=1/3 => k*scale = **1.0**（旧写法却除以 3，多除了一次 ✗）
+    #   ⚠ 别再把它改回 `/ scale`：那会让每一列价格 x 都变成真值的 1/3
+    #     ⇒ tap_card 点到 x=73（真列心 219）⇒ 详情页根本没打开（真机 00:17）
+    _h1, _w1 = big.shape[:2]
+    _f = max(1e-6, min(1080.0 / _w1, 1920.0 / _h1) * float(scale))
     out = []
     for it in (res or []):
         try:
@@ -1883,9 +1916,9 @@ def _ocr_zoom_file(bot, y0, y1, scale, tag):
             continue
         xs = [q[0] for q in box]
         ys = [q[1] for q in box]
-        out.append((int(sum(xs) / 4.0 / scale),
+        out.append((int(sum(xs) / 4.0 / _f),
                     str(txt),
-                    int(sum(ys) / 4.0 / scale) + int(y0),
+                    int(sum(ys) / 4.0 / _f) + int(y0),
                     conf))
     return out
 
@@ -2616,6 +2649,51 @@ MIMIC_REFRESH = (897, 1230)             # 「刷新 1 草」—— **不点**（
 MIMIC_TARGET_PRICE = 8                  # ⭐ **只买 8 草的**
 MIMIC_EQUIP_COL = 0                     # ⭐ **从左数第一个必定是装备**（用户口径）✓
 MIMIC_OCR_SCALE = 3                     # 价格行放大倍数（放大才读得到左边两列 ✓）
+# ⭐⭐⭐ v2.128【面板标题 —— 关面板**必须**传它，否则一次都点不动】
+#   真机铁证（bagdbg/mgas_log.txt 2026-11-08 16:41~16:43，连 30 轮）：
+#     日志里 `close_panel` **一条记录都没有** ⇒ 4 处 close_panel 全都没传 title
+#     ⇒ `panel_still_open(bot, None, None)` 在「弹窗帧读到了文字」时只回
+#       `_panelish`（有没有「返回/关闭/取消」）⇒ 宝箱面板**没有**这种按钮
+#       ⇒ 恒判「面板没开」⇒ `close_panel` 开头 `return 0`，**连日志都不落** ✗
+#     ⇒ 面板一直开着 ⇒ 下一轮 popups() 又读到「机巧宝箱怪」⇒ 再读价、再不买 ✗✗
+#   ⚠ 标题走的是**白名单里已有的**那两条（`PANEL_X_TITLES` 早就收了它们，
+#     但 mimic_flow 从来没把 title 递下去 ⇒ 那条「标题行红 X」的路一直是死的）
+_MIMIC_TITLES = ('金属宝箱怪', '机巧宝箱怪')
+# ⭐ v2.129：**详情页**（点开某件商品后那一页）的正面证据
+#   ---- 真机弹窗帧实测（2026-11-09 00:26，点开第 1 件装备）----
+#     月祭法球 / 副手 / 法师 / +6 +5 +3 / 黑暗【2】/ [基础] / … /
+#     **获取地图** / 点击图标立即前往冒险 / 无声沼泽 / **取消追踪** / 8
+#   ⇒ **没有**「尚未拥有 / 已拥有 / 未拥有」（PC 那套判据在本游戏**恒 None**）
+#   ⇒ 拿它当闸门 ⇒ 永远认不出详情页（真机日志 has_detail=false 就是这么来的）
+#     ⇒ 只能靠货架上的数字蒙 ⇒ 把「刷新」的价格 `1` 当成购买键点了 ✗
+_MIMIC_DETAIL_MARKS = ('尚未拥有', '已拥有', '未拥有', '取消追踪', '获取地图',
+                       '点击图标立即前往冒险')
+
+
+def _mimic_panel_like(items):
+    """结构特征：这一帧**像不像**宝箱怪面板（`panel_still_open(structured=)` 用）
+
+    ⚠ 为什么必须有它（真机铁证 bagdbg/mgas_log.txt 2026-11-08 16:41~16:43）：
+      宝箱面板的文字只有「机巧宝箱怪 / 我能发掘传承… / 未传承×4 / 帮助」——
+      **没有**「返回 / 关闭 / 取消」这种面板级按钮 ⇒ `panel_still_open` 的
+      `_panelish` 恒 False ⇒ 面板被判成「没开」⇒ `close_panel` 一次都不点 ✗
+      而面板分明就在屏幕上（下一轮 OCR 又读到它）⇒ 这条纯结构判据把话说明白 ✓
+    判据（任一命中即算，宽松但**不放行任何会点棋盘的动作** —— 它只决定「要不要去关」）：
+      ① 有文字含「宝箱怪」（真机标题实测可读，见日志 `texts` 数组）
+      ② 有 ≥2 条「未传承」（面板独有的四格装备位文案）
+      ③ 有「传承装备」/「隐藏能力」这类面板独有说明句
+    """
+    try:
+        _txt = [str((t or {}).get('text') or '').strip() for t in (items or [])]
+    except Exception:       # noqa: BLE001
+        return False
+    if not _txt:
+        return False
+    if any('宝箱怪' in _s for _s in _txt):
+        return True
+    if sum(1 for _s in _txt if _s == '未传承') >= 2:
+        return True
+    return any(('传承装备' in _s) or ('隐藏能力' in _s) for _s in _txt)
 
 
 def _mimic_read_prices(bot, log=None, rounds=5, sec=0.8):
@@ -2710,8 +2788,25 @@ def _mimic_buy_one(bot, log, card_x):
     log.append({'mimic': 'tap_card', 'x': _tx, 'y': MIMIC_CARD_Y,
                 'src': 'price_ocr' if _px is not None else 'anchor_fallback'})
 
-    det = _find_text_btn(bot, ('尚未拥有', '已拥有', '未拥有'), 300, 750)
-
+    # ⛔⛔ v2.129【详情页判据换真证据 + 「刷新在屏」一票否决 —— 治「点成了刷新，没买到装备」】
+    #   ---- 真机弹窗帧实测（2026-11-09 00:26，同一个宝箱怪面板，两页各一帧）----
+    #   货架页：金属宝箱怪 / 我这里有很多不错的宝贝，要来看看吗 / 8(240,1096) /
+    #           **刷新(895,1229)** / 刷新时优先出现当前地图尚未获得的装备和符文 /
+    #           **1(915,1271)**   <= 这「1」是**刷新的价格**，不是购买键
+    #   详情页：月祭法球 / 副手 / 法师 / +6 +5 +3 / 黑暗【2】/ … / 获取地图 /
+    #           点击图标立即前往冒险 / 无声沼泽 / **取消追踪(249,1577)** /
+    #           **8(900,1578)**   <= 这才是真购买键 ✓
+    #   ⇒ ① 旧判据 ('尚未拥有','已拥有','未拥有') 在本游戏**根本不存在**
+    #        ⇒ `has_detail` 恒 False（真机日志逐字就是 `has_detail: false`）
+    #     ② 那个「没详情、也没购买键 ⇒ 不点」的闸门，被下面这个**假购买键**绕过：
+    #        刷新的价格 `1` 在 (915,1271) —— 落在 MIMIC_BUY_Y_RANGE(1245,1665) 内、
+    #        cx 915 > 570 ⇒ 条件全中 ⇒ 点下去 = **点刷新**（用户报的就是这个）✗
+    #   ⇒ 两条修法都**只加否决、不放宽任何放行**：
+    #      ① 详情页正面证据换成 `_MIMIC_DETAIL_MARKS`（真机逐字读到的那几个词）
+    #      ② **屏幕上还有「刷新」⇒ 一定还在货架页 ⇒ 这一帧任何数字都不许当购买键**
+    #         （货架页的每个纯数字都是价格标签，没有一个能买 ✗）
+    det = None
+    _shelf = False
     btn = None
     for rd in range(1, 4):
         if rd > 1:
@@ -2724,7 +2819,17 @@ def _mimic_buy_one(bot, log, card_x):
             except Exception:       # noqa: BLE001
                 pass
         it = _items(bot)
+        _txt = [str((t.get('text') or '')).strip() for t in (it or [])]
+        _shelf = any(('刷新' in _s) for _s in _txt)     # ② 货架页一票否决
+        if not _shelf and any(any(_m in _s for _m in _MIMIC_DETAIL_MARKS)
+                              for _s in _txt):
+            det = True                                  # ① 详情页正面证据
         best = None
+        if _shelf:
+            # ⚠ 这一帧是货架页 ⇒ **本帧一个数字都不点**（用户报的「点成刷新」就是这个）
+            #   只跳过本帧、**不 break**：点卡后的第一帧可能还停在货架页的过渡画面，
+            #   下一轮（换新帧）才是详情页 ⇒ break 会把能买的那件直接丢掉
+            continue
         for t in it:
             s = (t.get('text') or '').strip()
             cy = t.get('cy') or 0
@@ -2748,7 +2853,7 @@ def _mimic_buy_one(bot, log, card_x):
         at = MIMIC_BUY_BTN
         src = 'fallback'
     log.append({'mimic': 'detail', 'has_detail': bool(det),
-                'buy_at': list(at), 'src': src})
+                'shelf': bool(_shelf), 'buy_at': list(at), 'src': src})
     if det is None and not btn:
         say('      · ⚠ 详情页没认出来、也没找到购买键 ⇒ **不盲点**（放弃这一件）')
         return False
@@ -2791,29 +2896,63 @@ def mimic_flow(bot, log, flags=None):
     out = {'acts': [], 'bought': [], 'skip': None}
     b = _proxy(bot)
 
+    # ⭐⭐ 2026-11-05 用户报「买完不关窗口，又点了一次买过的那个装备」：
+    #   根因是**面板没关掉 ⇒ 下一轮 popups() 又看到它 ⇒ 再进一次流程 ⇒ 再点那件**。
+    #   v2.100 的 `nogo_rc` 只挡「再点这一格」，挡不住「面板还开着 ⇒ 又被当成新面板」。
+    #   ⇒ 两个补丁：① 本图只买一次（flags 标记）；② 收尾关不掉就**升级重试**（见尾部）。
+    if isinstance(flags, dict) and flags.get('mimic_bought'):
+        say('      · 本图宝箱怪**已经买过** ⇒ 不再买，只保证把面板关掉 ✓')
+        log.append({'mimic': 'skip_already_bought'})
+        _n1 = close_panel(b, log, 'mimic_again1', title=_MIMIC_TITLES,
+                          structured=_mimic_panel_like)
+        if not _n1:
+            close_panel(b, log, 'mimic_again2', title=_MIMIC_TITLES,
+                        structured=_mimic_panel_like)
+        out['skip'] = 'already_bought'
+        return out
+
     prices, rounds = _mimic_read_prices(b, log)
     if not prices:
         log.append({'mimic': 'panel_missing_or_timeout', 'rounds': rounds})
         say('      · ⚠ 宝箱怪面板读不到商品/价格 ⇒ 不盲点、关面板（下轮再来）')
-        close_panel(b, log, 'mimic_nopanel')
+        close_panel(b, log, 'mimic_nopanel', title=_MIMIC_TITLES,
+                    structured=_mimic_panel_like)
         out['skip'] = 'no_prices'
         return out
     say('      · 宝箱怪面板：%d 件商品，价格（x,草）= %s' % (len(prices), prices))
 
+    # ⛔⛔⛔ v2.128【装备 = **价格行最左那一件** —— 旧写法按'离推算列心最近'挑，真机必错】
+    #   ---- 真机铁证（bagdbg/mgas_log.txt 2026-11-08 16:41，连 30 轮逐字相同）----
+    #     {"mimic":"prices_ok","prices":[[73,8],[289,1]],"zoomed":true}
+    #     {"mimic":"equip_col","col":0,"card_x":191,"price":1,"need":8}
+    #     面板只有 **2 件**：第 1 件 **x=73 就是 8 草（装备）**，第 2 件 x=289 是 1 草
+    #     旧写法 eq_x = MIMIC_CARD_X[0] = 191（那是 **PC 720 系 ×1.5 的推算值**）
+    #       |73−191| = 118   ｜   |289−191| = **98**   ⇒ 挑中 **289 = 1 草**
+    #     ⇒ 判「不是 8 草 ⇒ 不买」⇒ 面板没关 ⇒ 下一轮又读到同一份价格 ⇒ **死循环** ✗✗
+    #   ---- 为什么判据是'最左'而不是'取 8 草那件' ----
+    #     用户口径（权威）：「**从左开始数第一个必定是装备**」⇒ 判据是**位置**，不是价格。
+    #     若改成'取 8 草的那件'，就会去买**符文/别的东西** —— 那正是 PC 踩过的坑：
+    #       PC 注释原话「上一版只按"价格==8"筛 ⇒ 把第 3 列那个 **8 草的符文**也买了」
+    #       用户当场指出「不是说只买8草装备吗，为什么去买符文了」✗
+    #   ---- 为什么不再用 MIMIC_CARD_X ----
+    #     那四个是推算值（_nearest_price_x 的注释自己就写着'为什么不干脆点 MIMIC_CARD_X'）；
+    #     而价格行的 cx 是**每帧现读**的 ⇒ 天生自适应 ✓
+    #     ⚠ 16:09 / 16:26 那两把「买成功」也是**买错了件**（[[73,8],[217,8]] 挑中 217 第 2 件），
+    #       只因两件都是 8 草才没暴露 —— 别以为旧写法一直是对的 ✗
+    _ps = sorted((prices or []), key=lambda _t: int(_t[0]))
     eq_col = MIMIC_EQUIP_COL
-    eq_x = MIMIC_CARD_X[eq_col]
-    eq_price = None
-    if prices:
-        _px, _pv = min(prices, key=lambda t: abs(t[0] - eq_x))
-        eq_price = _pv
+    eq_x = int(_ps[0][0]) if _ps else int(MIMIC_CARD_X[eq_col])
+    eq_price = (_ps[0][1] if _ps else None)
     log.append({'mimic': 'equip_col', 'col': eq_col, 'card_x': eq_x,
-                'price': eq_price, 'prices': prices, 'need': MIMIC_TARGET_PRICE})
+                'price': eq_price, 'prices': prices, 'need': MIMIC_TARGET_PRICE,
+                'pick': 'leftmost_price', 'anchor_old': MIMIC_CARD_X[eq_col]})
 
     if eq_price != MIMIC_TARGET_PRICE:
         say('      · 装备列（第 %d 列）价格是 %s，不是 %d 草 ⇒ **不买**'
             % (eq_col + 1, eq_price, MIMIC_TARGET_PRICE))
         out['skip'] = 'equip_not_target_price'
-        close_panel(b, log, 'mimic_price')
+        close_panel(b, log, 'mimic_price', title=_MIMIC_TITLES,
+                    structured=_mimic_panel_like)
         return out
     say('      · 装备列（第 1 列 x=%d）= %d 草 ⇒ **买它**（只买装备 ✓）'
         % (eq_x, eq_price))
@@ -2829,19 +2968,40 @@ def mimic_flow(bot, log, flags=None):
         say('      · ⚠ 幸运草 %d < %d ⇒ **不买**（只关面板 ✓）'
             % (clv, MIMIC_TARGET_PRICE))
         out['skip'] = 'low_clover'
-        close_panel(b, log, 'mimic_lowclover')
+        close_panel(b, log, 'mimic_lowclover', title=_MIMIC_TITLES,
+                    structured=_mimic_panel_like)
         return out
 
     if _mimic_buy_one(b, log, eq_x):
         out['bought'].append(eq_x)
         out['acts'].append('buy@%d' % eq_x)
+        if isinstance(flags, dict):
+            flags['mimic_bought'] = True      # 本图只买一次（用户 2026-11-05）
         say('      · 买到一件（x=%d，%d 草）✓' % (eq_x, MIMIC_TARGET_PRICE))
     else:
         say('      · x=%d 这件没买成（见日志）' % eq_x)
 
     # 收尾：面板还在 ⇒ 万能点位 ✓
-    close_panel(b, log, 'mimic_tail')
-    log.append({'mimic': 'done', 'bought': out['bought'], 'acts': out['acts']})
+    # ⚠ 用户 2026-11-05：买完窗口没关 ⇒ 下一轮又进这个面板 ⇒ 又点一次那件
+    #   ⇒ 关不掉必须**升级重试**并如实落日志（别静默当成功 ✗）
+    _n_close = close_panel(b, log, 'mimic_tail', title=_MIMIC_TITLES,
+                           structured=_mimic_panel_like)
+    if not _n_close:
+        log.append({'mimic': 'close_failed_retry'})
+        _n_close = close_panel(b, log, 'mimic_tail2', title=_MIMIC_TITLES,
+                               structured=_mimic_panel_like)
+    if not _n_close:
+        try:
+            _univ_close(b, log, 'mimic_tail3', items=_items(b))
+        except Exception:       # noqa: BLE001
+            pass
+        log.append({'mimic': 'close_failed_all',
+
+                    'note': '三种关法都没关掉 ⇒ 下一轮可能重入（已记日志 ✓）'})
+        say('      · ⚠⚠ 宝箱怪面板**三次都没关掉** ⇒ 下一轮可能重入（会再点同一件）')
+    log.append({'mimic': 'done', 'bought': out['bought'], 'acts': out['acts'],
+
+                'closed': bool(_n_close)})
     return out
 
 

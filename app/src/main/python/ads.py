@@ -380,7 +380,7 @@ def buy_with_ad(b, which, log=None, tag="ads", max_times=3, dry=False):
             b.tap(_entry[0], _entry[1], wait=2.4)
             items = GC.ocr_items(b, tag="%s_%s_o%dc" % (tag, which, r))
             _log(log, {"ads": "open_panel", "which": which,
-                       "at": entry, "open": _panel_open(items, which)})
+                       "at": _entry, "open": _panel_open(items, which)})
             if not _panel_open(items, which):
                 _maybe_confirm(b, log, tag)
                 items = GC.ocr_items(b, tag="%s_%s_o%dd" % (tag, which, r))
@@ -574,7 +574,7 @@ def run(b, log=None, skip_ads=True, alchemy=True, times=3, dry=False):
                                  ("clover", "clover", times),
                                  ("energy", "energy", times)):
         try:
-            n = buy_with_ad(b, _which, log, times=_times, dry=dry)
+            n = buy_with_ad(b, _which, log, max_times=_times, dry=dry)
             res[_key] = n
         except Exception as _e:     # noqa: BLE001
             import traceback as _tb

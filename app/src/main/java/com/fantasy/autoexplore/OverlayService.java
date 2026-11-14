@@ -1993,10 +1993,14 @@ public class OverlayService extends Service {
                 Thread.sleep(600);          // 给系统一点时间把游戏拉到前台
             } catch (InterruptedException ignored) {
             }
+            // ⭐ v2.131 追加第 17~20 个位置参数（预言石碑四个「遇到就停」，
+            //   **只能往后追加**）：stopLucky, stopPeace, stopElemPurple, stopElemOrange
             String r = PyBridge.call("start", maps, 45, 900, minStamina, "", true,
                     bagEvery, true, false, autoSupply,
                     guildTasks, guildAlchemy, guildIntel, recruitFree, adFree,
-                    dailyFirst);
+                    dailyFirst,
+                    Prefs.stopLucky(this), Prefs.stopPeace(this),
+                    Prefs.stopElemPurple(this), Prefs.stopElemOrange(this));
             AppLog.i("▶ " + r);
         }, "ovl-start").start();
     }

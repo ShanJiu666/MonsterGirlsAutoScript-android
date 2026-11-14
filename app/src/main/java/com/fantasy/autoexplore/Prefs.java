@@ -195,4 +195,46 @@ public final class Prefs {
     public static void setAdFree(Context c, boolean v) {
         sp(c).edit().putBoolean(K_AD_FREE, v).apply();
     }
+
+    // ══════ v2.131 预言石碑「遇到就停」四个开关（对齐 PC `bot_gui.py:2003` 那页）══════
+    //  ⚠ 之前安卓端**没有这个入口**：`explore_loop.STOP_LUCKY/PEACE/ELEM_PURPLE/
+    //    ELEM_ORANGE` 是写死的模块常量 = True ⇒ 用户看到「抽到元素·紫色就停」
+    //    却**找不到地方关** ✗（2026-11-09 用户原话：「『遇到就停』这个选项没在 app 里显示啊」）
+    //  ⚠ 默认值（用户 2026-11-09 明确指定：「**四个开关就幸运和元素橙默认打开**」）：
+    //    · 幸运      **开**  → 抽到就停脚本、保现场
+    //    · 和平·金属 **关**  → 只记录，不停
+    //    · 元素·紫   **关**  → 只记录，不停（真机 21:56 那把就是被它停掉的）
+    //    · 元素·橙   **开**  → 抽到就停脚本、保现场
+    //  永远只是**没设过**时的默认值；用户勾过就按勾的来（SharedPreferences 本身即记忆）✓
+    public static boolean stopLucky(Context c) {
+        return sp(c).getBoolean("stop_lucky", true);
+    }
+
+    public static void setStopLucky(Context c, boolean v) {
+        sp(c).edit().putBoolean("stop_lucky", v).apply();
+    }
+
+    public static boolean stopPeace(Context c) {
+        return sp(c).getBoolean("stop_peace", false);
+    }
+
+    public static void setStopPeace(Context c, boolean v) {
+        sp(c).edit().putBoolean("stop_peace", v).apply();
+    }
+
+    public static boolean stopElemPurple(Context c) {
+        return sp(c).getBoolean("stop_elem_purple", false);
+    }
+
+    public static void setStopElemPurple(Context c, boolean v) {
+        sp(c).edit().putBoolean("stop_elem_purple", v).apply();
+    }
+
+    public static boolean stopElemOrange(Context c) {
+        return sp(c).getBoolean("stop_elem_orange", true);
+    }
+
+    public static void setStopElemOrange(Context c, boolean v) {
+        sp(c).edit().putBoolean("stop_elem_orange", v).apply();
+    }
 }

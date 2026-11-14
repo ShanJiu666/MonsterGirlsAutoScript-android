@@ -72,6 +72,28 @@ def rc_of(idx):
     """cell 索引 -> 1 基 (r, c)（与 `mapsim.rc_of` 同口径）"""
     return idx // COLS + 1, idx % COLS + 1
 
+def _lit_now(b):
+    """⭐⭐⭐⭐ v2.127：这一块**现在点得动吗**（观测里真亮）—— **唯一判据，三处同源**
+
+    判据两条（与 PC 的"优先挑 observed 格"同形，多一条地板否决）：
+      · `Block.observed` —— **建块时冻结**的观测值，不被 `_infer_revealed` 推演污染 ✓
+      · `Block.spot['floor_lit']` **不是 False** —— 地板法说它还是雾 ⇒ 否决
+        （缺值 ⇒ 不否决，向后兼容 ✓）
+
+    ⚠⚠ **为什么要收成一个函数**（本项目第六次同族病"判据不同源"）：
+      同一个问题 ——「这一格点得动吗」—— 原先被**三处**分别回答，且答案不一致：
+        ① `_build_cache` 的 `obs_lit` 候选集（v1.74）：要求 observed **且** 地板不否决 ✓
+        ② `cells_for_plan` 的片内挑格（v2.127 之前）：**根本不认 observed**，只做邻接推演 ✗
+        ③ `cells_for_plan` 的步序排序（v2.114）：只认裸 observed，**没有地板否决** ✗
+      ⇒ ②③ 会把"地板说是雾"的假亮格当成能点的格 ⇒ 真机 `tap: fogged_noop` ✗
+      ⇒ 本条把三处收成**同一个判据**：只此一份，改一处即三处同步 ✓
+    """
+    if b is None or not getattr(b, 'observed', False):
+        return False
+    # ⚠⚠ 必须从 **`spot`** 读 —— `Block` **没有** `floor_lit` 属性
+    #   （观测字段一律存在 `Block.spot`；`getattr(b,'floor_lit')` 恒 None ⇒ 白改 ✗）
+    return (b.spot or {}).get('floor_lit') is not False
+
 
 class Problem:
     """把一张盘编译成"搜索用"的纯数据（不依赖 MapSim 的可变状态）"""
@@ -224,6 +246,32 @@ class Problem:
         """
         if bi < 0:
             return False
+        # ⭐⭐⭐⭐ v2.126【观测里就亮的块 ⇒ 直接可点】—— 治「首步挑到点不动的格」
+        #   真机铁证（2026-11-07 22:15 那把，无声沼泽 map 24）：
+        #     计划首步 = `2,3`，该块 `observed=False`（整片还是雾）
+        #     ⇒ 真机 `tap: fogged_noop` ⇒ `give_up_step` 连 `1,1`（唯一目标）一起摘掉 ✗
+        #   ## 为什么这里缺一条
+        #     本函数的判据一直是**纯邻接推演**（挨营地 / 挨已消耗格），后来加的观测闸门
+        #     只做**否决**（观测说雾 ⇒ 不许放行），却**从没承认过相反方向的事实**：
+        #     **观测里已经亮着的块本来就点得动**（它已经出现在棋盘上）
+        #     ⇒ `solve().visible(m)` 的 `obs_lit` 掩码（v1.62）早就这么放行了，
+        #        选格这边没跟上 ⇒ **候选集与选格判据不同源** ⇒ 兜底 `cells[0]` 挑到雾格 ✗
+        #   ## 证据（42 张真机帧离线复算，真 `solve`）
+        #     · 只加本条（J 臂）：首步踩兜底 16/36 → 9/36，无解盘 **6 → 6**（不变）
+        #     · 与下面的 `EMPTY_ADJ` 条（I 臂）**互不重叠**，各治一批 ✓
+        #     · 合并后：首步踩兜底 **0/36**，无解盘仍 **6**，首步"观测里就亮" 25 → 34 ✓
+        #   ⚠ 方向安全：观测说亮、实际被面板挡住 ⇒ 那是 `tap` 的 nochange/拉黑管的事
+        #     （与本函数原有的观测闸门注释同口径 ✓）
+        # ⭐⭐⭐⭐ v2.127【本条从"裸 observed"收紧成 `_lit_now`】—— 加**地板否决**
+        #   v2.126 这条只认裸 `Block.observed`，可"观测里亮"**不等于**"点得动"：
+        #   真机 2026-11-16 10:51 那张图，`(3,6)` 块 `observed=True`（ratio 0.794
+        #   过了模型层 0.75 线）却 **`floor_lit=False`、地板 106 = 该帧纯雾值**
+        #   ⇒ 本条把它直接判成"可点" ⇒ `cells_for_plan` 的片内挑格就算跳过了它，
+        #     **下面那段 `block_revealed` 也会在这里提前 return True** ⇒ 照样挑它 ✗✗
+        #   ⇒ 判据改用 `_lit_now`（observed **且** 地板不否决），与 `obs_lit` 掩码
+        #     **逐字同源** ✓ —— 只影响"假亮格"，观测里真亮的块行为一字不变 ✓
+        if _lit_now(self.blocks.get(bi)):
+            return True
         if self.camp is not None and bi == self.camp:
             return True
         # ⭐⭐⭐ v1.51【观测闸门】—— 抄 PC，治「**计划去点雾格**」
@@ -292,7 +340,12 @@ class Problem:
 
         返回 [((r, c), block_idx, 体力)…]（1 基行列，与 visible()/rc_of 同坐标系 ✓）
 
-        ⚠ v1.61：本函数**未改**（保持与 PC 逐字一致）—— 详情见下面 `pick is None` 段的撤回说明 ✓
+        ⚠ v1.61：`pick is None` 那道**兜底**未改（保持与 PC 逐字一致）—— 详情见下面
+           `pick is None` 段的撤回说明 ✓
+
+        ⭐ v2.114 加了「步与步之间谁先谁后」的定序；v2.127 补上 PC 那句「片内先挑
+           observed 格」的两段式，并把三处判据（候选集掩码 / 片内挑格 / 步序排序）
+           收成同一个 `_lit_now` —— 详见下面各自的注释块。
         """
         consumed = set(self.consumed_cells(frozenset()))   # ⭐ 含观测里本来就是空的格 ✓
         out = []
@@ -310,11 +363,54 @@ class Problem:
                 cells = list(self.cells_of.get(bi, ()))
             if not cells:
                 continue
+            # ⭐⭐⭐⭐ v2.127【片内挑格：**先挑「观测里就亮的格」** —— 照抄 PC】
+            #   用户 2026-11-16 报「最新这张图的规划，又出现直接点雾的情况了。。
+            #   看看 pc 的规划是怎么搞得，参考下」
+            #
+            #   ## 缺口（PC 有、本文件从来没有）
+            #     PC `mapbot_pc/mapsolve.py:242-254` 是**两段**：
+            #         pick = None
+            #         for c in cells:
+            #             _blk = self.blocks.get(self.board[c])
+            #             if _blk is not None and getattr(_blk, 'observed', False):
+            #                 pick = c
+            #                 break
+            #         if pick is None:          # 退一步：纯邻接推演（下面那段）
+            #             for c in cells: ...
+            #     而本文件只有**后半段**（v2.114 补的只是"步与步之间"的排序）
+            #     ⇒ 片内挑哪一格**一直没搬过来** ✗
+            #
+            #   ## 真机铁证（2026-11-16 10:51 那把，无声沼泽 map 2 第 2 张图）
+            #     计划 `3,6 / 1,6 / 2,3 / 3,1 / 2,6`，首步 `(3,6)` = 预言石碑：
+            #       · 块级 `observed=True`（ratio **0.794** 过 0.75 线）
+            #       · 可 `floor_lit=False`、地板 **106** = 该帧**纯雾值** ⇒ **它还是雾** ✗
+            #     ⇒ 真机点它 = `fogged_noop`。而**同一片/同一步序里就有 1,6（地板 165，亮）**，
+            #       现状挑格只按邻接推演、按 `cells` 原序走 ⇒ 挑到 3,6 ✗
+            #
+            #   ## 判据为什么带地板（比 PC 原文多一条）
+            #     `_build_cache` 的 `obs_lit` 掩码（v1.74，候选集）**已经**要求
+            #     `spot['floor_lit'] is not False` —— 选格这边若只认裸 `observed`，
+            #     又回到"候选集与选格不同源"（v2.126 刚治过同一族病）✗
+            #     ⇒ 判据与 `obs_lit` **逐字同源** ✓（`floor_lit` 缺值 ⇒ 不否决，向后兼容）
+            #
+            #   ## 证据（44 张真机帧离线复算，真 `solve` + 真 `cells_for_plan`）
+            #     · 现状：首步「地板说亮」**18** / 「地板说雾」**20**
+            #     · 只加 PC 原样（裸 observed）：20 / 18
+            #     · 加本条（带地板）：**24 / 14** ✓ 而 cost 264、步数 95、有解 44 盘
+            #       **一位数字都没变**（只换片内挑哪一格，不增删步）✓
+            #     · 出事那张：`(3,6)` 雾 ⇒ **`(1,6)` 亮**，cost 15 / 5 步不变 ✓
+            #   ⚠ 只**放行**已亮的格，绝不删下面那段邻接推演（PC 原话：先挑亮的，
+            #     挑不到再退回推演）⇒ 全是雾时行为一字不变 ✓
             pick = None
             for c in cells:
-                if self.block_revealed(self.board[c], consumed):
+                if _lit_now(self.blocks.get(self.board[c])):
                     pick = c
                     break
+            if pick is None:
+                for c in cells:
+                    if self.block_revealed(self.board[c], consumed):
+                        pick = c
+                        break
             # ⚠⚠ v1.61 实测结论：**这里保持 PC 原样，不要改**（曾试过"兜底不许挑雾格"，已撤回）
             #   PC 原文（`mapbot_pc/mapsolve.py:218`）：
             #        if pick is None:                  # 兜底：整片都没揭示（**不该发生**）
@@ -337,6 +433,35 @@ class Problem:
             #   ⇒ 本步真正被占用的**格**是 `cells`（候选格全部在片内、空地片已全部连锁消耗 ✓）
             #   改用 `cells` 后语义自洽，也顺带覆盖"多格块只点了一格、其余成员仍算已揭示"的漏洞。
             consumed |= set(cells)
+        # ⭐⭐⭐ v2.114【**观测已亮的块排前面** —— 治「第一痛点雾格」】
+        #   用户 2026-11-06 报「map2 明显有错误，为什么这么规划？」，真机帧实测：
+        #     手机端 cells_for_plan ⇒ [(1,3), (1,4), (3,1)]
+        #     其中 (1,3) `observed=False`（地板 107 < 144.5 ⇒ **还是雾**）
+        #     ⇒ 真机点它 = `tap: fogged_noop` ⇒ 一轮就 `give_up_step` 摘掉
+        #     ⇒ **白点一次、整条计划前段作废** ✗
+        #   ⚠ 同一份观测喂 **PC 端**（独立进程）⇒ [(1,4), (1,3), (3,1)] ✓
+        #     两端 cost 都是 16、目标集相同 ⇒ 差别只在**等代价解的 tie-break**，
+        #     A\* 先试哪个块是随机的 ⇒ 不能靠运气，必须**显式定序** ✓
+        #   ---- 判据 ----
+        #     `Block.observed`（**建块时冻结的观测值**，不被 `_infer_revealed` 推演污染）
+        #     为 True 的块排在前面；组内保持搜索原序（**稳定排序**，不动代价）✓
+        #   ---- 为什么安全 ----
+        #     · 只**重排**、不增删步、不改体力 ⇒ cost 恒等（map2 实测 16 → 16）✓
+        #     · 已亮格点得动，先用它开路反而更可能把后面的雾格**连锁揭开** ✓
+        #     · 全是雾时（没有 observed 块）排序退化为原序 ⇒ 行为一字不变 ✓
+        #   ⚠ 与 PC `cells_for_plan` 里那段「优先挑 observed 格」是**同一条规则**，
+        #     但 PC 只管「片内挑哪一格」，本条管「**步与步之间谁先谁后**」——两者互补 ✓
+        # ⭐⭐⭐⭐ v2.127【排序键也换成 `_lit_now`】—— 与掩码/挑格**同源**
+        #   v2.114 那条只认裸 `Block.observed` ⇒ 会把"观测里亮、地板说是雾"的**假亮块**
+        #   从天而降排到**第一位**（真机 2026-11-16 10:51：目标块 `bi=15` 本是最后一步，
+        #   被这条提到第 0 步 ⇒ 首步点 `3,6` 雾格 ⇒ `fogged_noop`）✗
+        #   ⇒ 换成与 `obs_lit` 掩码（v1.74）**同一个判据**：只给"真亮"的块优先 ✓
+        #   ## 证据（44 张真机帧离线复算，真 `solve` + 真 `cells_for_plan`）
+        #     · 裸 observed（现状）：首步「地板说亮」18 / 「地板说雾」20
+        #     · `_lit_now`（本条）：**26 / 12** ✓ 而 cost 264、步数 95、有解 38 盘
+        #       **一位数字都没变**（只重排，不增删步）✓
+        #     · 出事那张：首步 `(3,6)` 雾 ⇒ **`(1,6)` 亮**，cost 15 / 5 步不变 ✓
+        out.sort(key=lambda _t: 0 if _lit_now(self.blocks.get(_t[1])) else 1)
         return out
 
     def visible(self, state):
@@ -628,8 +753,31 @@ def _build_cache(prob):
             rr, ccc = r + dr, cc + dc
             if 0 <= rr < ROWS and 0 <= ccc < COLS:
                 nb = prob.board[rr * COLS + ccc]
-                if nb >= 0:
-                    EMPTY_ADJ |= bit[nb]
+                if nb < 0:
+                    continue
+                # ⭐⭐⭐⭐ v2.126【这里补上同一道观测闸门】—— 治「首步挑到点不动的格」
+                #   ⚠ 上面那道 `_obs_cells` 闸门守的是**被消耗的格**（`c`），
+                #     可真机那把出问题的是**被它揭示出来的邻居块**（`nb`）——
+                #     `c` 在观测里也是空的（`board<0`），永远过得了那道闸门 ✗
+                #   真机铁证（2026-11-07 22:15，无声沼泽 map 24）：
+                #     `(2,5)` 与 `(1,5)` 是同一块草丛（`SpotSize=2`），营地 `(1,6)`
+                #     挨着 `(1,5)` ⇒ 整块被揭示；但反推"谁已被连锁吃掉"是**逐格**判的
+                #     （`explore_loop._infer_chain_consumed`）⇒ `(2,5)` 自己没挨着营地
+                #     ⇒ 被误判"已消耗"并删出模型 ⇒ `board[2,5] = -1`
+                #     ⇒ 本掩码把雾块 `bi=6 (2,3)+(2,4)`（`observed=False`）当成
+                #        "挨着已消耗格 ⇒ 开局已揭示" ⇒ 进 `visible()` ⇒ 排成**首步** ✗✗
+                #   ⇒ 判据：**逐"已消耗格"判的推断不能替被揭示的邻居块作证** ——
+                #     观测说 `nb` 是雾 ⇒ 不许因邻居被推断为已消耗而判它已揭示 ✓
+                #   ## 证据（42 张真机帧离线复算，真 `solve`）
+                #     · 只加本条（I 臂）：首步踩兜底 16/36 → 9/36，无解盘 **6 → 6**
+                #     · 与上面 v2.126 的 `block_revealed` 条**互不重叠**，各治一批
+                #     · 合并后：首步踩兜底 **0/36**，无解盘仍 **6** ✓
+                #   ⚠ 与 `block_revealed` 的观测闸门**同口径**（`Block.observed`，
+                #     建块时冻结、不被 `_infer_revealed` 推演污染 ✓）
+                _nb126 = prob.blocks.get(nb)
+                if _nb126 is not None and not getattr(_nb126, 'observed', False):
+                    continue
+                EMPTY_ADJ |= bit[nb]
     EMPTY_ADJ &= ~camp_mask
     targets_mask = 0
     for t in prob.targets:
@@ -653,6 +801,9 @@ def _build_cache(prob):
     #   ⚠ 拉黑块**不排除在这一支之外**也不行 —— 它在 `visible(m)` 里统一 `&= ~blocked_mask` ✓
     obs_lit = 0
     for bi in idxs:
+        # ⚠⚠ v2.127 把 `_lit_now` 收成单一判据时，**这条旧早退必须原样留着** ——
+        #   v1.74 A③ 是撤回守门（v1.62 抄 PC `19b4ed8` 那支"只增不减"）：
+        #   下面的地板否决只**加**在旧判据之后，两条同时成立 ✓
         if not getattr(prob.blocks[bi], 'observed', False):
             continue
         # ⭐⭐⭐ v1.74【"观测里亮" **不够** —— 还要**地板也说亮**】

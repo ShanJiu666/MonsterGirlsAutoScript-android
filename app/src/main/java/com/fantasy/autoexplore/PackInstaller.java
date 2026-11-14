@@ -26,8 +26,18 @@ public final class PackInstaller {
      *   —— 与 PC 端热更 T13j~T13n 那条（「代码到了、图没到」）是**同一族** bug ✓
      * ⚠ **以后每次往 `assets/mapbot_pack/` 加/改资源，都要把这里的版本号 +1**
      *   （门禁 `v1.68 A⑨` 守着这件事与 Python 侧的外置目录回退同时存在 ✓）
+     *
+     * ⭐ v2.108：`.pack_v12` → `.pack_v13` —— 换了「情报」按钮模板
+     *   （旧 `templates/guild_intel_btn.png` 122×72 与当前 UI 尺度不符 ⇒ 匹配最高 0.537
+     *     < 0.90 ⇒ 该层从未命中 ⇒ 每次都掉到盲点兜底 ⇒ 点低 330px）。
+     *   新模板 `templates/ui/guild_intel_btn.png` 129×136，真帧实测命中 1.000 ✓
+     *   ⚠ 不提版本号 ⇒ 已装 .pack_v12 的设备**永远拿不到**新模板，而且不报错 ✗
+     *
+     * ⭐ v2.108b：`.pack_v13` → `.pack_v14` —— 情报按钮模板**再换一次**：
+     *   129×136 整块（含右上角红点徽标）在"奖励已领完"的帧上只有 **0.863 < 0.90**
+     *   ⇒ 改成 **146×53 只裁红底条**，有/无徽标两帧都是 1.000 ✓
      */
-    private static final String MARK = ".pack_v10";
+    private static final String MARK = ".pack_v14";
 
     private PackInstaller() {
     }

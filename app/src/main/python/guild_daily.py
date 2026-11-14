@@ -494,7 +494,7 @@ def _sleep(b, sec):
         return
     except Exception:       # noqa: BLE001
         pass
-    _sleep(b, sec)
+    time.sleep(sec)
 
 
 
@@ -1620,8 +1620,14 @@ def start_alchemy(b, log, tag="alch"):
         #   ---- 做法：**先点锚点，再用"投料有没有生效"验证** ----
         #     点完必须看到「预计时间」从 `--` 变成 `HH:MM:SS` ⇒ 才算点中 ✓
         #     没变 ⇒ 再试一次 OCR 认到的（双保险），仍不行就如实记 nothing ✗
+        # ⛔⛔ 2026-11-05 实测（炼金面板开着、直接量的真实坐标）：
+        #   「满星」真实位置 dev(593,2203) ⇒ 归一化参考系 (500,1551) = 本常量 ✓
+        #   而 use_dlg=True 按弹窗系算 ⇒ dev 2023（偏上 180；真机 1280x2772 偏 248）
+        #   ⇒ 那一下落在装备格子区 ⇒ 把 1 件装备塞进第 1 槽 ⇒ 预计时间变成非空
+        #     ⇒ 下面「变非空就算投料成功」直接去点开始炼金 ⇒ 只投 1 件、压根没点满星 ✗
+        #   ⇒ 通道必须与 ocr_items 同源（参考系）⇒ use_dlg=False ✓
         _tap_xy(b, ALCH_FILTER_FULLSTAR[0], ALCH_FILTER_FULLSTAR[1],
-                wait=2.5, use_dlg=True)
+                wait=2.5, use_dlg=False)
         _log(log, {"alch": "tap_fullstar_anchor", "at": ALCH_FILTER_FULLSTAR})
         items = ocr_items(b, tag="%s_star" % tag)
         t1 = expect_time(items)
@@ -1648,8 +1654,10 @@ def start_alchemy(b, log, tag="alch"):
             return "nothing"
 
     # ⭐⭐ **文字优先**：「开始炼金」同上 —— 面板按钮位置随文案行数变，写死会点空 ✗
+    # 同上：ALCH_START_BTN 是参考系常量（实测 dev 1066,1017 ⇒ ref 899,551）
+    #   ⇒ 兜底锚点也必须走参考系；OCR 命中时 tap_target 内部按 +C 另算 ✓
     tap_target(b, items, ("开始炼金",), ALCH_START_BTN,
-               log=log, tag="alch_start", wait=3.0, use_dlg=True)
+               log=log, tag="alch_start", wait=3.0, use_dlg=False)
     items2 = ocr_items(b, tag="%s_start" % tag)
     tm = alch_timer(items2)
     _log(log, {"alch": "tap_start", "at": ALCH_START_BTN, "timer": tm,
@@ -1919,7 +1927,12 @@ def _intel_claimable(items):
 #   来源：PC `mapbot_pc/intel.py:1x-2x`，按手机端约定 ×1.5 转 1080 参考系 ✓
 #   ⚠**这些仍是 PC×1.5 推算值，没在真机上验过** —— 情报功能本轮未标定，
 #     开启后大概率点不中（和炼金/派遣当初一样）⇒ 已在文档记为「未标定」✗
-INTEL_BTN = (_s(660), _s(258))            # 公会右上角「情报」入口
+# ⛔⛔ v2.108【**已停用为点击目标**】实测 1280×2640 上「情报」按钮在参考系 y≈371~416，
+#   而本常量 y=387 > RefMapper.TOP_SPLIT_REF(300) ⇒ b.tap 走**锚底**分支
+#   （dev = ref·kx + shift）⇒ 落到设备 y≈823，按钮真实在 y≈493 ⇒ **点低 330px** ✗
+#   （9:16 屏 shift=0 ⇒ 恰好对，所以这个错只在非 9:16 屏暴露）
+#   ⇒ 现在只留作坐标留档（门禁 v1.94 ② 要求它仍有定义），**点击一律走模板** ✓
+INTEL_BTN = (_s(660), _s(258))            # 公会右上角「情报」入口（⚠ 仅供参考，禁止盲点）
 INTEL_CLOSE_X = (_s(645), _s(228))        # 面板右上 X
 INTEL_TAB_DAILY = (_s(279), _s(439))      # 「每日」页签
 INTEL_TAB_WEEKLY = (_s(441), _s(439))     # 「每周」页签
@@ -1997,9 +2010,26 @@ def intel_open_panel(b, log=None, tag="intel"):
             at = (int(it["cx"]), int(it["cy"]))
             _by = "ocr"
         else:
-            at = INTEL_BTN
-            _by = "anchor"
-    _tap_xy(b, at[0], at[1], wait=2.6, use_dlg=True)
+            # ⛔⛔ v2.108【**删掉盲点兜底** —— 用户报「情报点击位置不对」的根因】
+            #   ---- 为什么不再盲点 ----
+            #     旧代码这里 at = INTEL_BTN 直接点：模板失效（旧模板 122×72 与当前 UI
+            #     尺度不符，多尺度最佳只有 0.537 < 0.90 ⇒ **层①从来命中不了**）⇒
+            #     每次都掉到这里 ⇒ 1280×2640 上点 (1173,823)，按钮真实在 (1184,493)
+            #     ⇒ **点低 330 设备像素**、落在按钮下方的背景上 ✗✗
+            #   ---- 判据 ----
+            #     模板与 OCR 都认不出 ⇒ **不许猜**（项目原话「兜底比不兜更糟」/
+            #     「不能固定坐标啊，识别气泡」）⇒ 如实记录并返回 False，交给上层收工 ✓
+            _log(log, {"intel": "btn_missing", "tpl": _tpl_i is not None,
+                       "n_ocr": len(items or []),
+                       "note": "模板/OCR 都没认出「情报」⇒ 不盲点（v2.108）"})
+            _say("   ✗ 认不出右上角「情报」按钮（模板 miss + 没读到「情报」二字）⇒ 不点")
+            return False
+    # ⛔⛔ 2026-11-05【通道按来源选，不能一律 use_dlg】—— 用户报「情报不能正常点击」
+    #   · `by='tpl'`：模板是在 **b.img_dlg()（弹窗帧）** 上匹配的 ⇒ 坐标本就是弹窗系 ⇒ tap_dlg ✓
+    #   · `by='ocr'`：`ocr_items()` 返回的是**归一化参考系** ⇒ 必须 b.tap（差 C：模拟器154 / 真机209）✗
+    #   · 旧 by='anchor'：v2.108 起**已删除**（盲点必错，实测偏 330px，见上）✓
+    #   旧写法一律 use_dlg=True ⇒ OCR/锚点两条路都偏 C 个参考像素（≈180~248 设备px）⇒ 点不中 ✗
+    _tap_xy(b, at[0], at[1], wait=2.6, use_dlg=(_by == 'tpl'))
     items2 = ocr_items(b, tag="%s_p2" % tag)
     _ok = intel_panel_open(items2)
     _log(log, {"intel": "tap_btn", "at": at, "by": _by, "open": _ok})
@@ -2014,8 +2044,9 @@ def intel_switch_tab(b, which, log=None, tag="intel"):
     name = "每周情报" if str(which).startswith("w") else "每日情报"
     items = ocr_items(b, tag="%s_t0" % tag)
     # ⭐ 页签文字（「每日情报」/「每周情报」）优先；读不到才用标定坐标 ✓
+    # 同上：OCR 条目/锚点都是**参考系** ⇒ use_dlg=False（旧写法偏 C 点不中 ✗）
     tap_target(b, items, (name,), at, log=log, tag="intel_tab",
-               wait=1.8, use_dlg=True)
+               wait=1.8, use_dlg=False)
     items2 = ocr_items(b, tag="%s_t1" % tag)
     ok = intel_panel_open(items2)
     _log(log, {"intel": "switch_tab", "to": name, "at": at, "ok": ok})
@@ -2040,7 +2071,7 @@ def _intel_dismiss_reward(b, log=None, tag="intel"):
             return True
         _sleep(b, 0.5)
     # ⚠ 走到这里说明 5 轮都没 OCR 到按钮 ⇒ 用标定坐标**兜底**（并如实记 by=fallback）
-    _tap_xy(b, INTEL_POPUP_BACK[0], INTEL_POPUP_BACK[1], wait=1.7, use_dlg=True)
+    _tap_xy(b, INTEL_POPUP_BACK[0], INTEL_POPUP_BACK[1], wait=1.7, use_dlg=False)   # 参考系常量 ✗ 别用 dlg
     _log(log, {"intel": "dismiss_reward", "at": INTEL_POPUP_BACK, "by": "fallback"})
     _say("       · 没读到弹窗按钮 ⇒ 用标定坐标 (%d,%d)" % INTEL_POPUP_BACK)
     return True
@@ -2138,6 +2169,13 @@ def intel_close_panel(b, log=None, tag="intel"):
         _say("   · 已经不在情报页面了 ⇒ 不用关 ✓")
         return True
     # ⭐ 关闭符文字优先（× / X / 关闭），读不到才用 INTEL_CLOSE_X 兜底 ✓
+    # ⛔⛔ v2.110【**这条必须走弹窗系** —— 实测（App 内探针，2026-11-05 23:09）】
+    #   · 情报面板的 X 在设备 (1117,584)，换算到 **dlg = (943,339)**
+    #     ⇒ 与常量 `INTEL_CLOSE_X=(968,342)` 几乎重合 ⇒ **这批常量本来就是弹窗系** ✓
+    #   · 而它在**归一化帧**里是 ref y≈185（< TOP_SPLIT_REF 300）⇒ 旧代码 use_dlg=False
+    #     会走「顶块锚顶」分支 ⇒ 落设备 y≈219 ⇒ **差 365px，点空** ✗
+    #     真机现象：领完奖后面板关不掉，日志 `intel: close_panel ... ok: False`（已复现）
+    #   ⇒ OCR 命中走 `_tap_item_dlg`（条目 +C 再 tap_dlg）、锚点走 `tap_dlg`，同源 ✓
     tap_target(b, items, ("×", "X", "x", "✕", "✖", "关闭"), INTEL_CLOSE_X,
                log=log, tag="intel_close", wait=2.0, use_dlg=True)
     items2 = ocr_items(b, tag="%s_c1" % tag)

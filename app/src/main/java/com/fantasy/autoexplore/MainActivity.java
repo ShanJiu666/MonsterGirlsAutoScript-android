@@ -269,6 +269,18 @@ public class MainActivity extends Activity {
         if (cmd == null || cmd.isEmpty()) {
             return;
         }
+        // ⭐ F5：**第二道闸门**。本 Activity 在 manifest 里是 exported="true"，而
+        //   `am start -n com.fantasy.autoexplore/.MainActivity -e cmd overlay_expand`
+        //   走的正是这里 ⇒ release 包下任意 app 换这条路同样能强制展开/收起悬浮窗。
+        //   ⚠ 判定复用 CommandReceiver 的**同一份** DEBUG_ONLY 名单（见其 isDevOnlyCmd），
+        //   不在这里另立第二份白名单 —— 两份名单漂移过一次了。
+        //   ⚠ 只拦名单里的 dev 钩子：本 switch 里只有 overlay_expand 命中名单，
+        //   init_ocr / capture / test_ocr / tap_start / probe / dump / pyinfo / selftest /
+        //   overlay / red_unlock / summary 都是正常功能，一个都没关。
+        if (CommandReceiver.isDevOnlyCmd(cmd) && !BuildConfig.DEBUG) {
+            AppLog.i("⛔ 命令 " + cmd + " 仅调试包可用（当前是 release 构建）⇒ 已拒绝");
+            return;
+        }
         AppLog.i("收到命令：" + cmd);
         switch (cmd) {
             case "init_ocr":
@@ -817,6 +829,40 @@ public class MainActivity extends Activity {
 
         host.addView(c3, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+        // ── 卡：预言石碑「遇到就停」（v2.131 —— 对齐 PC `bot_gui.py:2003` 那页）──
+        //  ⚠ 用户 2026-11-09：「『遇到就停』这个选项没在 app 里显示啊」
+        //    根因：`explore_loop.py:80-83` 那四个是写死的模块常量 = True，
+        //    Java 侧一个引用都没有 ⇒ 抽到「元素·紫色」就停，而人找不到地方关 ✗
+        LinearLayout c4 = UiKit.card(this, 20);
+        c4.addView(UiKit.sectionTitle(this, "预言石碑 · 遇到就停"));
+        TextView stHint = UiKit.text(this,
+                "勾 = 抽到就停脚本（面板留原样，处理完再点 ▶）；不勾 = 照常选卡继续跑",
+                9.5f, false, UiKit.INK_4);
+        c4.addView(stHint);
+        UiKit.margins(stHint, 0, UiKit.dp(this, 4), 0, UiKit.dp(this, 6));
+        c4.addView(toggleRow("幸运", "宝箱→四叶草，抽到就停",
+                Prefs.stopLucky(this), on -> {
+                    Prefs.setStopLucky(MainActivity.this, on);
+                    AppLog.i("设置：预言·幸运遇到就停 = " + (on ? "开 ✓" : "关"));
+                }));
+        c4.addView(toggleRow("和平 · 金属宝箱怪", "地图中必定出现金属宝箱怪",
+                Prefs.stopPeace(this), on -> {
+                    Prefs.setStopPeace(MainActivity.this, on);
+                    AppLog.i("设置：预言·和平遇到就停 = " + (on ? "开 ✓" : "关"));
+                }));
+        c4.addView(toggleRow("元素 · 紫色位阶", "所有莱姆至少紫色位阶",
+                Prefs.stopElemPurple(this), on -> {
+                    Prefs.setStopElemPurple(MainActivity.this, on);
+                    AppLog.i("设置：预言·元素紫遇到就停 = " + (on ? "开 ✓" : "关"));
+                }));
+        c4.addView(toggleRow("元素 · 橙色位阶", "所有莱姆至少橙色位阶",
+                Prefs.stopElemOrange(this), on -> {
+                    Prefs.setStopElemOrange(MainActivity.this, on);
+                    AppLog.i("设置：预言·元素橙遇到就停 = " + (on ? "开 ✓" : "关"));
+                }));
+        host.addView(c4, UiKit.lpW(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        UiKit.margins(c4, 0, 0, 0, UiKit.dp(this, 12));
     }
 
     /** 一行开关：标题 + 一行说明 + 右侧自绘开关 */
