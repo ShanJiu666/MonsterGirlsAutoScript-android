@@ -8,6 +8,12 @@
   · dlg   = 弹窗系常量，经 `b.tap_dlg()` 使用（面板锚设备中心）⇒ 与分辨率无关 ✓
   · devpx = **设备像素**写死（不经任何映射）⇒ ✗ 换分辨率必错
   · dp    = Android dp / 屏幕比例 ⇒ 一般自适应 ✓
+
+退出码（2026-11 加：旧版**永远 0** ⇒ 结论表过期、常量被改名、甚至源文件全缺，
+都只会安静地少打几行再 exit 0 ⇒ 整脚本失效而没有任何信号）
+  0 = 扫完、且与 ⑤ 结论表一致
+  1 = 漂移（⑤ 结论表与实测对不上）
+  2 = 脚本自身无法工作（列出的源文件缺失）
 """
 import io
 import os
@@ -15,19 +21,45 @@ import re
 import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-ROOT = r'D:\幻想少女公会'
+
+# ⚠ 扫描根**由本文件位置推导**，不写死盘符（2026-11 修）：
+#   旧版 ROOT = r'D:\幻想少女公会' 指的是**另一个仓**（本仓从那里分出来后没跟着改）
+#   ⇒ 在本仓跑时列出的 PC 侧条目**全部静默跳过**，只扫到零散文件还照样打印报告 ⇒ 已失效。
+#   本文件在 <仓根>/tools/ 下 ⇒ 仓根 = tools/ 的父目录。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 
 PY_FILES = [
-    r'tools\mapbot\explore_loop.py',
-    r'tools\mapbot\mapbot.py',
-    r'tools\mapbot\mapsolve.py',
-    r'tools\mapbot\badge.py',
-    r'tools\mapbot\spots.py',
-    r'android_autoexplore\app\src\main\python\mapbot.py',
-    r'android_autoexplore\app\src\main\python\explore_android.py',
-    r'android_autoexplore\app\src\main\python\badge.py',
+    os.path.join('app', 'src', 'main', 'python', 'explore_loop.py'),
+    os.path.join('app', 'src', 'main', 'python', 'mapbot.py'),
+    os.path.join('app', 'src', 'main', 'python', 'mapsolve.py'),
+    os.path.join('app', 'src', 'main', 'python', 'badge.py'),
+    os.path.join('app', 'src', 'main', 'python', 'spots.py'),
+    os.path.join('app', 'src', 'main', 'python', 'explore_android.py'),
 ]
-JAVA_DIR = r'android_autoexplore\app\src\main\java\com\fantasy\autoexplore'
+JAVA_DIR = os.path.join('app', 'src', 'main', 'java', 'com', 'fantasy', 'autoexplore')
+
+# ⑤ 结论表自述：写死坐标点击「仅剩 2 处」= b.tap_dlg(803,1112) + b.tap(803,1112)
+EXPECTED_RAW_TAP_HITS = 2
+
+_SRC_CACHE = {}
+
+
+def _read(rel):
+    """按相对路径读一次并缓存（①②③ 与末尾自检复用同一份文本）。"""
+    if rel not in _SRC_CACHE:
+        _SRC_CACHE[rel] = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+    return _SRC_CACHE[rel]
+
+
+MISSING = [rel for rel in PY_FILES if not os.path.isfile(os.path.join(ROOT, rel))]
+if MISSING:
+    print('✗ 扫描根：%s' % ROOT)
+    print('✗ 下列源文件不存在 ⇒ 脚本自身无法工作（缺文件就没法体检）：')
+    for rel in MISSING:
+        print('    %s' % os.path.join(ROOT, rel))
+    print('  ⇒ 退出码 2（不打印残缺报告，免得被当成「没有漂移」）')
+    sys.exit(2)
 
 CONST_RE = re.compile(r'^([A-Z][A-Z0-9_]{2,})\s*=\s*(\[?\(?\s*-?\d+\s*,\s*-?\d+\s*\)?\]?)\s*(#.*)?$')
 TUPLERE = re.compile(r'-?\d+')
@@ -41,7 +73,7 @@ for rel in PY_FILES:
     if not os.path.exists(p):
         continue
     used = {}
-    src = open(p, encoding='utf-8').read()
+    src = _read(rel)
     for m in re.finditer(r'(\w+)\s*\(\s*([A-Z][A-Z0-9_]{2,})\s*[,\)]', src):
         used.setdefault(m.group(2), set()).add(m.group(1))
     for i, line in enumerate(src.splitlines(), 1):
@@ -99,7 +131,7 @@ for rel in PY_FILES:
     p = os.path.join(ROOT, rel)
     if not os.path.exists(p):
         continue
-    src = open(p, encoding='utf-8').read()
+    src = _read(rel)
     for i, line in enumerate(_strip_py(src), 1):
         for m in TAP_RE.finditer(line):
             hits += 1
@@ -115,7 +147,7 @@ for rel in PY_FILES:
     p = os.path.join(ROOT, rel)
     if not os.path.exists(p):
         continue
-    src = open(p, encoding='utf-8').read()
+    src = _read(rel)
     n_sx = len(re.findall(r'LAYOUT\.sx\(', src))
     n_sy = len(re.findall(r'LAYOUT\.sy\(', src))
     n_tpl = len(re.findall(r'_tpl_hit\(', src))
@@ -166,4 +198,29 @@ print('         `OverlayService` 几何用 dp + *_REF 常量经映射换算 ✓�
 print('Python 层：写死坐标点击仅剩 2 处（`b.tap_dlg(803,1112)` + `b.tap(803,1112)`），')
 print('         即"升星确认按钮"的**有意双通道兜底**（C=0 时两系同值 ✓）—— 已白名单 ✓')
 
-
+# ── 退出口：⑤ 结论表 vs 本次实测（2026-11 加）───────────────────────────────────
+#   只把**脚本自己 ⑤ 里已经写下的断言**拿去和实测对拍，不改任何判据口径。
+print()
+print('=' * 96)
+print('⑥ 自检：⑤ 结论表 vs 本次实测（漂移 ⇒ 退出码 1）')
+print('=' * 96)
+drift = []
+if hits != EXPECTED_RAW_TAP_HITS:
+    drift.append('写死坐标点击实测 %d 处，而 ⑤ 自述「仅剩 %d 处」⇒ 结论表过期'
+                 % (hits, EXPECTED_RAW_TAP_HITS))
+for _name, _ch, _why, _ok in VERDICT:
+    _m = re.match(r'^[A-Z][A-Z0-9_]{2,}', _name)
+    if not _m:
+        continue
+    _key = _m.group(0)
+    if not any(_key in _read(rel) for rel in PY_FILES):
+        drift.append('⑤ 点名了 %s，但扫描源里查不到 %s（常量被删/改名 ⇒ 结论表过期）'
+                     % (_name, _key))
+if drift:
+    for _d in drift:
+        print('✗ ' + _d)
+    print('⇒ 漂移 %d 项，退出码 1' % len(drift))
+    sys.exit(1)
+print('✓ 无漂移：%d 个源文件全在；写死坐标点击 %d 处；⑤ 点名的常量均在源里'
+      % (len(PY_FILES), hits))
+sys.exit(0)
